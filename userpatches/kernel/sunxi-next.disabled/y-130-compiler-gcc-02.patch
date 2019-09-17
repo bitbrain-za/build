@@ -1,0 +1,37 @@
+diff --git a/include/linux/compiler-gcc.h b/include/linux/compiler-gcc.h
+index d2fa16335..af7430387 100644
+--- a/include/linux/compiler-gcc.h
++++ b/include/linux/compiler-gcc.h
+@@ -75,6 +75,10 @@
+ #define __noretpoline __attribute__((indirect_branch("keep")))
+ #endif
+ 
++#define __used			__attribute__((__used__))
++#define __compiler_offsetof(a, b)					\
++	__builtin_offsetof(a, b)
++
+ #define __UNIQUE_ID(prefix) __PASTE(__PASTE(__UNIQUE_ID_, prefix), __COUNTER__)
+ 
+ #define __optimize(level)	__attribute__((__optimize__(level)))
+diff --git a/include/linux/compiler_types.h b/include/linux/compiler_types.h
+index 4809c5ee0..26ee47c6d 100644
+--- a/include/linux/compiler_types.h
++++ b/include/linux/compiler_types.h
+@@ -129,8 +129,6 @@ struct ftrace_likely_data {
+  */
+ #define __naked			__attribute__((__naked__)) notrace
+ 
+-#define __compiler_offsetof(a, b)	__builtin_offsetof(a, b)
+-
+ #define __inline__ inline
+ #define __inline   inline
+ 
+@@ -217,8 +215,6 @@ struct ftrace_likely_data {
+ #define __diag_error(compiler, version, option, comment) \
+ 	__diag_ ## compiler(version, error, option)
+ 
+-#define __compiler_offsetof(a, b)	__builtin_offsetof(a, b)
+-
+ /*
+  * Force always-inline if the user requests it so via the .config.
+  * GCC does not warn about unused static inline functions for

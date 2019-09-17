@@ -1,0 +1,30 @@
+diff --git a/drivers/gpu/drm/drm_probe_helper.c b/drivers/gpu/drm/drm_probe_helper.c
+index d18b7e27e..6fd08e04b 100644
+--- a/drivers/gpu/drm/drm_probe_helper.c
++++ b/drivers/gpu/drm/drm_probe_helper.c
+@@ -36,10 +36,10 @@
+ #include <drm/drm_client.h>
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_fourcc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_fb_helper.h>
+ #include <drm/drm_edid.h>
+ #include <drm/drm_modeset_helper_vtables.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include "drm_crtc_helper_internal.h"
+ 
+@@ -479,13 +479,6 @@ int drm_helper_probe_single_connector_modes(struct drm_connector *connector,
+ 
+ 	count = (*connector_funcs->get_modes)(connector);
+ 
+-	/*
+-	 * Fallback for when DDC probe failed in drm_get_edid() and thus skipped
+-	 * override/firmware EDID.
+-	 */
+-	if (count == 0 && connector->status == connector_status_connected)
+-		count = drm_add_override_edid_modes(connector);
+-
+ 	if (count == 0 && connector->status == connector_status_connected)
+ 		count = drm_add_modes_noedid(connector, 1024, 768);
+ 	count += drm_helper_probe_add_cmdline_mode(connector);

@@ -1,0 +1,496 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi b/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
+index 1685f1a6c..ae155057b 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
+@@ -84,43 +84,32 @@
+ 		compatible = "operating-points-v2";
+ 		opp-shared;
+ 
+-		opp-120000000 {
+-			opp-hz = /bits/ 64 <120000000>;
+-			opp-microvolt = <1040000>;
+-			clock-latency-ns = <244144>; /* 8 32k periods */
+-		};
+ 		opp-648000000 {
+ 			opp-hz = /bits/ 64 <648000000>;
+ 			opp-microvolt = <1040000>;
+ 			clock-latency-ns = <244144>; /* 8 32k periods */
+ 		};
++
+ 		opp-816000000 {
+ 			opp-hz = /bits/ 64 <816000000>;
+ 			opp-microvolt = <1100000>;
+ 			clock-latency-ns = <244144>; /* 8 32k periods */
+ 		};
+-		opp-912000000 {
+-			opp-hz = /bits/ 64 <912000000>;
+-			opp-microvolt = <1120000>;
+-			clock-latency-ns = <244144>; /* 8 32k periods */
+-		};
+-		opp-960000000 {
+-			opp-hz = /bits/ 64 <960000000>;
+-			opp-microvolt = <1160000>;
+-			clock-latency-ns = <244144>; /* 8 32k periods */
+-		};
++
+ 		opp-1008000000 {
+ 			opp-hz = /bits/ 64 <1008000000>;
+ 			opp-microvolt = <1200000>;
+ 			clock-latency-ns = <244144>; /* 8 32k periods */
+ 		};
+-		opp-1056000000 {
+-			opp-hz = /bits/ 64 <1056000000>;
+-			opp-microvolt = <1240000>;
+-			clock-latency-ns = <244144>; /* 8 32k periods */
+-		};
++
+ 		opp-1104000000 {
+ 			opp-hz = /bits/ 64 <1104000000>;
++			opp-microvolt = <1260000>;
++			clock-latency-ns = <244144>; /* 8 32k periods */
++		};
++
++		opp-1152000000 {
++			opp-hz = /bits/ 64 <1152000000>;
+ 			opp-microvolt = <1300000>;
+ 			clock-latency-ns = <244144>; /* 8 32k periods */
+ 		};
+@@ -131,48 +120,48 @@
+ 		#size-cells = <0>;
+ 
+ 		cpu0: cpu@0 {
+-			compatible = "arm,cortex-a53", "arm,armv8";
++			compatible = "arm,cortex-a53";
+ 			device_type = "cpu";
+ 			reg = <0>;
+ 			enable-method = "psci";
++			next-level-cache = <&L2>;
+ 			clocks = <&ccu CLK_CPUX>;
+ 			clock-names = "cpu";
+ 			operating-points-v2 = <&cpu0_opp_table>;
+ 			#cooling-cells = <2>;
+-			next-level-cache = <&L2>;
+ 		};
+ 
+ 		cpu1: cpu@1 {
+-			compatible = "arm,cortex-a53", "arm,armv8";
++			compatible = "arm,cortex-a53";
+ 			device_type = "cpu";
+ 			reg = <1>;
+ 			enable-method = "psci";
+-			operating-points-v2 = <&cpu0_opp_table>;
+ 			next-level-cache = <&L2>;
++			operating-points-v2 = <&cpu0_opp_table>;
+ 		};
+ 
+ 		cpu2: cpu@2 {
+-			compatible = "arm,cortex-a53", "arm,armv8";
++			compatible = "arm,cortex-a53";
+ 			device_type = "cpu";
+ 			reg = <2>;
+ 			enable-method = "psci";
+-			operating-points-v2 = <&cpu0_opp_table>;
+ 			next-level-cache = <&L2>;
++			operating-points-v2 = <&cpu0_opp_table>;
+ 		};
+ 
+ 		cpu3: cpu@3 {
+-			compatible = "arm,cortex-a53", "arm,armv8";
++			compatible = "arm,cortex-a53";
+ 			device_type = "cpu";
+ 			reg = <3>;
+ 			enable-method = "psci";
+-			operating-points-v2 = <&cpu0_opp_table>;
+ 			next-level-cache = <&L2>;
++			operating-points-v2 = <&cpu0_opp_table>;
+ 		};
+-		
++
+ 		L2: l2-cache {
+ 			compatible = "cache";
+ 			cache-level = <2>;
+- 		};
++		};
+ 	};
+ 
+ 	de: display-engine {
+@@ -193,15 +182,16 @@
+ 		#clock-cells = <0>;
+ 		compatible = "fixed-clock";
+ 		clock-frequency = <32768>;
+-		clock-output-names = "osc32k";
++		clock-output-names = "ext-osc32k";
+ 	};
+ 
+-	iosc: internal-osc-clk {
+-		#clock-cells = <0>;
+-		compatible = "fixed-clock";
+-		clock-frequency = <16000000>;
+-		clock-accuracy = <300000000>;
+-		clock-output-names = "iosc";
++	pmu {
++		compatible = "arm,cortex-a53-pmu";
++		interrupts = <GIC_SPI 152 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 153 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 154 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 155 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-affinity = <&cpu0>, <&cpu1>, <&cpu2>, <&cpu3>;
+ 	};
+ 
+ 	psci {
+@@ -215,17 +205,13 @@
+ 		simple-audio-card,format = "i2s";
+ 		simple-audio-card,frame-master = <&cpudai>;
+ 		simple-audio-card,bitclock-master = <&cpudai>;
+-		simple-audio-card,mclk-fs = <512>;
++		simple-audio-card,mclk-fs = <128>;
+ 		simple-audio-card,aux-devs = <&codec_analog>;
+ 		simple-audio-card,routing =
+ 				"Left DAC", "AIF1 Slot 0 Left",
+ 				"Right DAC", "AIF1 Slot 0 Right",
+ 				"AIF1 Slot 0 Left ADC", "Left ADC",
+-				"AIF1 Slot 0 Right ADC", "Right ADC",
+-				"Left ADC", "ADC",
+-				"Right ADC", "ADC",
+-				"MIC1", "Mic",
+-				"MIC2", "Headset Mic";
++				"AIF1 Slot 0 Right ADC", "Right ADC";
+ 		status = "disabled";
+ 
+ 		cpudai: simple-audio-card,cpu {
+@@ -255,74 +241,6 @@
+ 		compatible = "linux,spdif-dit";
+ 	};
+ 
+-	reserved-memory {
+-		#address-cells = <1>;
+-		#size-cells = <1>;
+-		ranges;
+-
+-		cma: linux,cma {
+-			compatible = "shared-dma-pool";
+-			reusable;
+-			size = <0x4000000>;
+-			alignment = <0x2000>;
+-			linux,cma-default;
+-		};
+-	};
+-
+-	thermal-zones {
+-		cpu_thermal: cpu0-thermal {
+-			/* milliseconds */
+-			polling-delay-passive = <250>;
+-			polling-delay = <1000>;
+-			thermal-sensors = <&ths 0>;
+-
+-			cooling-maps {
+-				map0 {
+-					trip = <&cpu_alert0>;
+-					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+-				};
+-				map1 {
+-					trip = <&cpu_alert1>;
+-					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+-				};
+-			};
+-			trips {
+-				cpu_alert0: cpu_alert0 {
+-					/* milliCelsius */
+-					temperature = <75000>;
+-					hysteresis = <2000>;
+-					type = "passive";
+-				};
+-
+-				cpu_alert1: cpu_alert1 {
+-					/* milliCelsius */
+-					temperature = <90000>;
+-					hysteresis = <2000>;
+-					type = "hot";
+-				};
+-
+-				cpu_crit: cpu_crit {
+-					/* milliCelsius */
+-					temperature = <110000>;
+-					hysteresis = <2000>;
+-					type = "critical";
+-				};
+-			};
+-		};
+-		gpu0_thermal: gpu0-thermal {
+-			/* milliseconds */
+-			polling-delay-passive = <250>;
+-			polling-delay = <1000>;
+-			thermal-sensors = <&ths 1>;
+-		};
+-		gpu1_thermal: gpu1-thermal {
+-			/* milliseconds */
+-			polling-delay-passive = <250>;
+-			polling-delay = <1000>;
+-			thermal-sensors = <&ths 2>;
+-		};
+-	};
+-
+ 	timer {
+ 		compatible = "arm,armv8-timer";
+ 		allwinner,erratum-unknown1;
+@@ -428,6 +346,20 @@
+ 					reg = <0x0000 0x28000>;
+ 				};
+ 			};
++
++			sram_c1: sram@1d00000 {
++				compatible = "mmio-sram";
++				reg = <0x01d00000 0x40000>;
++				#address-cells = <1>;
++				#size-cells = <1>;
++				ranges = <0 0x01d00000 0x40000>;
++
++				ve_sram: sram-section@0 {
++					compatible = "allwinner,sun50i-a64-sram-c1",
++						     "allwinner,sun4i-a10-sram-c1";
++					reg = <0x000000 0x40000>;
++				};
++			};
+ 		};
+ 
+ 		dma: dma-controller@1c02000 {
+@@ -471,6 +403,7 @@
+ 					#address-cells = <1>;
+ 					#size-cells = <0>;
+ 					reg = <1>;
++
+ 					tcon0_out_dsi: endpoint@1 {
+ 						reg = <1>;
+ 						remote-endpoint = <&dsi_in_tcon0>;
+@@ -515,6 +448,17 @@
+ 			};
+ 		};
+ 
++		video-codec@1c0e000 {
++			compatible = "allwinner,sun50i-a64-video-engine";
++			reg = <0x01c0e000 0x1000>;
++			clocks = <&ccu CLK_BUS_VE>, <&ccu CLK_VE>,
++				 <&ccu CLK_DRAM_VE>;
++			clock-names = "ahb", "mod", "ram";
++			resets = <&ccu RST_BUS_VE>;
++			interrupts = <GIC_SPI 58 IRQ_TYPE_LEVEL_HIGH>;
++			allwinner,sram = <&ve_sram 1>;
++		};
++
+ 		mmc0: mmc@1c0f000 {
+ 			compatible = "allwinner,sun50i-a64-mmc";
+ 			reg = <0x01c0f000 0x1000>;
+@@ -557,6 +501,11 @@
+ 			#size-cells = <0>;
+ 		};
+ 
++		sid: eeprom@1c14000 {
++			compatible = "allwinner,sun50i-a64-sid";
++			reg = <0x1c14000 0x400>;
++		};
++
+ 		usb_otg: usb@1c19000 {
+ 			compatible = "allwinner,sun8i-a33-musb";
+ 			reg = <0x01c19000 0x0400>;
+@@ -641,7 +590,7 @@
+ 		ccu: clock@1c20000 {
+ 			compatible = "allwinner,sun50i-a64-ccu";
+ 			reg = <0x01c20000 0x400>;
+-			clocks = <&osc24M>, <&osc32k>;
++			clocks = <&osc24M>, <&rtc 0>;
+ 			clock-names = "hosc", "losc";
+ 			#clock-cells = <1>;
+ 			#reset-cells = <1>;
+@@ -714,6 +663,13 @@
+ 				bias-pull-up;
+ 			};
+ 
++			mmc2_ds_pin: mmc2-ds-pin {
++				pins = "PC1";
++				function = "mmc2";
++				drive-strength = <30>;
++				bias-pull-up;
++			};
++
+ 			pwm_pin: pwm_pin {
+ 				pins = "PD22";
+ 				function = "pwm";
+@@ -749,7 +705,7 @@
+ 				function = "spi1";
+ 			};
+ 
+-			uart0_pins_a: uart0 {
++			uart0_pb_pins: uart0-pb-pins {
+ 				pins = "PB8", "PB9";
+ 				function = "uart0";
+ 			};
+@@ -1007,8 +963,7 @@
+ 		};
+ 
+ 		mali: gpu@1c40000 {
+-			compatible = "allwinner,sun50i-a64-mali",
+-				     "allwinner,sun7i-a20-mali", "arm,mali-400";
++			compatible = "allwinner,sun50i-a64-mali", "arm,mali-400";
+ 			reg = <0x01c40000 0x10000>;
+ 			interrupts = <GIC_SPI 97 IRQ_TYPE_LEVEL_HIGH>,
+ 				     <GIC_SPI 98 IRQ_TYPE_LEVEL_HIGH>,
+@@ -1027,10 +982,6 @@
+ 			clocks = <&ccu CLK_BUS_GPU>, <&ccu CLK_GPU>;
+ 			clock-names = "bus", "core";
+ 			resets = <&ccu RST_BUS_GPU>;
+-			memory-region = <&cma>;
+-
+-			assigned-clocks = <&ccu CLK_GPU>;
+-			assigned-clock-rates = <384000000>;
+ 		};
+ 
+ 		gic: interrupt-controller@1c81000 {
+@@ -1094,21 +1045,21 @@
+ 			#phy-cells = <0>;
+ 		};
+ 
+-		i2s2: i2s@1c22800 {
+-			#sound-dai-cells = <0>;
+-			compatible = "allwinner,sun8i-h3-i2s";
+-			reg = <0x01c22800 0x400>;
+-			interrupts = <GIC_SPI 15 IRQ_TYPE_LEVEL_HIGH>;
+-			clocks = <&ccu CLK_BUS_I2S2>, <&ccu CLK_I2S2>;
+-			clock-names = "apb", "mod";
+-			dmas = <&dma 27>;
+-			resets = <&ccu RST_BUS_I2S2>;
+-			dma-names = "tx";
++		csi: csi@1cb0000 {
++			compatible = "allwinner,sun50i-a64-csi";
++			reg = <0x01cb0000 0x1000>;
++			interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&ccu CLK_BUS_CSI>,
++				 <&ccu CLK_CSI_SCLK>,
++				 <&ccu CLK_DRAM_CSI>;
++			clock-names = "bus", "mod", "ram";
++			resets = <&ccu RST_BUS_CSI>;
++			pinctrl-names = "default";
++			pinctrl-0 = <&csi_pins>;
+ 			status = "disabled";
+ 		};
+ 
+ 		hdmi: hdmi@1ee0000 {
+-			#sound-dai-cells = <0>;
+ 			compatible = "allwinner,sun50i-a64-dw-hdmi",
+ 				     "allwinner,sun8i-a83t-dw-hdmi";
+ 			reg = <0x01ee0000 0x10000>;
+@@ -1142,7 +1093,7 @@
+ 		};
+ 
+ 		hdmi_phy: hdmi-phy@1ef0000 {
+-			compatible = "allwinner,sun8i-h3-hdmi-phy";
++			compatible = "allwinner,sun50i-a64-hdmi-phy";
+ 			reg = <0x01ef0000 0x10000>;
+ 			clocks = <&ccu CLK_BUS_HDMI>, <&ccu CLK_HDMI_DDC>,
+ 				 <&ccu 7>;
+@@ -1152,28 +1103,13 @@
+ 			#phy-cells = <0>;
+ 		};
+ 
+-		sound_hdmi: sound_hdmi {
+-			compatible = "simple-audio-card";
+-			simple-audio-card,format = "i2s";
+-			simple-audio-card,name = "allwinner,hdmi";
+-			simple-audio-card,mclk-fs = <256>;
+-			status = "disabled";
+-
+-			simple-audio-card,codec {
+-				sound-dai = <&hdmi>;
+-			};
+-
+-			simple-audio-card,cpu {
+-				sound-dai = <&i2s2>;
+-			};
+-		};
+-
+ 		rtc: rtc@1f00000 {
+-			compatible = "allwinner,sun6i-a31-rtc";
+-			reg = <0x01f00000 0x54>;
++			compatible = "allwinner,sun50i-a64-rtc",
++				     "allwinner,sun8i-h3-rtc";
++			reg = <0x01f00000 0x400>;
+ 			interrupts = <GIC_SPI 40 IRQ_TYPE_LEVEL_HIGH>,
+ 				     <GIC_SPI 41 IRQ_TYPE_LEVEL_HIGH>;
+-			clock-output-names = "rtc-osc32k", "rtc-osc32k-out";
++			clock-output-names = "osc32k", "osc32k-out", "iosc";
+ 			clocks = <&osc32k>;
+ 			#clock-cells = <1>;
+ 		};
+@@ -1190,8 +1126,7 @@
+ 		r_ccu: clock@1f01400 {
+ 			compatible = "allwinner,sun50i-a64-r-ccu";
+ 			reg = <0x01f01400 0x100>;
+-			clocks = <&osc24M>, <&osc32k>, <&iosc>,
+-				 <&ccu 11>;
++			clocks = <&osc24M>, <&rtc 0>, <&rtc 2>, <&ccu 11>;
+ 			clock-names = "hosc", "losc", "iosc", "pll-periph";
+ 			#clock-cells = <1>;
+ 			#reset-cells = <1>;
+@@ -1237,7 +1172,7 @@
+ 			interrupt-controller;
+ 			#interrupt-cells = <3>;
+ 
+-			r_i2c_pins_a: i2c-a {
++			r_i2c_pl89_pins: r-i2c-pl89-pins {
+ 				pins = "PL8", "PL9";
+ 				function = "s_i2c";
+ 			};
+@@ -1274,4 +1209,54 @@
+ 			interrupts = <GIC_SPI 25 IRQ_TYPE_LEVEL_HIGH>;
+ 		};
+ 	};
++
++	thermal-zones {
++		cpu-thermal {
++			/* milliseconds */
++			polling-delay-passive = <250>;
++			polling-delay = <1000>;
++			thermal-sensors = <&ths 0>;
++
++			cooling-maps {
++				map0 {
++					trip = <&cpu_alert0>;
++					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++				map1 {
++					trip = <&cpu_alert1>;
++					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++
++			trips {
++				cpu_alert0: cpu-alert0 {
++					/* milliCelsius */
++					temperature = <75000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
++				cpu_alert1: cpu-alert1 {
++					/* milliCelsius */
++					temperature = <90000>;
++					hysteresis = <2000>;
++					type = "hot";
++				};
++
++				cpu_crit: cpu-crit {
++					/* milliCelsius */
++					temperature = <105000>;
++					hysteresis = <2000>;
++					type = "critical";
++				};
++			};
++		};
++
++		gpu-thermal {
++			/* milliseconds */
++			polling-delay-passive = <250>;
++			polling-delay = <1000>;
++			thermal-sensors = <&ths 1>;
++		};
++	};
+ };

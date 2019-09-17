@@ -1,0 +1,3465 @@
+diff --git a/drivers/gpu/drm/rcar-du/Kconfig b/drivers/gpu/drm/rcar-du/Kconfig
+index edde8d4b8..7c36e2777 100644
+--- a/drivers/gpu/drm/rcar-du/Kconfig
++++ b/drivers/gpu/drm/rcar-du/Kconfig
+@@ -1,8 +1,10 @@
++# SPDX-License-Identifier: GPL-2.0
+ config DRM_RCAR_DU
+ 	tristate "DRM Support for R-Car Display Unit"
+ 	depends on DRM && OF
+ 	depends on ARM || ARM64
+ 	depends on ARCH_RENESAS || COMPILE_TEST
++	imply DRM_RCAR_LVDS
+ 	select DRM_KMS_HELPER
+ 	select DRM_KMS_CMA_HELPER
+ 	select DRM_GEM_CMA_HELPER
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_crtc.c b/drivers/gpu/drm/rcar-du/rcar_du_crtc.c
+index 15dc9caa1..4cdea14d5 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_crtc.c
++++ b/drivers/gpu/drm/rcar-du/rcar_du_crtc.c
+@@ -1,35 +1,34 @@
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * rcar_du_crtc.c  --  R-Car Display Unit CRTCs
+  *
+  * Copyright (C) 2013-2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #include <linux/clk.h>
+ #include <linux/mutex.h>
++#include <linux/platform_device.h>
+ #include <linux/sys_soc.h>
+ 
+-#include <drm/drmP.h>
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
++#include <drm/drm_device.h>
+ #include <drm/drm_fb_cma_helper.h>
+ #include <drm/drm_gem_cma_helper.h>
+ #include <drm/drm_plane_helper.h>
++#include <drm/drm_vblank.h>
+ 
+ #include "rcar_du_crtc.h"
+ #include "rcar_du_drv.h"
++#include "rcar_du_encoder.h"
+ #include "rcar_du_kms.h"
+ #include "rcar_du_plane.h"
+ #include "rcar_du_regs.h"
+ #include "rcar_du_vsp.h"
++#include "rcar_lvds.h"
+ 
+ static u32 rcar_du_crtc_read(struct rcar_du_crtc *rcrtc, u32 reg)
+ {
+@@ -61,46 +60,12 @@ static void rcar_du_crtc_set(struct rcar_du_crtc *rcrtc, u32 reg, u32 set)
+ 		      rcar_du_read(rcdu, rcrtc->mmio_offset + reg) | set);
+ }
+ 
+-static void rcar_du_crtc_clr_set(struct rcar_du_crtc *rcrtc, u32 reg,
+-				 u32 clr, u32 set)
++void rcar_du_crtc_dsysr_clr_set(struct rcar_du_crtc *rcrtc, u32 clr, u32 set)
+ {
+ 	struct rcar_du_device *rcdu = rcrtc->group->dev;
+-	u32 value = rcar_du_read(rcdu, rcrtc->mmio_offset + reg);
+-
+-	rcar_du_write(rcdu, rcrtc->mmio_offset + reg, (value & ~clr) | set);
+-}
+-
+-static int rcar_du_crtc_get(struct rcar_du_crtc *rcrtc)
+-{
+-	int ret;
+-
+-	ret = clk_prepare_enable(rcrtc->clock);
+-	if (ret < 0)
+-		return ret;
+-
+-	ret = clk_prepare_enable(rcrtc->extclock);
+-	if (ret < 0)
+-		goto error_clock;
+ 
+-	ret = rcar_du_group_get(rcrtc->group);
+-	if (ret < 0)
+-		goto error_group;
+-
+-	return 0;
+-
+-error_group:
+-	clk_disable_unprepare(rcrtc->extclock);
+-error_clock:
+-	clk_disable_unprepare(rcrtc->clock);
+-	return ret;
+-}
+-
+-static void rcar_du_crtc_put(struct rcar_du_crtc *rcrtc)
+-{
+-	rcar_du_group_put(rcrtc->group);
+-
+-	clk_disable_unprepare(rcrtc->extclock);
+-	clk_disable_unprepare(rcrtc->clock);
++	rcrtc->dsysr = (rcrtc->dsysr & ~clr) | set;
++	rcar_du_write(rcdu, rcrtc->mmio_offset + DSYSR, rcrtc->dsysr);
+ }
+ 
+ /* -----------------------------------------------------------------------------
+@@ -198,6 +163,47 @@ static void rcar_du_dpll_divider(struct rcar_du_crtc *rcrtc,
+ 		 best_diff);
+ }
+ 
++struct du_clk_params {
++	struct clk *clk;
++	unsigned long rate;
++	unsigned long diff;
++	u32 escr;
++};
++
++static void rcar_du_escr_divider(struct clk *clk, unsigned long target,
++				 u32 escr, struct du_clk_params *params)
++{
++	unsigned long rate;
++	unsigned long diff;
++	u32 div;
++
++	/*
++	 * If the target rate has already been achieved perfectly we can't do
++	 * better.
++	 */
++	if (params->diff == 0)
++		return;
++
++	/*
++	 * Compute the input clock rate and internal divisor values to obtain
++	 * the clock rate closest to the target frequency.
++	 */
++	rate = clk_round_rate(clk, target);
++	div = clamp(DIV_ROUND_CLOSEST(rate, target), 1UL, 64UL) - 1;
++	diff = abs(rate / (div + 1) - target);
++
++	/*
++	 * Store the parameters if the resulting frequency is better than any
++	 * previously calculated value.
++	 */
++	if (diff < params->diff) {
++		params->clk = clk;
++		params->rate = rate;
++		params->diff = diff;
++		params->escr = escr | div;
++	}
++}
++
+ static const struct soc_device_attribute rcar_du_r8a7795_es1[] = {
+ 	{ .soc_id = "r8a7795", .revision = "ES1.*" },
+ 	{ /* sentinel */ }
+@@ -208,89 +214,88 @@ static void rcar_du_crtc_set_display_timing(struct rcar_du_crtc *rcrtc)
+ 	const struct drm_display_mode *mode = &rcrtc->crtc.state->adjusted_mode;
+ 	struct rcar_du_device *rcdu = rcrtc->group->dev;
+ 	unsigned long mode_clock = mode->clock * 1000;
+-	unsigned long clk;
+-	u32 value;
++	u32 dsmr;
+ 	u32 escr;
+-	u32 div;
+-
+-	/*
+-	 * Compute the clock divisor and select the internal or external dot
+-	 * clock based on the requested frequency.
+-	 */
+-	clk = clk_get_rate(rcrtc->clock);
+-	div = DIV_ROUND_CLOSEST(clk, mode_clock);
+-	div = clamp(div, 1U, 64U) - 1;
+-	escr = div | ESCR_DCLKSEL_CLKS;
+ 
+-	if (rcrtc->extclock) {
++	if (rcdu->info->dpll_mask & (1 << rcrtc->index)) {
++		unsigned long target = mode_clock;
+ 		struct dpll_info dpll = { 0 };
+ 		unsigned long extclk;
+-		unsigned long extrate;
+-		unsigned long rate;
+-		u32 extdiv;
++		u32 dpllcr;
++		u32 div = 0;
+ 
+-		extclk = clk_get_rate(rcrtc->extclock);
+-		if (rcdu->info->dpll_ch & (1 << rcrtc->index)) {
+-			unsigned long target = mode_clock;
+-
+-			/*
+-			 * The H3 ES1.x exhibits dot clock duty cycle stability
+-			 * issues. We can work around them by configuring the
+-			 * DPLL to twice the desired frequency, coupled with a
+-			 * /2 post-divider. This isn't needed on other SoCs and
+-			 * breaks HDMI output on M3-W for a currently unknown
+-			 * reason, so restrict the workaround to H3 ES1.x.
+-			 */
+-			if (soc_device_match(rcar_du_r8a7795_es1))
+-				target *= 2;
++		/*
++		 * DU channels that have a display PLL can't use the internal
++		 * system clock, and have no internal clock divider.
++		 */
+ 
+-			rcar_du_dpll_divider(rcrtc, &dpll, extclk, target);
+-			extclk = dpll.output;
++		/*
++		 * The H3 ES1.x exhibits dot clock duty cycle stability issues.
++		 * We can work around them by configuring the DPLL to twice the
++		 * desired frequency, coupled with a /2 post-divider. Restrict
++		 * the workaround to H3 ES1.x as ES2.0 and all other SoCs have
++		 * no post-divider when a display PLL is present (as shown by
++		 * the workaround breaking HDMI output on M3-W during testing).
++		 */
++		if (soc_device_match(rcar_du_r8a7795_es1)) {
++			target *= 2;
++			div = 1;
+ 		}
+ 
+-		extdiv = DIV_ROUND_CLOSEST(extclk, mode_clock);
+-		extdiv = clamp(extdiv, 1U, 64U) - 1;
++		extclk = clk_get_rate(rcrtc->extclock);
++		rcar_du_dpll_divider(rcrtc, &dpll, extclk, target);
+ 
+-		rate = clk / (div + 1);
+-		extrate = extclk / (extdiv + 1);
++		dpllcr = DPLLCR_CODE | DPLLCR_CLKE
++		       | DPLLCR_FDPLL(dpll.fdpll)
++		       | DPLLCR_N(dpll.n) | DPLLCR_M(dpll.m)
++		       | DPLLCR_STBY;
+ 
+-		if (abs((long)extrate - (long)mode_clock) <
+-		    abs((long)rate - (long)mode_clock)) {
++		if (rcrtc->index == 1)
++			dpllcr |= DPLLCR_PLCS1
++			       |  DPLLCR_INCS_DOTCLKIN1;
++		else
++			dpllcr |= DPLLCR_PLCS0
++			       |  DPLLCR_INCS_DOTCLKIN0;
+ 
+-			if (rcdu->info->dpll_ch & (1 << rcrtc->index)) {
+-				u32 dpllcr = DPLLCR_CODE | DPLLCR_CLKE
+-					   | DPLLCR_FDPLL(dpll.fdpll)
+-					   | DPLLCR_N(dpll.n) | DPLLCR_M(dpll.m)
+-					   | DPLLCR_STBY;
++		rcar_du_group_write(rcrtc->group, DPLLCR, dpllcr);
+ 
+-				if (rcrtc->index == 1)
+-					dpllcr |= DPLLCR_PLCS1
+-					       |  DPLLCR_INCS_DOTCLKIN1;
+-				else
+-					dpllcr |= DPLLCR_PLCS0
+-					       |  DPLLCR_INCS_DOTCLKIN0;
++		escr = ESCR_DCLKSEL_DCLKIN | div;
++	} else if (rcdu->info->lvds_clk_mask & BIT(rcrtc->index)) {
++		/*
++		 * Use the LVDS PLL output as the dot clock when outputting to
++		 * the LVDS encoder on an SoC that supports this clock routing
++		 * option. We use the clock directly in that case, without any
++		 * additional divider.
++		 */
++		escr = ESCR_DCLKSEL_DCLKIN;
++	} else {
++		struct du_clk_params params = { .diff = (unsigned long)-1 };
+ 
+-				rcar_du_group_write(rcrtc->group, DPLLCR,
+-						    dpllcr);
+-			}
++		rcar_du_escr_divider(rcrtc->clock, mode_clock,
++				     ESCR_DCLKSEL_CLKS, &params);
++		if (rcrtc->extclock)
++			rcar_du_escr_divider(rcrtc->extclock, mode_clock,
++					     ESCR_DCLKSEL_DCLKIN, &params);
+ 
+-			escr = ESCR_DCLKSEL_DCLKIN | extdiv;
+-		}
++		dev_dbg(rcrtc->group->dev->dev,	"mode clock %lu %s rate %lu\n",
++			mode_clock, params.clk == rcrtc->clock ? "cpg" : "ext",
++			params.rate);
+ 
+-		dev_dbg(rcrtc->group->dev->dev,
+-			"mode clock %lu extrate %lu rate %lu ESCR 0x%08x\n",
+-			mode_clock, extrate, rate, escr);
++		clk_set_rate(params.clk, params.rate);
++		escr = params.escr;
+ 	}
+ 
+-	rcar_du_group_write(rcrtc->group, rcrtc->index % 2 ? ESCR2 : ESCR,
+-			    escr);
+-	rcar_du_group_write(rcrtc->group, rcrtc->index % 2 ? OTAR2 : OTAR, 0);
++	dev_dbg(rcrtc->group->dev->dev, "%s: ESCR 0x%08x\n", __func__, escr);
++
++	rcar_du_crtc_write(rcrtc, rcrtc->index % 2 ? ESCR13 : ESCR02, escr);
++	rcar_du_crtc_write(rcrtc, rcrtc->index % 2 ? OTAR13 : OTAR02, 0);
+ 
+ 	/* Signal polarities */
+-	value = ((mode->flags & DRM_MODE_FLAG_PVSYNC) ? DSMR_VSL : 0)
+-	      | ((mode->flags & DRM_MODE_FLAG_PHSYNC) ? DSMR_HSL : 0)
+-	      | DSMR_DIPM_DISP | DSMR_CSPM;
+-	rcar_du_crtc_write(rcrtc, DSMR, value);
++	dsmr = ((mode->flags & DRM_MODE_FLAG_PVSYNC) ? DSMR_VSL : 0)
++	     | ((mode->flags & DRM_MODE_FLAG_PHSYNC) ? DSMR_HSL : 0)
++	     | ((mode->flags & DRM_MODE_FLAG_INTERLACE) ? DSMR_ODEV : 0)
++	     | DSMR_DIPM_DISP | DSMR_CSPM;
++	rcar_du_crtc_write(rcrtc, DSMR, dsmr);
+ 
+ 	/* Display timings */
+ 	rcar_du_crtc_write(rcrtc, HDSR, mode->htotal - mode->hsync_start - 19);
+@@ -314,26 +319,6 @@ static void rcar_du_crtc_set_display_timing(struct rcar_du_crtc *rcrtc)
+ 	rcar_du_crtc_write(rcrtc, DEWR,  mode->hdisplay);
+ }
+ 
+-void rcar_du_crtc_route_output(struct drm_crtc *crtc,
+-			       enum rcar_du_output output)
+-{
+-	struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
+-	struct rcar_du_device *rcdu = rcrtc->group->dev;
+-
+-	/*
+-	 * Store the route from the CRTC output to the DU output. The DU will be
+-	 * configured when starting the CRTC.
+-	 */
+-	rcrtc->outputs |= BIT(output);
+-
+-	/*
+-	 * Store RGB routing to DPAD0, the hardware will be configured when
+-	 * starting the CRTC.
+-	 */
+-	if (output == RCAR_DU_OUTPUT_DPAD0)
+-		rcdu->dpad0_source = rcrtc->index;
+-}
+-
+ static unsigned int plane_zpos(struct rcar_du_plane *plane)
+ {
+ 	return plane->plane.state->normalized_zpos;
+@@ -515,6 +500,51 @@ static void rcar_du_crtc_setup(struct rcar_du_crtc *rcrtc)
+ 	drm_crtc_vblank_on(&rcrtc->crtc);
+ }
+ 
++static int rcar_du_crtc_get(struct rcar_du_crtc *rcrtc)
++{
++	int ret;
++
++	/*
++	 * Guard against double-get, as the function is called from both the
++	 * .atomic_enable() and .atomic_begin() handlers.
++	 */
++	if (rcrtc->initialized)
++		return 0;
++
++	ret = clk_prepare_enable(rcrtc->clock);
++	if (ret < 0)
++		return ret;
++
++	ret = clk_prepare_enable(rcrtc->extclock);
++	if (ret < 0)
++		goto error_clock;
++
++	ret = rcar_du_group_get(rcrtc->group);
++	if (ret < 0)
++		goto error_group;
++
++	rcar_du_crtc_setup(rcrtc);
++	rcrtc->initialized = true;
++
++	return 0;
++
++error_group:
++	clk_disable_unprepare(rcrtc->extclock);
++error_clock:
++	clk_disable_unprepare(rcrtc->clock);
++	return ret;
++}
++
++static void rcar_du_crtc_put(struct rcar_du_crtc *rcrtc)
++{
++	rcar_du_group_put(rcrtc->group);
++
++	clk_disable_unprepare(rcrtc->extclock);
++	clk_disable_unprepare(rcrtc->clock);
++
++	rcrtc->initialized = false;
++}
++
+ static void rcar_du_crtc_start(struct rcar_du_crtc *rcrtc)
+ {
+ 	bool interlaced;
+@@ -525,9 +555,9 @@ static void rcar_du_crtc_start(struct rcar_du_crtc *rcrtc)
+ 	 * actively driven).
+ 	 */
+ 	interlaced = rcrtc->crtc.mode.flags & DRM_MODE_FLAG_INTERLACE;
+-	rcar_du_crtc_clr_set(rcrtc, DSYSR, DSYSR_TVM_MASK | DSYSR_SCM_MASK,
+-			     (interlaced ? DSYSR_SCM_INT_VIDEO : 0) |
+-			     DSYSR_TVM_MASTER);
++	rcar_du_crtc_dsysr_clr_set(rcrtc, DSYSR_TVM_MASK | DSYSR_SCM_MASK,
++				   (interlaced ? DSYSR_SCM_INT_VIDEO : 0) |
++				   DSYSR_TVM_MASTER);
+ 
+ 	rcar_du_group_start_stop(rcrtc->group, true);
+ }
+@@ -593,8 +623,13 @@ static void rcar_du_crtc_stop(struct rcar_du_crtc *rcrtc)
+ 	/*
+ 	 * Select switch sync mode. This stops display operation and configures
+ 	 * the HSYNC and VSYNC signals as inputs.
++	 *
++	 * TODO: Find another way to stop the display for DUs that don't support
++	 * TVM sync.
+ 	 */
+-	rcar_du_crtc_clr_set(rcrtc, DSYSR, DSYSR_TVM_MASK, DSYSR_TVM_SWITCH);
++	if (rcar_du_has(rcrtc->group->dev, RCAR_DU_FEATURE_TVM_SYNC))
++		rcar_du_crtc_dsysr_clr_set(rcrtc, DSYSR_TVM_MASK,
++					   DSYSR_TVM_SWITCH);
+ 
+ 	rcar_du_group_start_stop(rcrtc->group, false);
+ }
+@@ -603,19 +638,47 @@ static void rcar_du_crtc_stop(struct rcar_du_crtc *rcrtc)
+  * CRTC Functions
+  */
+ 
++static int rcar_du_crtc_atomic_check(struct drm_crtc *crtc,
++				     struct drm_crtc_state *state)
++{
++	struct rcar_du_crtc_state *rstate = to_rcar_crtc_state(state);
++	struct drm_encoder *encoder;
++
++	/* Store the routes from the CRTC output to the DU outputs. */
++	rstate->outputs = 0;
++
++	drm_for_each_encoder_mask(encoder, crtc->dev, state->encoder_mask) {
++		struct rcar_du_encoder *renc = to_rcar_encoder(encoder);
++
++		rstate->outputs |= BIT(renc->output);
++	}
++
++	return 0;
++}
++
+ static void rcar_du_crtc_atomic_enable(struct drm_crtc *crtc,
+ 				       struct drm_crtc_state *old_state)
+ {
+ 	struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
++	struct rcar_du_crtc_state *rstate = to_rcar_crtc_state(crtc->state);
++	struct rcar_du_device *rcdu = rcrtc->group->dev;
++
++	rcar_du_crtc_get(rcrtc);
+ 
+ 	/*
+-	 * If the CRTC has already been setup by the .atomic_begin() handler we
+-	 * can skip the setup stage.
++	 * On D3/E3 the dot clock is provided by the LVDS encoder attached to
++	 * the DU channel. We need to enable its clock output explicitly if
++	 * the LVDS output is disabled.
+ 	 */
+-	if (!rcrtc->initialized) {
+-		rcar_du_crtc_get(rcrtc);
+-		rcar_du_crtc_setup(rcrtc);
+-		rcrtc->initialized = true;
++	if (rcdu->info->lvds_clk_mask & BIT(rcrtc->index) &&
++	    rstate->outputs == BIT(RCAR_DU_OUTPUT_DPAD0)) {
++		struct rcar_du_encoder *encoder =
++			rcdu->encoders[RCAR_DU_OUTPUT_LVDS0 + rcrtc->index];
++		const struct drm_display_mode *mode =
++			&crtc->state->adjusted_mode;
++
++		rcar_lvds_clk_enable(encoder->base.bridge,
++				     mode->clock * 1000);
+ 	}
+ 
+ 	rcar_du_crtc_start(rcrtc);
+@@ -625,19 +688,30 @@ static void rcar_du_crtc_atomic_disable(struct drm_crtc *crtc,
+ 					struct drm_crtc_state *old_state)
+ {
+ 	struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
++	struct rcar_du_crtc_state *rstate = to_rcar_crtc_state(old_state);
++	struct rcar_du_device *rcdu = rcrtc->group->dev;
+ 
+ 	rcar_du_crtc_stop(rcrtc);
+ 	rcar_du_crtc_put(rcrtc);
+ 
++	if (rcdu->info->lvds_clk_mask & BIT(rcrtc->index) &&
++	    rstate->outputs == BIT(RCAR_DU_OUTPUT_DPAD0)) {
++		struct rcar_du_encoder *encoder =
++			rcdu->encoders[RCAR_DU_OUTPUT_LVDS0 + rcrtc->index];
++
++		/*
++		 * Disable the LVDS clock output, see
++		 * rcar_du_crtc_atomic_enable().
++		 */
++		rcar_lvds_clk_disable(encoder->base.bridge);
++	}
++
+ 	spin_lock_irq(&crtc->dev->event_lock);
+ 	if (crtc->state->event) {
+ 		drm_crtc_send_vblank_event(crtc, crtc->state->event);
+ 		crtc->state->event = NULL;
+ 	}
+ 	spin_unlock_irq(&crtc->dev->event_lock);
+-
+-	rcrtc->initialized = false;
+-	rcrtc->outputs = 0;
+ }
+ 
+ static void rcar_du_crtc_atomic_begin(struct drm_crtc *crtc,
+@@ -649,14 +723,17 @@ static void rcar_du_crtc_atomic_begin(struct drm_crtc *crtc,
+ 
+ 	/*
+ 	 * If a mode set is in progress we can be called with the CRTC disabled.
+-	 * We then need to first setup the CRTC in order to configure planes.
+-	 * The .atomic_enable() handler will notice and skip the CRTC setup.
++	 * We thus need to first get and setup the CRTC in order to configure
++	 * planes. We must *not* put the CRTC in .atomic_flush(), as it must be
++	 * kept awake until the .atomic_enable() call that will follow. The get
++	 * operation in .atomic_enable() will in that case be a no-op, and the
++	 * CRTC will be put later in .atomic_disable().
++	 *
++	 * If a mode set is not in progress the CRTC is enabled, and the
++	 * following get call will be a no-op. There is thus no need to balance
++	 * it in .atomic_flush() either.
+ 	 */
+-	if (!rcrtc->initialized) {
+-		rcar_du_crtc_get(rcrtc);
+-		rcar_du_crtc_setup(rcrtc);
+-		rcrtc->initialized = true;
+-	}
++	rcar_du_crtc_get(rcrtc);
+ 
+ 	if (rcar_du_has(rcrtc->group->dev, RCAR_DU_FEATURE_VSP1_SOURCE))
+ 		rcar_du_vsp_atomic_begin(rcrtc);
+@@ -684,13 +761,99 @@ static void rcar_du_crtc_atomic_flush(struct drm_crtc *crtc,
+ 		rcar_du_vsp_atomic_flush(rcrtc);
+ }
+ 
++enum drm_mode_status rcar_du_crtc_mode_valid(struct drm_crtc *crtc,
++				   const struct drm_display_mode *mode)
++{
++	struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
++	struct rcar_du_device *rcdu = rcrtc->group->dev;
++	bool interlaced = mode->flags & DRM_MODE_FLAG_INTERLACE;
++	unsigned int vbp;
++
++	if (interlaced && !rcar_du_has(rcdu, RCAR_DU_FEATURE_INTERLACED))
++		return MODE_NO_INTERLACE;
++
++	/*
++	 * The hardware requires a minimum combined horizontal sync and back
++	 * porch of 20 pixels and a minimum vertical back porch of 3 lines.
++	 */
++	if (mode->htotal - mode->hsync_start < 20)
++		return MODE_HBLANK_NARROW;
++
++	vbp = (mode->vtotal - mode->vsync_end) / (interlaced ? 2 : 1);
++	if (vbp < 3)
++		return MODE_VBLANK_NARROW;
++
++	return MODE_OK;
++}
++
+ static const struct drm_crtc_helper_funcs crtc_helper_funcs = {
++	.atomic_check = rcar_du_crtc_atomic_check,
+ 	.atomic_begin = rcar_du_crtc_atomic_begin,
+ 	.atomic_flush = rcar_du_crtc_atomic_flush,
+ 	.atomic_enable = rcar_du_crtc_atomic_enable,
+ 	.atomic_disable = rcar_du_crtc_atomic_disable,
++	.mode_valid = rcar_du_crtc_mode_valid,
+ };
+ 
++static void rcar_du_crtc_crc_init(struct rcar_du_crtc *rcrtc)
++{
++	struct rcar_du_device *rcdu = rcrtc->group->dev;
++	const char **sources;
++	unsigned int count;
++	int i = -1;
++
++	/* CRC available only on Gen3 HW. */
++	if (rcdu->info->gen < 3)
++		return;
++
++	/* Reserve 1 for "auto" source. */
++	count = rcrtc->vsp->num_planes + 1;
++
++	sources = kmalloc_array(count, sizeof(*sources), GFP_KERNEL);
++	if (!sources)
++		return;
++
++	sources[0] = kstrdup("auto", GFP_KERNEL);
++	if (!sources[0])
++		goto error;
++
++	for (i = 0; i < rcrtc->vsp->num_planes; ++i) {
++		struct drm_plane *plane = &rcrtc->vsp->planes[i].plane;
++		char name[16];
++
++		sprintf(name, "plane%u", plane->base.id);
++		sources[i + 1] = kstrdup(name, GFP_KERNEL);
++		if (!sources[i + 1])
++			goto error;
++	}
++
++	rcrtc->sources = sources;
++	rcrtc->sources_count = count;
++	return;
++
++error:
++	while (i >= 0) {
++		kfree(sources[i]);
++		i--;
++	}
++	kfree(sources);
++}
++
++static void rcar_du_crtc_crc_cleanup(struct rcar_du_crtc *rcrtc)
++{
++	unsigned int i;
++
++	if (!rcrtc->sources)
++		return;
++
++	for (i = 0; i < rcrtc->sources_count; i++)
++		kfree(rcrtc->sources[i]);
++	kfree(rcrtc->sources);
++
++	rcrtc->sources = NULL;
++	rcrtc->sources_count = 0;
++}
++
+ static struct drm_crtc_state *
+ rcar_du_crtc_atomic_duplicate_state(struct drm_crtc *crtc)
+ {
+@@ -717,6 +880,15 @@ static void rcar_du_crtc_atomic_destroy_state(struct drm_crtc *crtc,
+ 	kfree(to_rcar_crtc_state(state));
+ }
+ 
++static void rcar_du_crtc_cleanup(struct drm_crtc *crtc)
++{
++	struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
++
++	rcar_du_crtc_crc_cleanup(rcrtc);
++
++	return drm_crtc_cleanup(crtc);
++}
++
+ static void rcar_du_crtc_reset(struct drm_crtc *crtc)
+ {
+ 	struct rcar_du_crtc_state *state;
+@@ -756,17 +928,11 @@ static void rcar_du_crtc_disable_vblank(struct drm_crtc *crtc)
+ 	rcrtc->vblank_enable = false;
+ }
+ 
+-static int rcar_du_crtc_set_crc_source(struct drm_crtc *crtc,
+-				       const char *source_name,
+-				       size_t *values_cnt)
++static int rcar_du_crtc_parse_crc_source(struct rcar_du_crtc *rcrtc,
++					 const char *source_name,
++					 enum vsp1_du_crc_source *source)
+ {
+-	struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
+-	struct drm_modeset_acquire_ctx ctx;
+-	struct drm_crtc_state *crtc_state;
+-	struct drm_atomic_state *state;
+-	enum vsp1_du_crc_source source;
+-	unsigned int index = 0;
+-	unsigned int i;
++	unsigned int index;
+ 	int ret;
+ 
+ 	/*
+@@ -774,31 +940,72 @@ static int rcar_du_crtc_set_crc_source(struct drm_crtc *crtc,
+ 	 * CRC on an input plane (%u is the plane ID), and "auto" to compute the
+ 	 * CRC on the composer (VSP) output.
+ 	 */
++
+ 	if (!source_name) {
+-		source = VSP1_DU_CRC_NONE;
++		*source = VSP1_DU_CRC_NONE;
++		return 0;
+ 	} else if (!strcmp(source_name, "auto")) {
+-		source = VSP1_DU_CRC_OUTPUT;
++		*source = VSP1_DU_CRC_OUTPUT;
++		return 0;
+ 	} else if (strstarts(source_name, "plane")) {
+-		source = VSP1_DU_CRC_PLANE;
++		unsigned int i;
++
++		*source = VSP1_DU_CRC_PLANE;
+ 
+ 		ret = kstrtouint(source_name + strlen("plane"), 10, &index);
+ 		if (ret < 0)
+ 			return ret;
+ 
+ 		for (i = 0; i < rcrtc->vsp->num_planes; ++i) {
+-			if (index == rcrtc->vsp->planes[i].plane.base.id) {
+-				index = i;
+-				break;
+-			}
++			if (index == rcrtc->vsp->planes[i].plane.base.id)
++				return i;
+ 		}
++	}
+ 
+-		if (i >= rcrtc->vsp->num_planes)
+-			return -EINVAL;
+-	} else {
++	return -EINVAL;
++}
++
++static int rcar_du_crtc_verify_crc_source(struct drm_crtc *crtc,
++					  const char *source_name,
++					  size_t *values_cnt)
++{
++	struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
++	enum vsp1_du_crc_source source;
++
++	if (rcar_du_crtc_parse_crc_source(rcrtc, source_name, &source) < 0) {
++		DRM_DEBUG_DRIVER("unknown source %s\n", source_name);
+ 		return -EINVAL;
+ 	}
+ 
+ 	*values_cnt = 1;
++	return 0;
++}
++
++const char *const *rcar_du_crtc_get_crc_sources(struct drm_crtc *crtc,
++						size_t *count)
++{
++	struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
++
++	*count = rcrtc->sources_count;
++	return rcrtc->sources;
++}
++
++static int rcar_du_crtc_set_crc_source(struct drm_crtc *crtc,
++				       const char *source_name)
++{
++	struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
++	struct drm_modeset_acquire_ctx ctx;
++	struct drm_crtc_state *crtc_state;
++	struct drm_atomic_state *state;
++	enum vsp1_du_crc_source source;
++	unsigned int index;
++	int ret;
++
++	ret = rcar_du_crtc_parse_crc_source(rcrtc, source_name, &source);
++	if (ret < 0)
++		return ret;
++
++	index = ret;
+ 
+ 	/* Perform an atomic commit to set the CRC source. */
+ 	drm_modeset_acquire_init(&ctx, 0);
+@@ -837,7 +1044,7 @@ static int rcar_du_crtc_set_crc_source(struct drm_crtc *crtc,
+ 	drm_modeset_drop_locks(&ctx);
+ 	drm_modeset_acquire_fini(&ctx);
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ static const struct drm_crtc_funcs crtc_funcs_gen2 = {
+@@ -853,7 +1060,7 @@ static const struct drm_crtc_funcs crtc_funcs_gen2 = {
+ 
+ static const struct drm_crtc_funcs crtc_funcs_gen3 = {
+ 	.reset = rcar_du_crtc_reset,
+-	.destroy = drm_crtc_cleanup,
++	.destroy = rcar_du_crtc_cleanup,
+ 	.set_config = drm_atomic_helper_set_config,
+ 	.page_flip = drm_atomic_helper_page_flip,
+ 	.atomic_duplicate_state = rcar_du_crtc_atomic_duplicate_state,
+@@ -861,6 +1068,8 @@ static const struct drm_crtc_funcs crtc_funcs_gen3 = {
+ 	.enable_vblank = rcar_du_crtc_enable_vblank,
+ 	.disable_vblank = rcar_du_crtc_disable_vblank,
+ 	.set_crc_source = rcar_du_crtc_set_crc_source,
++	.verify_crc_source = rcar_du_crtc_verify_crc_source,
++	.get_crc_sources = rcar_du_crtc_get_crc_sources,
+ };
+ 
+ /* -----------------------------------------------------------------------------
+@@ -946,9 +1155,16 @@ int rcar_du_crtc_create(struct rcar_du_group *rgrp, unsigned int swindex,
+ 	clk = devm_clk_get(rcdu->dev, clk_name);
+ 	if (!IS_ERR(clk)) {
+ 		rcrtc->extclock = clk;
+-	} else if (PTR_ERR(rcrtc->clock) == -EPROBE_DEFER) {
+-		dev_info(rcdu->dev, "can't get external clock %u\n", hwindex);
++	} else if (PTR_ERR(clk) == -EPROBE_DEFER) {
+ 		return -EPROBE_DEFER;
++	} else if (rcdu->info->dpll_mask & BIT(hwindex)) {
++		/*
++		 * DU channels that have a display PLL can't use the internal
++		 * system clock and thus require an external clock.
++		 */
++		ret = PTR_ERR(clk);
++		dev_err(rcdu->dev, "can't get dclkin.%u: %d\n", hwindex, ret);
++		return ret;
+ 	}
+ 
+ 	init_waitqueue_head(&rcrtc->flip_wait);
+@@ -958,6 +1174,7 @@ int rcar_du_crtc_create(struct rcar_du_group *rgrp, unsigned int swindex,
+ 	rcrtc->group = rgrp;
+ 	rcrtc->mmio_offset = mmio_offsets[hwindex];
+ 	rcrtc->index = hwindex;
++	rcrtc->dsysr = (rcrtc->index % 2 ? 0 : DSYSR_DRES) | DSYSR_TVM_TVSYNC;
+ 
+ 	if (rcar_du_has(rcdu, RCAR_DU_FEATURE_VSP1_SOURCE))
+ 		primary = &rcrtc->vsp->planes[rcrtc->vsp_pipe].plane;
+@@ -999,5 +1216,7 @@ int rcar_du_crtc_create(struct rcar_du_group *rgrp, unsigned int swindex,
+ 		return ret;
+ 	}
+ 
++	rcar_du_crtc_crc_init(rcrtc);
++
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_crtc.h b/drivers/gpu/drm/rcar-du/rcar_du_crtc.h
+index 7680cb263..bcb35b0b7 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_crtc.h
++++ b/drivers/gpu/drm/rcar-du/rcar_du_crtc.h
+@@ -1,14 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
+ /*
+  * rcar_du_crtc.h  --  R-Car Display Unit CRTCs
+  *
+  * Copyright (C) 2013-2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #ifndef __RCAR_DU_CRTC_H__
+@@ -18,7 +14,6 @@
+ #include <linux/spinlock.h>
+ #include <linux/wait.h>
+ 
+-#include <drm/drmP.h>
+ #include <drm/drm_crtc.h>
+ 
+ #include <media/vsp1.h>
+@@ -34,13 +29,13 @@ struct rcar_du_vsp;
+  * @mmio_offset: offset of the CRTC registers in the DU MMIO block
+  * @index: CRTC software and hardware index
+  * @initialized: whether the CRTC has been initialized and clocks enabled
++ * @dsysr: cached value of the DSYSR register
+  * @vblank_enable: whether vblank events are enabled on this CRTC
+  * @event: event to post when the pending page flip completes
+  * @flip_wait: wait queue used to signal page flip completion
+  * @vblank_lock: protects vblank_wait and vblank_count
+  * @vblank_wait: wait queue used to signal vertical blanking
+  * @vblank_count: number of vertical blanking interrupts to wait for
+- * @outputs: bitmask of the outputs (enum rcar_du_output) driven by this CRTC
+  * @group: CRTC group this CRTC belongs to
+  * @vsp: VSP feeding video to this CRTC
+  * @vsp_pipe: index of the VSP pipeline feeding video to this CRTC
+@@ -54,6 +49,8 @@ struct rcar_du_crtc {
+ 	unsigned int index;
+ 	bool initialized;
+ 
++	u32 dsysr;
++
+ 	bool vblank_enable;
+ 	struct drm_pending_vblank_event *event;
+ 	wait_queue_head_t flip_wait;
+@@ -62,11 +59,12 @@ struct rcar_du_crtc {
+ 	wait_queue_head_t vblank_wait;
+ 	unsigned int vblank_count;
+ 
+-	unsigned int outputs;
+-
+ 	struct rcar_du_group *group;
+ 	struct rcar_du_vsp *vsp;
+ 	unsigned int vsp_pipe;
++
++	const char *const *sources;
++	unsigned int sources_count;
+ };
+ 
+ #define to_rcar_crtc(c)	container_of(c, struct rcar_du_crtc, crtc)
+@@ -75,11 +73,13 @@ struct rcar_du_crtc {
+  * struct rcar_du_crtc_state - Driver-specific CRTC state
+  * @state: base DRM CRTC state
+  * @crc: CRC computation configuration
++ * @outputs: bitmask of the outputs (enum rcar_du_output) driven by this CRTC
+  */
+ struct rcar_du_crtc_state {
+ 	struct drm_crtc_state state;
+ 
+ 	struct vsp1_du_crc_config crc;
++	unsigned int outputs;
+ };
+ 
+ #define to_rcar_crtc_state(s) container_of(s, struct rcar_du_crtc_state, state)
+@@ -100,8 +100,8 @@ int rcar_du_crtc_create(struct rcar_du_group *rgrp, unsigned int swindex,
+ void rcar_du_crtc_suspend(struct rcar_du_crtc *rcrtc);
+ void rcar_du_crtc_resume(struct rcar_du_crtc *rcrtc);
+ 
+-void rcar_du_crtc_route_output(struct drm_crtc *crtc,
+-			       enum rcar_du_output output);
+ void rcar_du_crtc_finish_page_flip(struct rcar_du_crtc *rcrtc);
+ 
++void rcar_du_crtc_dsysr_clr_set(struct rcar_du_crtc *rcrtc, u32 clr, u32 set);
++
+ #endif /* __RCAR_DU_CRTC_H__ */
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_drv.c b/drivers/gpu/drm/rcar-du/rcar_du_drv.c
+index 02aee6cb0..75ab17af1 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_drv.c
++++ b/drivers/gpu/drm/rcar-du/rcar_du_drv.c
+@@ -1,14 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * rcar_du_drv.c  --  R-Car Display Unit DRM driver
+  *
+  * Copyright (C) 2013-2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #include <linux/clk.h>
+@@ -21,11 +17,12 @@
+ #include <linux/slab.h>
+ #include <linux/wait.h>
+ 
+-#include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_fb_cma_helper.h>
++#include <drm/drm_fb_helper.h>
++#include <drm/drm_drv.h>
+ #include <drm/drm_gem_cma_helper.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include "rcar_du_drv.h"
+ #include "rcar_du_kms.h"
+@@ -39,11 +36,12 @@
+ static const struct rcar_du_device_info rzg1_du_r8a7743_info = {
+ 	.gen = 2,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS,
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(1) | BIT(0),
+ 	.routes = {
+ 		/*
+-		 * R8A7743 has one RGB output and one LVDS output
++		 * R8A774[34] has one RGB output and one LVDS output
+ 		 */
+ 		[RCAR_DU_OUTPUT_DPAD0] = {
+ 			.possible_crtcs = BIT(1) | BIT(0),
+@@ -60,7 +58,8 @@ static const struct rcar_du_device_info rzg1_du_r8a7743_info = {
+ static const struct rcar_du_device_info rzg1_du_r8a7745_info = {
+ 	.gen = 2,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS,
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(1) | BIT(0),
+ 	.routes = {
+ 		/*
+@@ -77,9 +76,62 @@ static const struct rcar_du_device_info rzg1_du_r8a7745_info = {
+ 	},
+ };
+ 
+-static const struct rcar_du_device_info rcar_du_r8a7779_info = {
++static const struct rcar_du_device_info rzg1_du_r8a77470_info = {
+ 	.gen = 2,
+-	.features = 0,
++	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
++	.channels_mask = BIT(1) | BIT(0),
++	.routes = {
++		/*
++		 * R8A77470 has two RGB outputs, one LVDS output, and
++		 * one (currently unsupported) analog video output
++		 */
++		[RCAR_DU_OUTPUT_DPAD0] = {
++			.possible_crtcs = BIT(0),
++			.port = 0,
++		},
++		[RCAR_DU_OUTPUT_DPAD1] = {
++			.possible_crtcs = BIT(1),
++			.port = 1,
++		},
++		[RCAR_DU_OUTPUT_LVDS0] = {
++			.possible_crtcs = BIT(0) | BIT(1),
++			.port = 2,
++		},
++	},
++};
++
++static const struct rcar_du_device_info rcar_du_r8a774c0_info = {
++	.gen = 3,
++	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
++		  | RCAR_DU_FEATURE_VSP1_SOURCE,
++	.channels_mask = BIT(1) | BIT(0),
++	.routes = {
++		/*
++		 * R8A774C0 has one RGB output and two LVDS outputs
++		 */
++		[RCAR_DU_OUTPUT_DPAD0] = {
++			.possible_crtcs = BIT(0) | BIT(1),
++			.port = 0,
++		},
++		[RCAR_DU_OUTPUT_LVDS0] = {
++			.possible_crtcs = BIT(0),
++			.port = 1,
++		},
++		[RCAR_DU_OUTPUT_LVDS1] = {
++			.possible_crtcs = BIT(1),
++			.port = 2,
++		},
++	},
++	.num_lvds = 2,
++	.lvds_clk_mask =  BIT(1) | BIT(0),
++};
++
++static const struct rcar_du_device_info rcar_du_r8a7779_info = {
++	.gen = 1,
++	.features = RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(1) | BIT(0),
+ 	.routes = {
+ 		/*
+@@ -100,7 +152,8 @@ static const struct rcar_du_device_info rcar_du_r8a7779_info = {
+ static const struct rcar_du_device_info rcar_du_r8a7790_info = {
+ 	.gen = 2,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS,
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.quirks = RCAR_DU_QUIRK_ALIGN_128B,
+ 	.channels_mask = BIT(2) | BIT(1) | BIT(0),
+ 	.routes = {
+@@ -128,7 +181,8 @@ static const struct rcar_du_device_info rcar_du_r8a7790_info = {
+ static const struct rcar_du_device_info rcar_du_r8a7791_info = {
+ 	.gen = 2,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS,
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(1) | BIT(0),
+ 	.routes = {
+ 		/*
+@@ -150,7 +204,8 @@ static const struct rcar_du_device_info rcar_du_r8a7791_info = {
+ static const struct rcar_du_device_info rcar_du_r8a7792_info = {
+ 	.gen = 2,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS,
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(1) | BIT(0),
+ 	.routes = {
+ 		/* R8A7792 has two RGB outputs. */
+@@ -168,7 +223,8 @@ static const struct rcar_du_device_info rcar_du_r8a7792_info = {
+ static const struct rcar_du_device_info rcar_du_r8a7794_info = {
+ 	.gen = 2,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS,
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(1) | BIT(0),
+ 	.routes = {
+ 		/*
+@@ -189,8 +245,9 @@ static const struct rcar_du_device_info rcar_du_r8a7794_info = {
+ static const struct rcar_du_device_info rcar_du_r8a7795_info = {
+ 	.gen = 3,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS
+-		  | RCAR_DU_FEATURE_VSP1_SOURCE,
++		  | RCAR_DU_FEATURE_VSP1_SOURCE
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(3) | BIT(2) | BIT(1) | BIT(0),
+ 	.routes = {
+ 		/*
+@@ -215,14 +272,15 @@ static const struct rcar_du_device_info rcar_du_r8a7795_info = {
+ 		},
+ 	},
+ 	.num_lvds = 1,
+-	.dpll_ch =  BIT(2) | BIT(1),
++	.dpll_mask =  BIT(2) | BIT(1),
+ };
+ 
+ static const struct rcar_du_device_info rcar_du_r8a7796_info = {
+ 	.gen = 3,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS
+-		  | RCAR_DU_FEATURE_VSP1_SOURCE,
++		  | RCAR_DU_FEATURE_VSP1_SOURCE
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(2) | BIT(1) | BIT(0),
+ 	.routes = {
+ 		/*
+@@ -243,14 +301,15 @@ static const struct rcar_du_device_info rcar_du_r8a7796_info = {
+ 		},
+ 	},
+ 	.num_lvds = 1,
+-	.dpll_ch =  BIT(1),
++	.dpll_mask =  BIT(1),
+ };
+ 
+ static const struct rcar_du_device_info rcar_du_r8a77965_info = {
+ 	.gen = 3,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS
+-		  | RCAR_DU_FEATURE_VSP1_SOURCE,
++		  | RCAR_DU_FEATURE_VSP1_SOURCE
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(3) | BIT(1) | BIT(0),
+ 	.routes = {
+ 		/*
+@@ -271,14 +330,15 @@ static const struct rcar_du_device_info rcar_du_r8a77965_info = {
+ 		},
+ 	},
+ 	.num_lvds = 1,
+-	.dpll_ch =  BIT(1),
++	.dpll_mask =  BIT(1),
+ };
+ 
+ static const struct rcar_du_device_info rcar_du_r8a77970_info = {
+ 	.gen = 3,
+ 	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
+-		  | RCAR_DU_FEATURE_EXT_CTRL_REGS
+-		  | RCAR_DU_FEATURE_VSP1_SOURCE,
++		  | RCAR_DU_FEATURE_VSP1_SOURCE
++		  | RCAR_DU_FEATURE_INTERLACED
++		  | RCAR_DU_FEATURE_TVM_SYNC,
+ 	.channels_mask = BIT(0),
+ 	.routes = {
+ 		/* R8A77970 has one RGB output and one LVDS output. */
+@@ -294,9 +354,39 @@ static const struct rcar_du_device_info rcar_du_r8a77970_info = {
+ 	.num_lvds = 1,
+ };
+ 
++static const struct rcar_du_device_info rcar_du_r8a7799x_info = {
++	.gen = 3,
++	.features = RCAR_DU_FEATURE_CRTC_IRQ_CLOCK
++		  | RCAR_DU_FEATURE_VSP1_SOURCE,
++	.channels_mask = BIT(1) | BIT(0),
++	.routes = {
++		/*
++		 * R8A77990 and R8A77995 have one RGB output and two LVDS
++		 * outputs.
++		 */
++		[RCAR_DU_OUTPUT_DPAD0] = {
++			.possible_crtcs = BIT(0) | BIT(1),
++			.port = 0,
++		},
++		[RCAR_DU_OUTPUT_LVDS0] = {
++			.possible_crtcs = BIT(0),
++			.port = 1,
++		},
++		[RCAR_DU_OUTPUT_LVDS1] = {
++			.possible_crtcs = BIT(1),
++			.port = 2,
++		},
++	},
++	.num_lvds = 2,
++	.lvds_clk_mask =  BIT(1) | BIT(0),
++};
++
+ static const struct of_device_id rcar_du_of_table[] = {
+ 	{ .compatible = "renesas,du-r8a7743", .data = &rzg1_du_r8a7743_info },
++	{ .compatible = "renesas,du-r8a7744", .data = &rzg1_du_r8a7743_info },
+ 	{ .compatible = "renesas,du-r8a7745", .data = &rzg1_du_r8a7745_info },
++	{ .compatible = "renesas,du-r8a77470", .data = &rzg1_du_r8a77470_info },
++	{ .compatible = "renesas,du-r8a774c0", .data = &rcar_du_r8a774c0_info },
+ 	{ .compatible = "renesas,du-r8a7779", .data = &rcar_du_r8a7779_info },
+ 	{ .compatible = "renesas,du-r8a7790", .data = &rcar_du_r8a7790_info },
+ 	{ .compatible = "renesas,du-r8a7791", .data = &rcar_du_r8a7791_info },
+@@ -307,6 +397,8 @@ static const struct of_device_id rcar_du_of_table[] = {
+ 	{ .compatible = "renesas,du-r8a7796", .data = &rcar_du_r8a7796_info },
+ 	{ .compatible = "renesas,du-r8a77965", .data = &rcar_du_r8a77965_info },
+ 	{ .compatible = "renesas,du-r8a77970", .data = &rcar_du_r8a77970_info },
++	{ .compatible = "renesas,du-r8a77990", .data = &rcar_du_r8a7799x_info },
++	{ .compatible = "renesas,du-r8a77995", .data = &rcar_du_r8a7799x_info },
+ 	{ }
+ };
+ 
+@@ -316,19 +408,11 @@ MODULE_DEVICE_TABLE(of, rcar_du_of_table);
+  * DRM operations
+  */
+ 
+-static void rcar_du_lastclose(struct drm_device *dev)
+-{
+-	struct rcar_du_device *rcdu = dev->dev_private;
+-
+-	drm_fbdev_cma_restore_mode(rcdu->fbdev);
+-}
+-
+ DEFINE_DRM_GEM_CMA_FOPS(rcar_du_fops);
+ 
+ static struct drm_driver rcar_du_driver = {
+ 	.driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_PRIME
+ 				| DRIVER_ATOMIC,
+-	.lastclose		= rcar_du_lastclose,
+ 	.gem_free_object_unlocked = drm_gem_cma_free_object,
+ 	.gem_vm_ops		= &drm_gem_cma_vm_ops,
+ 	.prime_handle_to_fd	= drm_gem_prime_handle_to_fd,
+@@ -357,32 +441,15 @@ static struct drm_driver rcar_du_driver = {
+ static int rcar_du_pm_suspend(struct device *dev)
+ {
+ 	struct rcar_du_device *rcdu = dev_get_drvdata(dev);
+-	struct drm_atomic_state *state;
+-
+-	drm_kms_helper_poll_disable(rcdu->ddev);
+-	drm_fbdev_cma_set_suspend_unlocked(rcdu->fbdev, true);
+-
+-	state = drm_atomic_helper_suspend(rcdu->ddev);
+-	if (IS_ERR(state)) {
+-		drm_fbdev_cma_set_suspend_unlocked(rcdu->fbdev, false);
+-		drm_kms_helper_poll_enable(rcdu->ddev);
+-		return PTR_ERR(state);
+-	}
+-
+-	rcdu->suspend_state = state;
+ 
+-	return 0;
++	return drm_mode_config_helper_suspend(rcdu->ddev);
+ }
+ 
+ static int rcar_du_pm_resume(struct device *dev)
+ {
+ 	struct rcar_du_device *rcdu = dev_get_drvdata(dev);
+ 
+-	drm_atomic_helper_resume(rcdu->ddev, rcdu->suspend_state);
+-	drm_fbdev_cma_set_suspend_unlocked(rcdu->fbdev, false);
+-	drm_kms_helper_poll_enable(rcdu->ddev);
+-
+-	return 0;
++	return drm_mode_config_helper_resume(rcdu->ddev);
+ }
+ #endif
+ 
+@@ -401,13 +468,10 @@ static int rcar_du_remove(struct platform_device *pdev)
+ 
+ 	drm_dev_unregister(ddev);
+ 
+-	if (rcdu->fbdev)
+-		drm_fbdev_cma_fini(rcdu->fbdev);
+-
+ 	drm_kms_helper_poll_fini(ddev);
+ 	drm_mode_config_cleanup(ddev);
+ 
+-	drm_dev_unref(ddev);
++	drm_dev_put(ddev);
+ 
+ 	return 0;
+ }
+@@ -463,6 +527,8 @@ static int rcar_du_probe(struct platform_device *pdev)
+ 
+ 	DRM_INFO("Device %s probed\n", dev_name(&pdev->dev));
+ 
++	drm_fbdev_generic_setup(ddev, 32);
++
+ 	return 0;
+ 
+ error:
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_drv.h b/drivers/gpu/drm/rcar-du/rcar_du_drv.h
+index b3a25e8e0..1327cd0df 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_drv.h
++++ b/drivers/gpu/drm/rcar-du/rcar_du_drv.h
+@@ -1,14 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
+ /*
+  * rcar_du_drv.h  --  R-Car Display Unit DRM driver
+  *
+  * Copyright (C) 2013-2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #ifndef __RCAR_DU_DRV_H__
+@@ -24,14 +20,16 @@
+ struct clk;
+ struct device;
+ struct drm_device;
+-struct drm_fbdev_cma;
++struct drm_property;
+ struct rcar_du_device;
++struct rcar_du_encoder;
+ 
+-#define RCAR_DU_FEATURE_CRTC_IRQ_CLOCK	(1 << 0)	/* Per-CRTC IRQ and clock */
+-#define RCAR_DU_FEATURE_EXT_CTRL_REGS	(1 << 1)	/* Has extended control registers */
+-#define RCAR_DU_FEATURE_VSP1_SOURCE	(1 << 2)	/* Has inputs from VSP1 */
++#define RCAR_DU_FEATURE_CRTC_IRQ_CLOCK	BIT(0)	/* Per-CRTC IRQ and clock */
++#define RCAR_DU_FEATURE_VSP1_SOURCE	BIT(1)	/* Has inputs from VSP1 */
++#define RCAR_DU_FEATURE_INTERLACED	BIT(2)	/* HW supports interlaced */
++#define RCAR_DU_FEATURE_TVM_SYNC	BIT(3)	/* Has TV switch/sync modes */
+ 
+-#define RCAR_DU_QUIRK_ALIGN_128B	(1 << 0)	/* Align pitches to 128 bytes */
++#define RCAR_DU_QUIRK_ALIGN_128B	BIT(0)	/* Align pitches to 128 bytes */
+ 
+ /*
+  * struct rcar_du_output_routing - Output routing specification
+@@ -55,6 +53,8 @@ struct rcar_du_output_routing {
+  * @channels_mask: bit mask of available DU channels
+  * @routes: array of CRTC to output routes, indexed by output (RCAR_DU_OUTPUT_*)
+  * @num_lvds: number of internal LVDS encoders
++ * @dpll_mask: bit mask of DU channels equipped with a DPLL
++ * @lvds_clk_mask: bitmask of channels that can use the LVDS clock as dot clock
+  */
+ struct rcar_du_device_info {
+ 	unsigned int gen;
+@@ -63,7 +63,8 @@ struct rcar_du_device_info {
+ 	unsigned int channels_mask;
+ 	struct rcar_du_output_routing routes[RCAR_DU_OUTPUT_MAX];
+ 	unsigned int num_lvds;
+-	unsigned int dpll_ch;
++	unsigned int dpll_mask;
++	unsigned int lvds_clk_mask;
+ };
+ 
+ #define RCAR_DU_MAX_CRTCS		4
+@@ -77,12 +78,12 @@ struct rcar_du_device {
+ 	void __iomem *mmio;
+ 
+ 	struct drm_device *ddev;
+-	struct drm_fbdev_cma *fbdev;
+-	struct drm_atomic_state *suspend_state;
+ 
+ 	struct rcar_du_crtc crtcs[RCAR_DU_MAX_CRTCS];
+ 	unsigned int num_crtcs;
+ 
++	struct rcar_du_encoder *encoders[RCAR_DU_OUTPUT_MAX];
++
+ 	struct rcar_du_group groups[RCAR_DU_MAX_GROUPS];
+ 	struct rcar_du_vsp vsps[RCAR_DU_MAX_VSPS];
+ 
+@@ -91,6 +92,7 @@ struct rcar_du_device {
+ 	} props;
+ 
+ 	unsigned int dpad0_source;
++	unsigned int dpad1_source;
+ 	unsigned int vspd1_sink;
+ };
+ 
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_encoder.c b/drivers/gpu/drm/rcar-du/rcar_du_encoder.c
+index f9c933d3b..8ee4e762f 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_encoder.c
++++ b/drivers/gpu/drm/rcar-du/rcar_du_encoder.c
+@@ -1,21 +1,16 @@
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * rcar_du_encoder.c  --  R-Car Display Unit Encoder
+  *
+  * Copyright (C) 2013-2014 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #include <linux/export.h>
+ 
+-#include <drm/drmP.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
++#include <drm/drm_modeset_helper_vtables.h>
+ #include <drm/drm_panel.h>
+ 
+ #include "rcar_du_drv.h"
+@@ -26,17 +21,7 @@
+  * Encoder
+  */
+ 
+-static void rcar_du_encoder_mode_set(struct drm_encoder *encoder,
+-				     struct drm_crtc_state *crtc_state,
+-				     struct drm_connector_state *conn_state)
+-{
+-	struct rcar_du_encoder *renc = to_rcar_encoder(encoder);
+-
+-	rcar_du_crtc_route_output(crtc_state->crtc, renc->output);
+-}
+-
+ static const struct drm_encoder_helper_funcs encoder_helper_funcs = {
+-	.atomic_mode_set = rcar_du_encoder_mode_set,
+ };
+ 
+ static const struct drm_encoder_funcs encoder_funcs = {
+@@ -45,8 +30,7 @@ static const struct drm_encoder_funcs encoder_funcs = {
+ 
+ int rcar_du_encoder_init(struct rcar_du_device *rcdu,
+ 			 enum rcar_du_output output,
+-			 struct device_node *enc_node,
+-			 struct device_node *con_node)
++			 struct device_node *enc_node)
+ {
+ 	struct rcar_du_encoder *renc;
+ 	struct drm_encoder *encoder;
+@@ -57,6 +41,7 @@ int rcar_du_encoder_init(struct rcar_du_device *rcdu,
+ 	if (renc == NULL)
+ 		return -ENOMEM;
+ 
++	rcdu->encoders[output] = renc;
+ 	renc->output = output;
+ 	encoder = rcar_encoder_to_drm_encoder(renc);
+ 
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_encoder.h b/drivers/gpu/drm/rcar-du/rcar_du_encoder.h
+index 2d2abcacd..df9be4524 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_encoder.h
++++ b/drivers/gpu/drm/rcar-du/rcar_du_encoder.h
+@@ -1,23 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
+ /*
+  * rcar_du_encoder.h  --  R-Car Display Unit Encoder
+  *
+  * Copyright (C) 2013-2014 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #ifndef __RCAR_DU_ENCODER_H__
+ #define __RCAR_DU_ENCODER_H__
+ 
+-#include <drm/drm_crtc.h>
+ #include <drm/drm_encoder.h>
+ 
+-struct drm_panel;
+ struct rcar_du_device;
+ 
+ struct rcar_du_encoder {
+@@ -32,7 +26,6 @@ struct rcar_du_encoder {
+ 
+ int rcar_du_encoder_init(struct rcar_du_device *rcdu,
+ 			 enum rcar_du_output output,
+-			 struct device_node *enc_node,
+-			 struct device_node *con_node);
++			 struct device_node *enc_node);
+ 
+ #endif /* __RCAR_DU_ENCODER_H__ */
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_group.c b/drivers/gpu/drm/rcar-du/rcar_du_group.c
+index d539cb290..9eee47969 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_group.c
++++ b/drivers/gpu/drm/rcar-du/rcar_du_group.c
+@@ -1,14 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * rcar_du_group.c  --  R-Car Display Unit Channels Pair
+  *
+  * Copyright (C) 2013-2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ /*
+@@ -60,8 +56,6 @@ static void rcar_du_group_setup_pins(struct rcar_du_group *rgrp)
+ static void rcar_du_group_setup_defr8(struct rcar_du_group *rgrp)
+ {
+ 	struct rcar_du_device *rcdu = rgrp->dev;
+-	unsigned int possible_crtcs =
+-		rcdu->info->routes[RCAR_DU_OUTPUT_DPAD0].possible_crtcs;
+ 	u32 defr8 = DEFR8_CODE;
+ 
+ 	if (rcdu->info->gen < 3) {
+@@ -73,26 +67,71 @@ static void rcar_du_group_setup_defr8(struct rcar_du_group *rgrp)
+ 		 * DU instances that support it.
+ 		 */
+ 		if (rgrp->index == 0) {
+-			if (possible_crtcs > 1)
+-				defr8 |= DEFR8_DRGBS_DU(rcdu->dpad0_source);
++			defr8 |= DEFR8_DRGBS_DU(rcdu->dpad0_source);
+ 			if (rgrp->dev->vspd1_sink == 2)
+ 				defr8 |= DEFR8_VSCS;
+ 		}
+ 	} else {
+ 		/*
+-		 * On Gen3 VSPD routing can't be configured, but DPAD routing
+-		 * needs to be set despite having a single option available.
++		 * On Gen3 VSPD routing can't be configured, and DPAD routing
++		 * is set in the group corresponding to the DPAD output (no Gen3
++		 * SoC has multiple DPAD sources belonging to separate groups).
+ 		 */
+-		unsigned int rgb_crtc = ffs(possible_crtcs) - 1;
+-		struct rcar_du_crtc *crtc = &rcdu->crtcs[rgb_crtc];
+-
+-		if (crtc->index / 2 == rgrp->index)
+-			defr8 |= DEFR8_DRGBS_DU(crtc->index);
++		if (rgrp->index == rcdu->dpad0_source / 2)
++			defr8 |= DEFR8_DRGBS_DU(rcdu->dpad0_source);
+ 	}
+ 
+ 	rcar_du_group_write(rgrp, DEFR8, defr8);
+ }
+ 
++static void rcar_du_group_setup_didsr(struct rcar_du_group *rgrp)
++{
++	struct rcar_du_device *rcdu = rgrp->dev;
++	struct rcar_du_crtc *rcrtc;
++	unsigned int num_crtcs = 0;
++	unsigned int i;
++	u32 didsr;
++
++	/*
++	 * Configure input dot clock routing with a hardcoded configuration. If
++	 * the DU channel can use the LVDS encoder output clock as the dot
++	 * clock, do so. Otherwise route DU_DOTCLKINn signal to DUn.
++	 *
++	 * Each channel can then select between the dot clock configured here
++	 * and the clock provided by the CPG through the ESCR register.
++	 */
++	if (rcdu->info->gen < 3 && rgrp->index == 0) {
++		/*
++		 * On Gen2 a single register in the first group controls dot
++		 * clock selection for all channels.
++		 */
++		rcrtc = rcdu->crtcs;
++		num_crtcs = rcdu->num_crtcs;
++	} else if (rcdu->info->gen == 3 && rgrp->num_crtcs > 1) {
++		/*
++		 * On Gen3 dot clocks are setup through per-group registers,
++		 * only available when the group has two channels.
++		 */
++		rcrtc = &rcdu->crtcs[rgrp->index * 2];
++		num_crtcs = rgrp->num_crtcs;
++	}
++
++	if (!num_crtcs)
++		return;
++
++	didsr = DIDSR_CODE;
++	for (i = 0; i < num_crtcs; ++i, ++rcrtc) {
++		if (rcdu->info->lvds_clk_mask & BIT(rcrtc->index))
++			didsr |= DIDSR_LCDS_LVDS0(i)
++			      |  DIDSR_PDCS_CLK(i, 0);
++		else
++			didsr |= DIDSR_LCDS_DCLKIN(i)
++			      |  DIDSR_PDCS_CLK(i, 0);
++	}
++
++	rcar_du_group_write(rgrp, DIDSR, didsr);
++}
++
+ static void rcar_du_group_setup(struct rcar_du_group *rgrp)
+ {
+ 	struct rcar_du_device *rcdu = rgrp->dev;
+@@ -108,23 +147,9 @@ static void rcar_du_group_setup(struct rcar_du_group *rgrp)
+ 
+ 	rcar_du_group_setup_pins(rgrp);
+ 
+-	if (rcar_du_has(rgrp->dev, RCAR_DU_FEATURE_EXT_CTRL_REGS)) {
++	if (rcdu->info->gen >= 2) {
+ 		rcar_du_group_setup_defr8(rgrp);
+-
+-		/*
+-		 * Configure input dot clock routing. We currently hardcode the
+-		 * configuration to routing DOTCLKINn to DUn. Register fields
+-		 * depend on the DU generation, but the resulting value is 0 in
+-		 * all cases.
+-		 *
+-		 * On Gen2 a single register in the first group controls dot
+-		 * clock selection for all channels, while on Gen3 dot clocks
+-		 * are setup through per-group registers, only available when
+-		 * the group has two channels.
+-		 */
+-		if ((rcdu->info->gen < 3 && rgrp->index == 0) ||
+-		    (rcdu->info->gen == 3 &&  rgrp->num_crtcs > 1))
+-			rcar_du_group_write(rgrp, DIDSR, DIDSR_CODE);
++		rcar_du_group_setup_didsr(rgrp);
+ 	}
+ 
+ 	if (rcdu->info->gen >= 3)
+@@ -177,9 +202,25 @@ void rcar_du_group_put(struct rcar_du_group *rgrp)
+ 
+ static void __rcar_du_group_start_stop(struct rcar_du_group *rgrp, bool start)
+ {
+-	rcar_du_group_write(rgrp, DSYSR,
+-		(rcar_du_group_read(rgrp, DSYSR) & ~(DSYSR_DRES | DSYSR_DEN)) |
+-		(start ? DSYSR_DEN : DSYSR_DRES));
++	struct rcar_du_device *rcdu = rgrp->dev;
++
++	/*
++	 * Group start/stop is controlled by the DRES and DEN bits of DSYSR0
++	 * for the first group and DSYSR2 for the second group. On most DU
++	 * instances, this maps to the first CRTC of the group, and we can just
++	 * use rcar_du_crtc_dsysr_clr_set() to access the correct DSYSR. On
++	 * M3-N, however, DU2 doesn't exist, but DSYSR2 does. We thus need to
++	 * access the register directly using group read/write.
++	 */
++	if (rcdu->info->channels_mask & BIT(rgrp->index * 2)) {
++		struct rcar_du_crtc *rcrtc = &rgrp->dev->crtcs[rgrp->index * 2];
++
++		rcar_du_crtc_dsysr_clr_set(rcrtc, DSYSR_DRES | DSYSR_DEN,
++					   start ? DSYSR_DEN : DSYSR_DRES);
++	} else {
++		rcar_du_group_write(rgrp, DSYSR,
++				    start ? DSYSR_DEN : DSYSR_DRES);
++	}
+ }
+ 
+ void rcar_du_group_start_stop(struct rcar_du_group *rgrp, bool start)
+@@ -221,7 +262,7 @@ int rcar_du_set_dpad0_vsp1_routing(struct rcar_du_device *rcdu)
+ 	unsigned int index;
+ 	int ret;
+ 
+-	if (!rcar_du_has(rcdu, RCAR_DU_FEATURE_EXT_CTRL_REGS))
++	if (rcdu->info->gen < 2)
+ 		return 0;
+ 
+ 	/*
+@@ -246,9 +287,50 @@ int rcar_du_set_dpad0_vsp1_routing(struct rcar_du_device *rcdu)
+ 	return 0;
+ }
+ 
++static void rcar_du_group_set_dpad_levels(struct rcar_du_group *rgrp)
++{
++	static const u32 doflr_values[2] = {
++		DOFLR_HSYCFL0 | DOFLR_VSYCFL0 | DOFLR_ODDFL0 |
++		DOFLR_DISPFL0 | DOFLR_CDEFL0  | DOFLR_RGBFL0,
++		DOFLR_HSYCFL1 | DOFLR_VSYCFL1 | DOFLR_ODDFL1 |
++		DOFLR_DISPFL1 | DOFLR_CDEFL1  | DOFLR_RGBFL1,
++	};
++	static const u32 dpad_mask = BIT(RCAR_DU_OUTPUT_DPAD1)
++				   | BIT(RCAR_DU_OUTPUT_DPAD0);
++	struct rcar_du_device *rcdu = rgrp->dev;
++	u32 doflr = DOFLR_CODE;
++	unsigned int i;
++
++	if (rcdu->info->gen < 2)
++		return;
++
++	/*
++	 * The DPAD outputs can't be controlled directly. However, the parallel
++	 * output of the DU channels routed to DPAD can be set to fixed levels
++	 * through the DOFLR group register. Use this to turn the DPAD on or off
++	 * by driving fixed low-level signals at the output of any DU channel
++	 * not routed to a DPAD output. This doesn't affect the DU output
++	 * signals going to other outputs, such as the internal LVDS and HDMI
++	 * encoders.
++	 */
++
++	for (i = 0; i < rgrp->num_crtcs; ++i) {
++		struct rcar_du_crtc_state *rstate;
++		struct rcar_du_crtc *rcrtc;
++
++		rcrtc = &rcdu->crtcs[rgrp->index * 2 + i];
++		rstate = to_rcar_crtc_state(rcrtc->crtc.state);
++
++		if (!(rstate->outputs & dpad_mask))
++			doflr |= doflr_values[i];
++	}
++
++	rcar_du_group_write(rgrp, DOFLR, doflr);
++}
++
+ int rcar_du_group_set_routing(struct rcar_du_group *rgrp)
+ {
+-	struct rcar_du_crtc *crtc0 = &rgrp->dev->crtcs[rgrp->index * 2];
++	struct rcar_du_device *rcdu = rgrp->dev;
+ 	u32 dorcr = rcar_du_group_read(rgrp, DORCR);
+ 
+ 	dorcr &= ~(DORCR_PG2T | DORCR_DK2S | DORCR_PG2D_MASK);
+@@ -258,12 +340,14 @@ int rcar_du_group_set_routing(struct rcar_du_group *rgrp)
+ 	 * CRTC 1 in all other cases to avoid cloning CRTC 0 to DPAD0 and DPAD1
+ 	 * by default.
+ 	 */
+-	if (crtc0->outputs & BIT(RCAR_DU_OUTPUT_DPAD1))
++	if (rcdu->dpad1_source == rgrp->index * 2)
+ 		dorcr |= DORCR_PG2D_DS1;
+ 	else
+ 		dorcr |= DORCR_PG2T | DORCR_DK2S | DORCR_PG2D_DS2;
+ 
+ 	rcar_du_group_write(rgrp, DORCR, dorcr);
+ 
++	rcar_du_group_set_dpad_levels(rgrp);
++
+ 	return rcar_du_set_dpad0_vsp1_routing(rgrp->dev);
+ }
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_group.h b/drivers/gpu/drm/rcar-du/rcar_du_group.h
+index 42105aede..87950c1f6 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_group.h
++++ b/drivers/gpu/drm/rcar-du/rcar_du_group.h
+@@ -1,14 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
+ /*
+  * rcar_du_group.c  --  R-Car Display Unit Planes and CRTCs Group
+  *
+  * Copyright (C) 2013-2014 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #ifndef __RCAR_DU_GROUP_H__
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_kms.c b/drivers/gpu/drm/rcar-du/rcar_du_kms.c
+index 0386b454e..3b7d50a8f 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_kms.c
++++ b/drivers/gpu/drm/rcar-du/rcar_du_kms.c
+@@ -1,24 +1,21 @@
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * rcar_du_kms.c  --  R-Car Display Unit Mode Setting
+  *
+  * Copyright (C) 2013-2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+-#include <drm/drmP.h>
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
++#include <drm/drm_device.h>
+ #include <drm/drm_fb_cma_helper.h>
+ #include <drm/drm_gem_cma_helper.h>
+ #include <drm/drm_gem_framebuffer_helper.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_vblank.h>
+ 
+ #include <linux/of_graph.h>
+ #include <linux/wait.h>
+@@ -101,6 +98,38 @@ static const struct rcar_du_format_info rcar_du_format_infos[] = {
+ 	 * associated .pnmr or .edf settings.
+ 	 */
+ 	{
++		.fourcc = DRM_FORMAT_RGB332,
++		.bpp = 8,
++		.planes = 1,
++	}, {
++		.fourcc = DRM_FORMAT_ARGB4444,
++		.bpp = 16,
++		.planes = 1,
++	}, {
++		.fourcc = DRM_FORMAT_XRGB4444,
++		.bpp = 16,
++		.planes = 1,
++	}, {
++		.fourcc = DRM_FORMAT_BGR888,
++		.bpp = 24,
++		.planes = 1,
++	}, {
++		.fourcc = DRM_FORMAT_RGB888,
++		.bpp = 24,
++		.planes = 1,
++	}, {
++		.fourcc = DRM_FORMAT_BGRA8888,
++		.bpp = 32,
++		.planes = 1,
++	}, {
++		.fourcc = DRM_FORMAT_BGRX8888,
++		.bpp = 32,
++		.planes = 1,
++	}, {
++		.fourcc = DRM_FORMAT_YVYU,
++		.bpp = 16,
++		.planes = 1,
++	}, {
+ 		.fourcc = DRM_FORMAT_NV61,
+ 		.bpp = 16,
+ 		.planes = 2,
+@@ -176,7 +205,6 @@ rcar_du_fb_create(struct drm_device *dev, struct drm_file *file_priv,
+ 	const struct rcar_du_format_info *format;
+ 	unsigned int max_pitch;
+ 	unsigned int align;
+-	unsigned int bpp;
+ 	unsigned int i;
+ 
+ 	format = rcar_du_format_info(mode_cmd->pixel_format);
+@@ -186,20 +214,32 @@ rcar_du_fb_create(struct drm_device *dev, struct drm_file *file_priv,
+ 		return ERR_PTR(-EINVAL);
+ 	}
+ 
+-	/*
+-	 * The pitch and alignment constraints are expressed in pixels on the
+-	 * hardware side and in bytes in the DRM API.
+-	 */
+-	bpp = format->planes == 1 ? format->bpp / 8 : 1;
+-	max_pitch =  4096 * bpp;
++	if (rcdu->info->gen < 3) {
++		/*
++		 * On Gen2 the DU limits the pitch to 4095 pixels and requires
++		 * buffers to be aligned to a 16 pixels boundary (or 128 bytes
++		 * on some platforms).
++		 */
++		unsigned int bpp = format->planes == 1 ? format->bpp / 8 : 1;
+ 
+-	if (rcar_du_needs(rcdu, RCAR_DU_QUIRK_ALIGN_128B))
+-		align = 128;
+-	else
+-		align = 16 * bpp;
++		max_pitch = 4095 * bpp;
++
++		if (rcar_du_needs(rcdu, RCAR_DU_QUIRK_ALIGN_128B))
++			align = 128;
++		else
++			align = 16 * bpp;
++	} else {
++		/*
++		 * On Gen3 the memory interface is handled by the VSP that
++		 * limits the pitch to 65535 bytes and has no alignment
++		 * constraint.
++		 */
++		max_pitch = 65535;
++		align = 1;
++	}
+ 
+ 	if (mode_cmd->pitches[0] & (align - 1) ||
+-	    mode_cmd->pitches[0] >= max_pitch) {
++	    mode_cmd->pitches[0] > max_pitch) {
+ 		dev_dbg(dev->dev, "invalid pitch value %u\n",
+ 			mode_cmd->pitches[0]);
+ 		return ERR_PTR(-EINVAL);
+@@ -216,13 +256,6 @@ rcar_du_fb_create(struct drm_device *dev, struct drm_file *file_priv,
+ 	return drm_gem_fb_create(dev, file_priv, mode_cmd);
+ }
+ 
+-static void rcar_du_output_poll_changed(struct drm_device *dev)
+-{
+-	struct rcar_du_device *rcdu = dev->dev_private;
+-
+-	drm_fbdev_cma_hotplug_event(rcdu->fbdev);
+-}
+-
+ /* -----------------------------------------------------------------------------
+  * Atomic Check and Update
+  */
+@@ -246,6 +279,28 @@ static int rcar_du_atomic_check(struct drm_device *dev,
+ static void rcar_du_atomic_commit_tail(struct drm_atomic_state *old_state)
+ {
+ 	struct drm_device *dev = old_state->dev;
++	struct rcar_du_device *rcdu = dev->dev_private;
++	struct drm_crtc_state *crtc_state;
++	struct drm_crtc *crtc;
++	unsigned int i;
++
++	/*
++	 * Store RGB routing to DPAD0 and DPAD1, the hardware will be configured
++	 * when starting the CRTCs.
++	 */
++	rcdu->dpad1_source = -1;
++
++	for_each_new_crtc_in_state(old_state, crtc, crtc_state, i) {
++		struct rcar_du_crtc_state *rcrtc_state =
++			to_rcar_crtc_state(crtc_state);
++		struct rcar_du_crtc *rcrtc = to_rcar_crtc(crtc);
++
++		if (rcrtc_state->outputs & BIT(RCAR_DU_OUTPUT_DPAD0))
++			rcdu->dpad0_source = rcrtc->index;
++
++		if (rcrtc_state->outputs & BIT(RCAR_DU_OUTPUT_DPAD1))
++			rcdu->dpad1_source = rcrtc->index;
++	}
+ 
+ 	/* Apply the atomic update. */
+ 	drm_atomic_helper_commit_modeset_disables(dev, old_state);
+@@ -269,7 +324,6 @@ static const struct drm_mode_config_helper_funcs rcar_du_mode_config_helper = {
+ 
+ static const struct drm_mode_config_funcs rcar_du_mode_config_funcs = {
+ 	.fb_create = rcar_du_fb_create,
+-	.output_poll_changed = rcar_du_output_poll_changed,
+ 	.atomic_check = rcar_du_atomic_check,
+ 	.atomic_commit = drm_atomic_helper_commit,
+ };
+@@ -278,17 +332,10 @@ static int rcar_du_encoders_init_one(struct rcar_du_device *rcdu,
+ 				     enum rcar_du_output output,
+ 				     struct of_endpoint *ep)
+ {
+-	struct device_node *connector = NULL;
+-	struct device_node *encoder = NULL;
+-	struct device_node *ep_node = NULL;
+-	struct device_node *entity_ep_node;
+ 	struct device_node *entity;
+ 	int ret;
+ 
+-	/*
+-	 * Locate the connected entity and infer its type from the number of
+-	 * endpoints.
+-	 */
++	/* Locate the connected entity and initialize the encoder. */
+ 	entity = of_graph_get_remote_port_parent(ep->local_node);
+ 	if (!entity) {
+ 		dev_dbg(rcdu->dev, "unconnected endpoint %pOF, skipping\n",
+@@ -304,50 +351,13 @@ static int rcar_du_encoders_init_one(struct rcar_du_device *rcdu,
+ 		return -ENODEV;
+ 	}
+ 
+-	entity_ep_node = of_graph_get_remote_endpoint(ep->local_node);
+-
+-	for_each_endpoint_of_node(entity, ep_node) {
+-		if (ep_node == entity_ep_node)
+-			continue;
+-
+-		/*
+-		 * We've found one endpoint other than the input, this must
+-		 * be an encoder. Locate the connector.
+-		 */
+-		encoder = entity;
+-		connector = of_graph_get_remote_port_parent(ep_node);
+-		of_node_put(ep_node);
+-
+-		if (!connector) {
+-			dev_warn(rcdu->dev,
+-				 "no connector for encoder %pOF, skipping\n",
+-				 encoder);
+-			of_node_put(entity_ep_node);
+-			of_node_put(encoder);
+-			return -ENODEV;
+-		}
+-
+-		break;
+-	}
+-
+-	of_node_put(entity_ep_node);
+-
+-	if (!encoder) {
+-		dev_warn(rcdu->dev,
+-			 "no encoder found for endpoint %pOF, skipping\n",
+-			 ep->local_node);
+-		of_node_put(entity);
+-		return -ENODEV;
+-	}
+-
+-	ret = rcar_du_encoder_init(rcdu, output, encoder, connector);
++	ret = rcar_du_encoder_init(rcdu, output, entity);
+ 	if (ret && ret != -EPROBE_DEFER)
+ 		dev_warn(rcdu->dev,
+ 			 "failed to initialize encoder %pOF on output %u (%d), skipping\n",
+-			 encoder, output, ret);
++			 entity, output, ret);
+ 
+-	of_node_put(encoder);
+-	of_node_put(connector);
++	of_node_put(entity);
+ 
+ 	return ret;
+ }
+@@ -506,7 +516,7 @@ int rcar_du_modeset_init(struct rcar_du_device *rcdu)
+ 
+ 	struct drm_device *dev = rcdu->ddev;
+ 	struct drm_encoder *encoder;
+-	struct drm_fbdev_cma *fbdev;
++	unsigned int dpad0_sources;
+ 	unsigned int num_encoders;
+ 	unsigned int num_groups;
+ 	unsigned int swindex;
+@@ -544,7 +554,7 @@ int rcar_du_modeset_init(struct rcar_du_device *rcdu)
+ 	 * Initialize vertical blanking interrupts handling. Start with vblank
+ 	 * disabled for all CRTCs.
+ 	 */
+-	ret = drm_vblank_init(dev, (1 << rcdu->num_crtcs) - 1);
++	ret = drm_vblank_init(dev, rcdu->num_crtcs);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -629,21 +639,20 @@ int rcar_du_modeset_init(struct rcar_du_device *rcdu)
+ 		encoder->possible_clones = (1 << num_encoders) - 1;
+ 	}
+ 
++	/*
++	 * Initialize the default DPAD0 source to the index of the first DU
++	 * channel that can be connected to DPAD0. The exact value doesn't
++	 * matter as it should be overwritten by mode setting for the RGB
++	 * output, but it is nonetheless required to ensure a valid initial
++	 * hardware configuration on Gen3 where DU0 can't always be connected to
++	 * DPAD0.
++	 */
++	dpad0_sources = rcdu->info->routes[RCAR_DU_OUTPUT_DPAD0].possible_crtcs;
++	rcdu->dpad0_source = ffs(dpad0_sources) - 1;
++
+ 	drm_mode_config_reset(dev);
+ 
+ 	drm_kms_helper_poll_init(dev);
+ 
+-	if (dev->mode_config.num_connector) {
+-		fbdev = drm_fbdev_cma_init(dev, 32,
+-					   dev->mode_config.num_connector);
+-		if (IS_ERR(fbdev))
+-			return PTR_ERR(fbdev);
+-
+-		rcdu->fbdev = fbdev;
+-	} else {
+-		dev_info(rcdu->dev,
+-			 "no connector found, disabling fbdev emulation\n");
+-	}
+-
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_kms.h b/drivers/gpu/drm/rcar-du/rcar_du_kms.h
+index 07951d5fe..e171527ab 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_kms.h
++++ b/drivers/gpu/drm/rcar-du/rcar_du_kms.h
+@@ -1,14 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
+ /*
+  * rcar_du_kms.h  --  R-Car Display Unit Mode Setting
+  *
+  * Copyright (C) 2013-2014 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #ifndef __RCAR_DU_KMS_H__
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7790.dts b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7790.dts
+index 579753e04..8bee4e787 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7790.dts
++++ b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7790.dts
+@@ -7,70 +7,63 @@
+ 
+ /dts-v1/;
+ /plugin/;
+-/ {
+-	fragment@0 {
+-		target-path = "/";
+-		__overlay__ {
+-			#address-cells = <2>;
+-			#size-cells = <2>;
+ 
+-			lvds@feb90000 {
+-				compatible = "renesas,r8a7790-lvds";
+-				reg = <0 0xfeb90000 0 0x1c>;
++&{/} {
++	#address-cells = <2>;
++	#size-cells = <2>;
+ 
+-				ports {
+-					#address-cells = <1>;
+-					#size-cells = <0>;
++	lvds@feb90000 {
++		compatible = "renesas,r8a7790-lvds";
++		reg = <0 0xfeb90000 0 0x1c>;
+ 
+-					port@0 {
+-						reg = <0>;
+-						lvds0_input: endpoint {
+-						};
+-					};
+-					port@1 {
+-						reg = <1>;
+-						lvds0_out: endpoint {
+-						};
+-					};
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++				lvds0_input: endpoint {
+ 				};
+ 			};
+-
+-			lvds@feb94000 {
+-				compatible = "renesas,r8a7790-lvds";
+-				reg = <0 0xfeb94000 0 0x1c>;
+-
+-				ports {
+-					#address-cells = <1>;
+-					#size-cells = <0>;
+-
+-					port@0 {
+-						reg = <0>;
+-						lvds1_input: endpoint {
+-						};
+-					};
+-					port@1 {
+-						reg = <1>;
+-						lvds1_out: endpoint {
+-						};
+-					};
++			port@1 {
++				reg = <1>;
++				lvds0_out: endpoint {
+ 				};
+ 			};
+ 		};
+ 	};
+ 
+-	fragment@1 {
+-		target-path = "/display@feb00000/ports";
+-		__overlay__ {
+-			port@1 {
+-				endpoint {
+-					remote-endpoint = <&lvds0_input>;
++	lvds@feb94000 {
++		compatible = "renesas,r8a7790-lvds";
++		reg = <0 0xfeb94000 0 0x1c>;
++
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++				lvds1_input: endpoint {
+ 				};
+ 			};
+-			port@2 {
+-				endpoint {
+-					remote-endpoint = <&lvds1_input>;
++			port@1 {
++				reg = <1>;
++				lvds1_out: endpoint {
+ 				};
+ 			};
+ 		};
+ 	};
+ };
++
++&{/display@feb00000/ports} {
++	port@1 {
++		endpoint {
++			remote-endpoint = <&lvds0_input>;
++		};
++	};
++	port@2 {
++		endpoint {
++			remote-endpoint = <&lvds1_input>;
++		};
++	};
++};
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7791.dts b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7791.dts
+index cb9da1f39..92c050997 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7791.dts
++++ b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7791.dts
+@@ -7,44 +7,37 @@
+ 
+ /dts-v1/;
+ /plugin/;
+-/ {
+-	fragment@0 {
+-		target-path = "/";
+-		__overlay__ {
+-			#address-cells = <2>;
+-			#size-cells = <2>;
+ 
+-			lvds@feb90000 {
+-				compatible = "renesas,r8a7791-lvds";
+-				reg = <0 0xfeb90000 0 0x1c>;
++&{/} {
++	#address-cells = <2>;
++	#size-cells = <2>;
+ 
+-				ports {
+-					#address-cells = <1>;
+-					#size-cells = <0>;
++	lvds@feb90000 {
++		compatible = "renesas,r8a7791-lvds";
++		reg = <0 0xfeb90000 0 0x1c>;
+ 
+-					port@0 {
+-						reg = <0>;
+-						lvds0_input: endpoint {
+-						};
+-					};
+-					port@1 {
+-						reg = <1>;
+-						lvds0_out: endpoint {
+-						};
+-					};
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++				lvds0_input: endpoint {
+ 				};
+ 			};
+-		};
+-	};
+-
+-	fragment@1 {
+-		target-path = "/display@feb00000/ports";
+-		__overlay__ {
+ 			port@1 {
+-				endpoint {
+-					remote-endpoint = <&lvds0_input>;
++				reg = <1>;
++				lvds0_out: endpoint {
+ 				};
+ 			};
+ 		};
+ 	};
+ };
++
++&{/display@feb00000/ports} {
++	port@1 {
++		endpoint {
++			remote-endpoint = <&lvds0_input>;
++		};
++	};
++};
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7793.dts b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7793.dts
+index e7b8804dc..c8b93f21d 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7793.dts
++++ b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7793.dts
+@@ -7,44 +7,37 @@
+ 
+ /dts-v1/;
+ /plugin/;
+-/ {
+-	fragment@0 {
+-		target-path = "/";
+-		__overlay__ {
+-			#address-cells = <2>;
+-			#size-cells = <2>;
+ 
+-			lvds@feb90000 {
+-				compatible = "renesas,r8a7793-lvds";
+-				reg = <0 0xfeb90000 0 0x1c>;
++&{/} {
++	#address-cells = <2>;
++	#size-cells = <2>;
+ 
+-				ports {
+-					#address-cells = <1>;
+-					#size-cells = <0>;
++	lvds@feb90000 {
++		compatible = "renesas,r8a7793-lvds";
++		reg = <0 0xfeb90000 0 0x1c>;
+ 
+-					port@0 {
+-						reg = <0>;
+-						lvds0_input: endpoint {
+-						};
+-					};
+-					port@1 {
+-						reg = <1>;
+-						lvds0_out: endpoint {
+-						};
+-					};
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++				lvds0_input: endpoint {
+ 				};
+ 			};
+-		};
+-	};
+-
+-	fragment@1 {
+-		target-path = "/display@feb00000/ports";
+-		__overlay__ {
+ 			port@1 {
+-				endpoint {
+-					remote-endpoint = <&lvds0_input>;
++				reg = <1>;
++				lvds0_out: endpoint {
+ 				};
+ 			};
+ 		};
+ 	};
+ };
++
++&{/display@feb00000/ports} {
++	port@1 {
++		endpoint {
++			remote-endpoint = <&lvds0_input>;
++		};
++	};
++};
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7795.dts b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7795.dts
+index a1327443e..16c2d03cb 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7795.dts
++++ b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7795.dts
+@@ -7,44 +7,37 @@
+ 
+ /dts-v1/;
+ /plugin/;
+-/ {
+-	fragment@0 {
+-		target-path = "/soc";
+-		__overlay__ {
+-			#address-cells = <2>;
+-			#size-cells = <2>;
+ 
+-			lvds@feb90000 {
+-				compatible = "renesas,r8a7795-lvds";
+-				reg = <0 0xfeb90000 0 0x14>;
++&{/soc} {
++	#address-cells = <2>;
++	#size-cells = <2>;
+ 
+-				ports {
+-					#address-cells = <1>;
+-					#size-cells = <0>;
++	lvds@feb90000 {
++		compatible = "renesas,r8a7795-lvds";
++		reg = <0 0xfeb90000 0 0x14>;
+ 
+-					port@0 {
+-						reg = <0>;
+-						lvds0_input: endpoint {
+-						};
+-					};
+-					port@1 {
+-						reg = <1>;
+-						lvds0_out: endpoint {
+-						};
+-					};
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++				lvds0_input: endpoint {
++				};
++			};
++			port@1 {
++				reg = <1>;
++				lvds0_out: endpoint {
+ 				};
+ 			};
+ 		};
+ 	};
++};
+ 
+-	fragment@1 {
+-		target-path = "/soc/display@feb00000/ports";
+-		__overlay__ {
+-			port@3 {
+-				endpoint {
+-					remote-endpoint = <&lvds0_input>;
+-				};
+-			};
++&{/soc/display@feb00000/ports} {
++	port@3 {
++		endpoint {
++			remote-endpoint = <&lvds0_input>;
+ 		};
+ 	};
+ };
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7796.dts b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7796.dts
+index b23d6466c..680e923ac 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7796.dts
++++ b/drivers/gpu/drm/rcar-du/rcar_du_of_lvds_r8a7796.dts
+@@ -7,44 +7,37 @@
+ 
+ /dts-v1/;
+ /plugin/;
+-/ {
+-	fragment@0 {
+-		target-path = "/soc";
+-		__overlay__ {
+-			#address-cells = <2>;
+-			#size-cells = <2>;
+ 
+-			lvds@feb90000 {
+-				compatible = "renesas,r8a7796-lvds";
+-				reg = <0 0xfeb90000 0 0x14>;
++&{/soc} {
++	#address-cells = <2>;
++	#size-cells = <2>;
+ 
+-				ports {
+-					#address-cells = <1>;
+-					#size-cells = <0>;
++	lvds@feb90000 {
++		compatible = "renesas,r8a7796-lvds";
++		reg = <0 0xfeb90000 0 0x14>;
+ 
+-					port@0 {
+-						reg = <0>;
+-						lvds0_input: endpoint {
+-						};
+-					};
+-					port@1 {
+-						reg = <1>;
+-						lvds0_out: endpoint {
+-						};
+-					};
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++				lvds0_input: endpoint {
++				};
++			};
++			port@1 {
++				reg = <1>;
++				lvds0_out: endpoint {
+ 				};
+ 			};
+ 		};
+ 	};
++};
+ 
+-	fragment@1 {
+-		target-path = "/soc/display@feb00000/ports";
+-		__overlay__ {
+-			port@3 {
+-				endpoint {
+-					remote-endpoint = <&lvds0_input>;
+-				};
+-			};
++&{/soc/display@feb00000/ports} {
++	port@3 {
++		endpoint {
++			remote-endpoint = <&lvds0_input>;
+ 		};
+ 	};
+ };
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_plane.c b/drivers/gpu/drm/rcar-du/rcar_du_plane.c
+index c20f7ed48..c64300271 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_plane.c
++++ b/drivers/gpu/drm/rcar-du/rcar_du_plane.c
+@@ -1,22 +1,18 @@
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * rcar_du_plane.c  --  R-Car Display Unit Planes
+  *
+  * Copyright (C) 2013-2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+-#include <drm/drmP.h>
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
++#include <drm/drm_device.h>
+ #include <drm/drm_fb_cma_helper.h>
++#include <drm/drm_fourcc.h>
+ #include <drm/drm_gem_cma_helper.h>
+ #include <drm/drm_plane_helper.h>
+ 
+@@ -690,14 +686,12 @@ static void rcar_du_plane_reset(struct drm_plane *plane)
+ 	if (state == NULL)
+ 		return;
+ 
++	__drm_atomic_helper_plane_reset(plane, &state->state);
++
+ 	state->hwindex = -1;
+ 	state->source = RCAR_DU_PLANE_MEMORY;
+ 	state->colorkey = RCAR_DU_COLORKEY_NONE;
+ 	state->state.zpos = plane->type == DRM_PLANE_TYPE_PRIMARY ? 0 : 1;
+-
+-	plane->state = &state->state;
+-	plane->state->alpha = DRM_BLEND_ALPHA_OPAQUE;
+-	plane->state->plane = plane;
+ }
+ 
+ static int rcar_du_plane_atomic_set_property(struct drm_plane *plane,
+@@ -789,13 +783,14 @@ int rcar_du_planes_init(struct rcar_du_group *rgrp)
+ 		drm_plane_helper_add(&plane->plane,
+ 				     &rcar_du_plane_helper_funcs);
+ 
++		drm_plane_create_alpha_property(&plane->plane);
++
+ 		if (type == DRM_PLANE_TYPE_PRIMARY)
+ 			continue;
+ 
+ 		drm_object_attach_property(&plane->plane.base,
+ 					   rcdu->props.colorkey,
+ 					   RCAR_DU_COLORKEY_NONE);
+-		drm_plane_create_alpha_property(&plane->plane);
+ 		drm_plane_create_zpos_property(&plane->plane, 1, 1, 7);
+ 	}
+ 
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_plane.h b/drivers/gpu/drm/rcar-du/rcar_du_plane.h
+index 5c19c69e4..81bbf207a 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_plane.h
++++ b/drivers/gpu/drm/rcar-du/rcar_du_plane.h
+@@ -1,21 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
+ /*
+  * rcar_du_plane.h  --  R-Car Display Unit Planes
+  *
+  * Copyright (C) 2013-2014 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #ifndef __RCAR_DU_PLANE_H__
+ #define __RCAR_DU_PLANE_H__
+ 
+-#include <drm/drmP.h>
+-#include <drm/drm_crtc.h>
++#include <drm/drm_plane.h>
+ 
+ struct rcar_du_format_info;
+ struct rcar_du_group;
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_regs.h b/drivers/gpu/drm/rcar-du/rcar_du_regs.h
+index 9dfd220ce..bc87f080b 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_regs.h
++++ b/drivers/gpu/drm/rcar-du/rcar_du_regs.h
+@@ -1,13 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0 */
+ /*
+  * rcar_du_regs.h  --  R-Car Display Unit Registers Definitions
+  *
+  * Copyright (C) 2013-2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2
+- * as published by the Free Software Foundation.
+  */
+ 
+ #ifndef __RCAR_DU_REGS_H__
+@@ -492,8 +489,8 @@
+  * External Synchronization Control Registers
+  */
+ 
+-#define ESCR			0x10000
+-#define ESCR2			0x31000
++#define ESCR02			0x10000
++#define ESCR13			0x01000
+ #define ESCR_DCLKOINV		(1 << 25)
+ #define ESCR_DCLKSEL_DCLKIN	(0 << 20)
+ #define ESCR_DCLKSEL_CLKS	(1 << 20)
+@@ -504,8 +501,8 @@
+ #define ESCR_SYNCSEL_EXHSYNC	(3 << 8)
+ #define ESCR_FRQSEL_MASK	(0x3f << 0)
+ 
+-#define OTAR			0x10004
+-#define OTAR2			0x31004
++#define OTAR02			0x10004
++#define OTAR13			0x01004
+ 
+ /* -----------------------------------------------------------------------------
+  * Dual Display Output Control Registers
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_vsp.c b/drivers/gpu/drm/rcar-du/rcar_du_vsp.c
+index 72eebeda5..0878accbd 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_vsp.c
++++ b/drivers/gpu/drm/rcar-du/rcar_du_vsp.c
+@@ -1,24 +1,19 @@
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * rcar_du_vsp.h  --  R-Car Display Unit VSP-Based Compositor
+  *
+  * Copyright (C) 2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+-#include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_fb_cma_helper.h>
+ #include <drm/drm_gem_cma_helper.h>
+ #include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drm_plane_helper.h>
++#include <drm/drm_vblank.h>
+ 
+ #include <linux/bitops.h>
+ #include <linux/dma-mapping.h>
+@@ -52,6 +47,7 @@ void rcar_du_vsp_enable(struct rcar_du_crtc *crtc)
+ 	struct vsp1_du_lif_config cfg = {
+ 		.width = mode->hdisplay,
+ 		.height = mode->vdisplay,
++		.interlaced = mode->flags & DRM_MODE_FLAG_INTERLACE,
+ 		.callback = rcar_du_vsp_complete,
+ 		.callback_data = crtc,
+ 	};
+@@ -129,7 +125,6 @@ static const u32 formats_kms[] = {
+ 	DRM_FORMAT_ARGB8888,
+ 	DRM_FORMAT_XRGB8888,
+ 	DRM_FORMAT_UYVY,
+-	DRM_FORMAT_VYUY,
+ 	DRM_FORMAT_YUYV,
+ 	DRM_FORMAT_YVYU,
+ 	DRM_FORMAT_NV12,
+@@ -158,7 +153,6 @@ static const u32 formats_v4l2[] = {
+ 	V4L2_PIX_FMT_ABGR32,
+ 	V4L2_PIX_FMT_XBGR32,
+ 	V4L2_PIX_FMT_UYVY,
+-	V4L2_PIX_FMT_VYUY,
+ 	V4L2_PIX_FMT_YUYV,
+ 	V4L2_PIX_FMT_YVYU,
+ 	V4L2_PIX_FMT_NV12M,
+@@ -346,11 +340,8 @@ static void rcar_du_vsp_plane_reset(struct drm_plane *plane)
+ 	if (state == NULL)
+ 		return;
+ 
+-	state->state.alpha = DRM_BLEND_ALPHA_OPAQUE;
++	__drm_atomic_helper_plane_reset(plane, &state->state);
+ 	state->state.zpos = plane->type == DRM_PLANE_TYPE_PRIMARY ? 0 : 1;
+-
+-	plane->state = &state->state;
+-	plane->state->plane = plane;
+ }
+ 
+ static const struct drm_plane_funcs rcar_du_vsp_plane_funcs = {
+diff --git a/drivers/gpu/drm/rcar-du/rcar_du_vsp.h b/drivers/gpu/drm/rcar-du/rcar_du_vsp.h
+index 8a8a25c8c..db232037f 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_du_vsp.h
++++ b/drivers/gpu/drm/rcar-du/rcar_du_vsp.h
+@@ -1,21 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
+ /*
+  * rcar_du_vsp.h  --  R-Car Display Unit VSP-Based Compositor
+  *
+  * Copyright (C) 2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
+ #ifndef __RCAR_DU_VSP_H__
+ #define __RCAR_DU_VSP_H__
+ 
+-#include <drm/drmP.h>
+-#include <drm/drm_crtc.h>
++#include <drm/drm_plane.h>
+ 
+ struct rcar_du_format_info;
+ struct rcar_du_vsp;
+diff --git a/drivers/gpu/drm/rcar-du/rcar_dw_hdmi.c b/drivers/gpu/drm/rcar-du/rcar_dw_hdmi.c
+index 76210ae25..452461dc9 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_dw_hdmi.c
++++ b/drivers/gpu/drm/rcar-du/rcar_dw_hdmi.c
+@@ -1,20 +1,18 @@
++// SPDX-License-Identifier: GPL-2.0+
+ /*
+  * R-Car Gen3 HDMI PHY
+  *
+  * Copyright (C) 2016 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+  */
+ 
++#include <linux/mod_devicetable.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+ 
+ #include <drm/bridge/dw_hdmi.h>
++#include <drm/drm_modes.h>
+ 
+ #define RCAR_HDMI_PHY_OPMODE_PLLCFG	0x06	/* Mode of operation and PLL dividers */
+ #define RCAR_HDMI_PHY_PLLCURRGMPCTRL	0x10	/* PLL current and Gmp (conductance) */
+@@ -39,6 +37,20 @@ static const struct rcar_hdmi_phy_params rcar_hdmi_phy_params[] = {
+ 	{ ~0UL,      0x0000, 0x0000, 0x0000 },
+ };
+ 
++static enum drm_mode_status
++rcar_hdmi_mode_valid(struct drm_connector *connector,
++		     const struct drm_display_mode *mode)
++{
++	/*
++	 * The maximum supported clock frequency is 297 MHz, as shown in the PHY
++	 * parameters table.
++	 */
++	if (mode->clock > 297000)
++		return MODE_CLOCK_HIGH;
++
++	return MODE_OK;
++}
++
+ static int rcar_hdmi_phy_configure(struct dw_hdmi *hdmi,
+ 				   const struct dw_hdmi_plat_data *pdata,
+ 				   unsigned long mpixelclock)
+@@ -63,6 +75,7 @@ static int rcar_hdmi_phy_configure(struct dw_hdmi *hdmi,
+ }
+ 
+ static const struct dw_hdmi_plat_data rcar_dw_hdmi_plat_data = {
++	.mode_valid = rcar_hdmi_mode_valid,
+ 	.configure_phy	= rcar_hdmi_phy_configure,
+ };
+ 
+diff --git a/drivers/gpu/drm/rcar-du/rcar_lvds.c b/drivers/gpu/drm/rcar-du/rcar_lvds.c
+index 4c39de3f4..7ef97b2a6 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_lvds.c
++++ b/drivers/gpu/drm/rcar-du/rcar_lvds.c
+@@ -10,6 +10,7 @@
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+ #include <linux/io.h>
++#include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/of_device.h>
+ #include <linux/of_graph.h>
+@@ -19,11 +20,14 @@
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_bridge.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ 
++#include "rcar_lvds.h"
+ #include "rcar_lvds_regs.h"
+ 
++struct rcar_lvds;
++
+ /* Keep in sync with the LVDCR0.LVMD hardware register values. */
+ enum rcar_lvds_mode {
+ 	RCAR_LVDS_MODE_JEIDA = 0,
+@@ -31,14 +35,16 @@ enum rcar_lvds_mode {
+ 	RCAR_LVDS_MODE_VESA = 4,
+ };
+ 
+-#define RCAR_LVDS_QUIRK_LANES	(1 << 0)	/* LVDS lanes 1 and 3 inverted */
+-#define RCAR_LVDS_QUIRK_GEN2_PLLCR (1 << 1)	/* LVDPLLCR has gen2 layout */
+-#define RCAR_LVDS_QUIRK_GEN3_LVEN (1 << 2)	/* LVEN bit needs to be set */
+-						/* on R8A77970/R8A7799x */
++#define RCAR_LVDS_QUIRK_LANES		BIT(0)	/* LVDS lanes 1 and 3 inverted */
++#define RCAR_LVDS_QUIRK_GEN3_LVEN	BIT(1)	/* LVEN bit needs to be set on R8A77970/R8A7799x */
++#define RCAR_LVDS_QUIRK_PWD		BIT(2)	/* PWD bit available (all of Gen3 but E3) */
++#define RCAR_LVDS_QUIRK_EXT_PLL		BIT(3)	/* Has extended PLL */
++#define RCAR_LVDS_QUIRK_DUAL_LINK	BIT(4)	/* Supports dual-link operation */
+ 
+ struct rcar_lvds_device_info {
+ 	unsigned int gen;
+ 	unsigned int quirks;
++	void (*pll_setup)(struct rcar_lvds *lvds, unsigned int freq);
+ };
+ 
+ struct rcar_lvds {
+@@ -52,7 +58,11 @@ struct rcar_lvds {
+ 	struct drm_panel *panel;
+ 
+ 	void __iomem *mmio;
+-	struct clk *clock;
++	struct {
++		struct clk *mod;		/* CPG module clock */
++		struct clk *extal;		/* External clock */
++		struct clk *dotclkin[2];	/* External DU clocks */
++	} clocks;
+ 	bool enabled;
+ 
+ 	struct drm_display_mode display_mode;
+@@ -128,32 +138,271 @@ static const struct drm_connector_funcs rcar_lvds_conn_funcs = {
+ };
+ 
+ /* -----------------------------------------------------------------------------
+- * Bridge
++ * PLL Setup
+  */
+ 
+-static u32 rcar_lvds_lvdpllcr_gen2(unsigned int freq)
++static void rcar_lvds_pll_setup_gen2(struct rcar_lvds *lvds, unsigned int freq)
+ {
+-	if (freq < 39000)
+-		return LVDPLLCR_CEEN | LVDPLLCR_COSEL | LVDPLLCR_PLLDLYCNT_38M;
+-	else if (freq < 61000)
+-		return LVDPLLCR_CEEN | LVDPLLCR_COSEL | LVDPLLCR_PLLDLYCNT_60M;
+-	else if (freq < 121000)
+-		return LVDPLLCR_CEEN | LVDPLLCR_COSEL | LVDPLLCR_PLLDLYCNT_121M;
++	u32 val;
++
++	if (freq < 39000000)
++		val = LVDPLLCR_CEEN | LVDPLLCR_COSEL | LVDPLLCR_PLLDLYCNT_38M;
++	else if (freq < 61000000)
++		val = LVDPLLCR_CEEN | LVDPLLCR_COSEL | LVDPLLCR_PLLDLYCNT_60M;
++	else if (freq < 121000000)
++		val = LVDPLLCR_CEEN | LVDPLLCR_COSEL | LVDPLLCR_PLLDLYCNT_121M;
+ 	else
+-		return LVDPLLCR_PLLDLYCNT_150M;
++		val = LVDPLLCR_PLLDLYCNT_150M;
++
++	rcar_lvds_write(lvds, LVDPLLCR, val);
++}
++
++static void rcar_lvds_pll_setup_gen3(struct rcar_lvds *lvds, unsigned int freq)
++{
++	u32 val;
++
++	if (freq < 42000000)
++		val = LVDPLLCR_PLLDIVCNT_42M;
++	else if (freq < 85000000)
++		val = LVDPLLCR_PLLDIVCNT_85M;
++	else if (freq < 128000000)
++		val = LVDPLLCR_PLLDIVCNT_128M;
++	else
++		val = LVDPLLCR_PLLDIVCNT_148M;
++
++	rcar_lvds_write(lvds, LVDPLLCR, val);
++}
++
++struct pll_info {
++	unsigned long diff;
++	unsigned int pll_m;
++	unsigned int pll_n;
++	unsigned int pll_e;
++	unsigned int div;
++	u32 clksel;
++};
++
++static void rcar_lvds_d3_e3_pll_calc(struct rcar_lvds *lvds, struct clk *clk,
++				     unsigned long target, struct pll_info *pll,
++				     u32 clksel, bool dot_clock_only)
++{
++	unsigned int div7 = dot_clock_only ? 1 : 7;
++	unsigned long output;
++	unsigned long fin;
++	unsigned int m_min;
++	unsigned int m_max;
++	unsigned int m;
++	int error;
++
++	if (!clk)
++		return;
++
++	/*
++	 * The LVDS PLL is made of a pre-divider and a multiplier (strangely
++	 * enough called M and N respectively), followed by a post-divider E.
++	 *
++	 *         ,-----.         ,-----.     ,-----.         ,-----.
++	 * Fin --> | 1/M | -Fpdf-> | PFD | --> | VCO | -Fvco-> | 1/E | --> Fout
++	 *         `-----'     ,-> |     |     `-----'   |     `-----'
++	 *                     |   `-----'               |
++	 *                     |         ,-----.         |
++	 *                     `-------- | 1/N | <-------'
++	 *                               `-----'
++	 *
++	 * The clock output by the PLL is then further divided by a programmable
++	 * divider DIV to achieve the desired target frequency. Finally, an
++	 * optional fixed /7 divider is used to convert the bit clock to a pixel
++	 * clock (as LVDS transmits 7 bits per lane per clock sample).
++	 *
++	 *          ,-------.     ,-----.     |\
++	 * Fout --> | 1/DIV | --> | 1/7 | --> | |
++	 *          `-------'  |  `-----'     | | --> dot clock
++	 *                     `------------> | |
++	 *                                    |/
++	 *
++	 * The /7 divider is optional, it is enabled when the LVDS PLL is used
++	 * to drive the LVDS encoder, and disabled when  used to generate a dot
++	 * clock for the DU RGB output, without using the LVDS encoder.
++	 *
++	 * The PLL allowed input frequency range is 12 MHz to 192 MHz.
++	 */
++
++	fin = clk_get_rate(clk);
++	if (fin < 12000000 || fin > 192000000)
++		return;
++
++	/*
++	 * The comparison frequency range is 12 MHz to 24 MHz, which limits the
++	 * allowed values for the pre-divider M (normal range 1-8).
++	 *
++	 * Fpfd = Fin / M
++	 */
++	m_min = max_t(unsigned int, 1, DIV_ROUND_UP(fin, 24000000));
++	m_max = min_t(unsigned int, 8, fin / 12000000);
++
++	for (m = m_min; m <= m_max; ++m) {
++		unsigned long fpfd;
++		unsigned int n_min;
++		unsigned int n_max;
++		unsigned int n;
++
++		/*
++		 * The VCO operating range is 900 Mhz to 1800 MHz, which limits
++		 * the allowed values for the multiplier N (normal range
++		 * 60-120).
++		 *
++		 * Fvco = Fin * N / M
++		 */
++		fpfd = fin / m;
++		n_min = max_t(unsigned int, 60, DIV_ROUND_UP(900000000, fpfd));
++		n_max = min_t(unsigned int, 120, 1800000000 / fpfd);
++
++		for (n = n_min; n < n_max; ++n) {
++			unsigned long fvco;
++			unsigned int e_min;
++			unsigned int e;
++
++			/*
++			 * The output frequency is limited to 1039.5 MHz,
++			 * limiting again the allowed values for the
++			 * post-divider E (normal value 1, 2 or 4).
++			 *
++			 * Fout = Fvco / E
++			 */
++			fvco = fpfd * n;
++			e_min = fvco > 1039500000 ? 1 : 0;
++
++			for (e = e_min; e < 3; ++e) {
++				unsigned long fout;
++				unsigned long diff;
++				unsigned int div;
++
++				/*
++				 * Finally we have a programable divider after
++				 * the PLL, followed by a an optional fixed /7
++				 * divider.
++				 */
++				fout = fvco / (1 << e) / div7;
++				div = DIV_ROUND_CLOSEST(fout, target);
++				diff = abs(fout / div - target);
++
++				if (diff < pll->diff) {
++					pll->diff = diff;
++					pll->pll_m = m;
++					pll->pll_n = n;
++					pll->pll_e = e;
++					pll->div = div;
++					pll->clksel = clksel;
++
++					if (diff == 0)
++						goto done;
++				}
++			}
++		}
++	}
++
++done:
++	output = fin * pll->pll_n / pll->pll_m / (1 << pll->pll_e)
++	       / div7 / pll->div;
++	error = (long)(output - target) * 10000 / (long)target;
++
++	dev_dbg(lvds->dev,
++		"%pC %lu Hz -> Fout %lu Hz (target %lu Hz, error %d.%02u%%), PLL M/N/E/DIV %u/%u/%u/%u\n",
++		clk, fin, output, target, error / 100,
++		error < 0 ? -error % 100 : error % 100,
++		pll->pll_m, pll->pll_n, pll->pll_e, pll->div);
+ }
+ 
+-static u32 rcar_lvds_lvdpllcr_gen3(unsigned int freq)
++static void __rcar_lvds_pll_setup_d3_e3(struct rcar_lvds *lvds,
++					unsigned int freq, bool dot_clock_only)
+ {
+-	if (freq < 42000)
+-		return LVDPLLCR_PLLDIVCNT_42M;
+-	else if (freq < 85000)
+-		return LVDPLLCR_PLLDIVCNT_85M;
+-	else if (freq < 128000)
+-		return LVDPLLCR_PLLDIVCNT_128M;
++	struct pll_info pll = { .diff = (unsigned long)-1 };
++	u32 lvdpllcr;
++
++	rcar_lvds_d3_e3_pll_calc(lvds, lvds->clocks.dotclkin[0], freq, &pll,
++				 LVDPLLCR_CKSEL_DU_DOTCLKIN(0), dot_clock_only);
++	rcar_lvds_d3_e3_pll_calc(lvds, lvds->clocks.dotclkin[1], freq, &pll,
++				 LVDPLLCR_CKSEL_DU_DOTCLKIN(1), dot_clock_only);
++	rcar_lvds_d3_e3_pll_calc(lvds, lvds->clocks.extal, freq, &pll,
++				 LVDPLLCR_CKSEL_EXTAL, dot_clock_only);
++
++	lvdpllcr = LVDPLLCR_PLLON | pll.clksel | LVDPLLCR_CLKOUT
++		 | LVDPLLCR_PLLN(pll.pll_n - 1) | LVDPLLCR_PLLM(pll.pll_m - 1);
++
++	if (pll.pll_e > 0)
++		lvdpllcr |= LVDPLLCR_STP_CLKOUTE | LVDPLLCR_OUTCLKSEL
++			 |  LVDPLLCR_PLLE(pll.pll_e - 1);
++
++	if (dot_clock_only)
++		lvdpllcr |= LVDPLLCR_OCKSEL;
++
++	rcar_lvds_write(lvds, LVDPLLCR, lvdpllcr);
++
++	if (pll.div > 1)
++		/*
++		 * The DIVRESET bit is a misnomer, setting it to 1 deasserts the
++		 * divisor reset.
++		 */
++		rcar_lvds_write(lvds, LVDDIV, LVDDIV_DIVSEL |
++				LVDDIV_DIVRESET | LVDDIV_DIV(pll.div - 1));
+ 	else
+-		return LVDPLLCR_PLLDIVCNT_148M;
++		rcar_lvds_write(lvds, LVDDIV, 0);
++}
++
++static void rcar_lvds_pll_setup_d3_e3(struct rcar_lvds *lvds, unsigned int freq)
++{
++	__rcar_lvds_pll_setup_d3_e3(lvds, freq, false);
++}
++
++/* -----------------------------------------------------------------------------
++ * Clock - D3/E3 only
++ */
++
++int rcar_lvds_clk_enable(struct drm_bridge *bridge, unsigned long freq)
++{
++	struct rcar_lvds *lvds = bridge_to_rcar_lvds(bridge);
++	int ret;
++
++	if (WARN_ON(!(lvds->info->quirks & RCAR_LVDS_QUIRK_EXT_PLL)))
++		return -ENODEV;
++
++	dev_dbg(lvds->dev, "enabling LVDS PLL, freq=%luHz\n", freq);
++
++	WARN_ON(lvds->enabled);
++
++	ret = clk_prepare_enable(lvds->clocks.mod);
++	if (ret < 0)
++		return ret;
++
++	__rcar_lvds_pll_setup_d3_e3(lvds, freq, true);
++
++	lvds->enabled = true;
++	return 0;
+ }
++EXPORT_SYMBOL_GPL(rcar_lvds_clk_enable);
++
++void rcar_lvds_clk_disable(struct drm_bridge *bridge)
++{
++	struct rcar_lvds *lvds = bridge_to_rcar_lvds(bridge);
++
++	if (WARN_ON(!(lvds->info->quirks & RCAR_LVDS_QUIRK_EXT_PLL)))
++		return;
++
++	dev_dbg(lvds->dev, "disabling LVDS PLL\n");
++
++	WARN_ON(!lvds->enabled);
++
++	rcar_lvds_write(lvds, LVDPLLCR, 0);
++
++	clk_disable_unprepare(lvds->clocks.mod);
++
++	lvds->enabled = false;
++}
++EXPORT_SYMBOL_GPL(rcar_lvds_clk_disable);
++
++/* -----------------------------------------------------------------------------
++ * Bridge
++ */
+ 
+ static void rcar_lvds_enable(struct drm_bridge *bridge)
+ {
+@@ -164,14 +413,13 @@ static void rcar_lvds_enable(struct drm_bridge *bridge)
+ 	 * do we get a state pointer?
+ 	 */
+ 	struct drm_crtc *crtc = lvds->bridge.encoder->crtc;
+-	u32 lvdpllcr;
+ 	u32 lvdhcr;
+ 	u32 lvdcr0;
+ 	int ret;
+ 
+ 	WARN_ON(lvds->enabled);
+ 
+-	ret = clk_prepare_enable(lvds->clock);
++	ret = clk_prepare_enable(lvds->clocks.mod);
+ 	if (ret < 0)
+ 		return;
+ 
+@@ -196,12 +444,13 @@ static void rcar_lvds_enable(struct drm_bridge *bridge)
+ 
+ 	rcar_lvds_write(lvds, LVDCHCR, lvdhcr);
+ 
++	if (lvds->info->quirks & RCAR_LVDS_QUIRK_DUAL_LINK) {
++		/* Disable dual-link mode. */
++		rcar_lvds_write(lvds, LVDSTRIPE, 0);
++	}
++
+ 	/* PLL clock configuration. */
+-	if (lvds->info->quirks & RCAR_LVDS_QUIRK_GEN2_PLLCR)
+-		lvdpllcr = rcar_lvds_lvdpllcr_gen2(mode->clock);
+-	else
+-		lvdpllcr = rcar_lvds_lvdpllcr_gen3(mode->clock);
+-	rcar_lvds_write(lvds, LVDPLLCR, lvdpllcr);
++	lvds->info->pll_setup(lvds, mode->clock * 1000);
+ 
+ 	/* Set the LVDS mode and select the input. */
+ 	lvdcr0 = lvds->mode << LVDCR0_LVMD_SHIFT;
+@@ -220,11 +469,16 @@ static void rcar_lvds_enable(struct drm_bridge *bridge)
+ 		rcar_lvds_write(lvds, LVDCR0, lvdcr0);
+ 	}
+ 
+-	/* Turn the PLL on. */
+-	lvdcr0 |= LVDCR0_PLLON;
+-	rcar_lvds_write(lvds, LVDCR0, lvdcr0);
++	if (!(lvds->info->quirks & RCAR_LVDS_QUIRK_EXT_PLL)) {
++		/*
++		 * Turn the PLL on (simple PLL only, extended PLL is fully
++		 * controlled through LVDPLLCR).
++		 */
++		lvdcr0 |= LVDCR0_PLLON;
++		rcar_lvds_write(lvds, LVDCR0, lvdcr0);
++	}
+ 
+-	if (lvds->info->gen > 2) {
++	if (lvds->info->quirks & RCAR_LVDS_QUIRK_PWD) {
+ 		/* Set LVDS normal mode. */
+ 		lvdcr0 |= LVDCR0_PWD;
+ 		rcar_lvds_write(lvds, LVDCR0, lvdcr0);
+@@ -236,8 +490,10 @@ static void rcar_lvds_enable(struct drm_bridge *bridge)
+ 		rcar_lvds_write(lvds, LVDCR0, lvdcr0);
+ 	}
+ 
+-	/* Wait for the startup delay. */
+-	usleep_range(100, 150);
++	if (!(lvds->info->quirks & RCAR_LVDS_QUIRK_EXT_PLL)) {
++		/* Wait for the PLL startup delay (simple PLL only). */
++		usleep_range(100, 150);
++	}
+ 
+ 	/* Turn the output on. */
+ 	lvdcr0 |= LVDCR0_LVRES;
+@@ -264,8 +520,9 @@ static void rcar_lvds_disable(struct drm_bridge *bridge)
+ 
+ 	rcar_lvds_write(lvds, LVDCR0, 0);
+ 	rcar_lvds_write(lvds, LVDCR1, 0);
++	rcar_lvds_write(lvds, LVDPLLCR, 0);
+ 
+-	clk_disable_unprepare(lvds->clock);
++	clk_disable_unprepare(lvds->clocks.mod);
+ 
+ 	lvds->enabled = false;
+ }
+@@ -321,8 +578,8 @@ static void rcar_lvds_get_lvds_mode(struct rcar_lvds *lvds)
+ }
+ 
+ static void rcar_lvds_mode_set(struct drm_bridge *bridge,
+-			       struct drm_display_mode *mode,
+-			       struct drm_display_mode *adjusted_mode)
++			       const struct drm_display_mode *mode,
++			       const struct drm_display_mode *adjusted_mode)
+ {
+ 	struct rcar_lvds *lvds = bridge_to_rcar_lvds(bridge);
+ 
+@@ -345,7 +602,10 @@ static int rcar_lvds_attach(struct drm_bridge *bridge)
+ 		return drm_bridge_attach(bridge->encoder, lvds->next_bridge,
+ 					 bridge);
+ 
+-	/* Otherwise we have a panel, create a connector. */
++	/* Otherwise if we have a panel, create a connector. */
++	if (!lvds->panel)
++		return 0;
++
+ 	ret = drm_connector_init(bridge->dev, connector, &rcar_lvds_conn_funcs,
+ 				 DRM_MODE_CONNECTOR_LVDS);
+ 	if (ret < 0)
+@@ -393,7 +653,8 @@ static int rcar_lvds_parse_dt(struct rcar_lvds *lvds)
+ 	local_output = of_graph_get_endpoint_by_regs(lvds->dev->of_node, 1, 0);
+ 	if (!local_output) {
+ 		dev_dbg(lvds->dev, "unconnected port@1\n");
+-		return -ENODEV;
++		ret = -ENODEV;
++		goto done;
+ 	}
+ 
+ 	/*
+@@ -443,9 +704,72 @@ static int rcar_lvds_parse_dt(struct rcar_lvds *lvds)
+ 	of_node_put(remote_input);
+ 	of_node_put(remote);
+ 
++	/*
++	 * On D3/E3 the LVDS encoder provides a clock to the DU, which can be
++	 * used for the DPAD output even when the LVDS output is not connected.
++	 * Don't fail probe in that case as the DU will need the bridge to
++	 * control the clock.
++	 */
++	if (lvds->info->quirks & RCAR_LVDS_QUIRK_EXT_PLL)
++		return ret == -ENODEV ? 0 : ret;
++
+ 	return ret;
+ }
+ 
++static struct clk *rcar_lvds_get_clock(struct rcar_lvds *lvds, const char *name,
++				       bool optional)
++{
++	struct clk *clk;
++
++	clk = devm_clk_get(lvds->dev, name);
++	if (!IS_ERR(clk))
++		return clk;
++
++	if (PTR_ERR(clk) == -ENOENT && optional)
++		return NULL;
++
++	if (PTR_ERR(clk) != -EPROBE_DEFER)
++		dev_err(lvds->dev, "failed to get %s clock\n",
++			name ? name : "module");
++
++	return clk;
++}
++
++static int rcar_lvds_get_clocks(struct rcar_lvds *lvds)
++{
++	lvds->clocks.mod = rcar_lvds_get_clock(lvds, NULL, false);
++	if (IS_ERR(lvds->clocks.mod))
++		return PTR_ERR(lvds->clocks.mod);
++
++	/*
++	 * LVDS encoders without an extended PLL have no external clock inputs.
++	 */
++	if (!(lvds->info->quirks & RCAR_LVDS_QUIRK_EXT_PLL))
++		return 0;
++
++	lvds->clocks.extal = rcar_lvds_get_clock(lvds, "extal", true);
++	if (IS_ERR(lvds->clocks.extal))
++		return PTR_ERR(lvds->clocks.extal);
++
++	lvds->clocks.dotclkin[0] = rcar_lvds_get_clock(lvds, "dclkin.0", true);
++	if (IS_ERR(lvds->clocks.dotclkin[0]))
++		return PTR_ERR(lvds->clocks.dotclkin[0]);
++
++	lvds->clocks.dotclkin[1] = rcar_lvds_get_clock(lvds, "dclkin.1", true);
++	if (IS_ERR(lvds->clocks.dotclkin[1]))
++		return PTR_ERR(lvds->clocks.dotclkin[1]);
++
++	/* At least one input to the PLL must be available. */
++	if (!lvds->clocks.extal && !lvds->clocks.dotclkin[0] &&
++	    !lvds->clocks.dotclkin[1]) {
++		dev_err(lvds->dev,
++			"no input clock (extal, dclkin.0 or dclkin.1)\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
+ static int rcar_lvds_probe(struct platform_device *pdev)
+ {
+ 	struct rcar_lvds *lvds;
+@@ -475,11 +799,9 @@ static int rcar_lvds_probe(struct platform_device *pdev)
+ 	if (IS_ERR(lvds->mmio))
+ 		return PTR_ERR(lvds->mmio);
+ 
+-	lvds->clock = devm_clk_get(&pdev->dev, NULL);
+-	if (IS_ERR(lvds->clock)) {
+-		dev_err(&pdev->dev, "failed to get clock\n");
+-		return PTR_ERR(lvds->clock);
+-	}
++	ret = rcar_lvds_get_clocks(lvds);
++	if (ret < 0)
++		return ret;
+ 
+ 	drm_bridge_add(&lvds->bridge);
+ 
+@@ -497,31 +819,55 @@ static int rcar_lvds_remove(struct platform_device *pdev)
+ 
+ static const struct rcar_lvds_device_info rcar_lvds_gen2_info = {
+ 	.gen = 2,
+-	.quirks = RCAR_LVDS_QUIRK_GEN2_PLLCR,
++	.pll_setup = rcar_lvds_pll_setup_gen2,
+ };
+ 
+ static const struct rcar_lvds_device_info rcar_lvds_r8a7790_info = {
+ 	.gen = 2,
+-	.quirks = RCAR_LVDS_QUIRK_GEN2_PLLCR | RCAR_LVDS_QUIRK_LANES,
++	.quirks = RCAR_LVDS_QUIRK_LANES,
++	.pll_setup = rcar_lvds_pll_setup_gen2,
+ };
+ 
+ static const struct rcar_lvds_device_info rcar_lvds_gen3_info = {
+ 	.gen = 3,
++	.quirks = RCAR_LVDS_QUIRK_PWD,
++	.pll_setup = rcar_lvds_pll_setup_gen3,
+ };
+ 
+ static const struct rcar_lvds_device_info rcar_lvds_r8a77970_info = {
+ 	.gen = 3,
+-	.quirks = RCAR_LVDS_QUIRK_GEN2_PLLCR | RCAR_LVDS_QUIRK_GEN3_LVEN,
++	.quirks = RCAR_LVDS_QUIRK_PWD | RCAR_LVDS_QUIRK_GEN3_LVEN,
++	.pll_setup = rcar_lvds_pll_setup_gen2,
++};
++
++static const struct rcar_lvds_device_info rcar_lvds_r8a77990_info = {
++	.gen = 3,
++	.quirks = RCAR_LVDS_QUIRK_GEN3_LVEN | RCAR_LVDS_QUIRK_EXT_PLL
++		| RCAR_LVDS_QUIRK_DUAL_LINK,
++	.pll_setup = rcar_lvds_pll_setup_d3_e3,
++};
++
++static const struct rcar_lvds_device_info rcar_lvds_r8a77995_info = {
++	.gen = 3,
++	.quirks = RCAR_LVDS_QUIRK_GEN3_LVEN | RCAR_LVDS_QUIRK_PWD
++		| RCAR_LVDS_QUIRK_EXT_PLL | RCAR_LVDS_QUIRK_DUAL_LINK,
++	.pll_setup = rcar_lvds_pll_setup_d3_e3,
+ };
+ 
+ static const struct of_device_id rcar_lvds_of_table[] = {
+ 	{ .compatible = "renesas,r8a7743-lvds", .data = &rcar_lvds_gen2_info },
++	{ .compatible = "renesas,r8a7744-lvds", .data = &rcar_lvds_gen2_info },
++	{ .compatible = "renesas,r8a774c0-lvds", .data = &rcar_lvds_r8a77990_info },
+ 	{ .compatible = "renesas,r8a7790-lvds", .data = &rcar_lvds_r8a7790_info },
+ 	{ .compatible = "renesas,r8a7791-lvds", .data = &rcar_lvds_gen2_info },
+ 	{ .compatible = "renesas,r8a7793-lvds", .data = &rcar_lvds_gen2_info },
+ 	{ .compatible = "renesas,r8a7795-lvds", .data = &rcar_lvds_gen3_info },
+ 	{ .compatible = "renesas,r8a7796-lvds", .data = &rcar_lvds_gen3_info },
++	{ .compatible = "renesas,r8a77965-lvds", .data = &rcar_lvds_gen3_info },
+ 	{ .compatible = "renesas,r8a77970-lvds", .data = &rcar_lvds_r8a77970_info },
++	{ .compatible = "renesas,r8a77980-lvds", .data = &rcar_lvds_gen3_info },
++	{ .compatible = "renesas,r8a77990-lvds", .data = &rcar_lvds_r8a77990_info },
++	{ .compatible = "renesas,r8a77995-lvds", .data = &rcar_lvds_r8a77995_info },
+ 	{ }
+ };
+ 
+diff --git a/drivers/gpu/drm/rcar-du/rcar_lvds.h b/drivers/gpu/drm/rcar-du/rcar_lvds.h
+new file mode 100644
+index 000000000..a709cae1b
+--- /dev/null
++++ b/drivers/gpu/drm/rcar-du/rcar_lvds.h
+@@ -0,0 +1,27 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * rcar_lvds.h  --  R-Car LVDS Encoder
++ *
++ * Copyright (C) 2013-2018 Renesas Electronics Corporation
++ *
++ * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
++ */
++
++#ifndef __RCAR_LVDS_H__
++#define __RCAR_LVDS_H__
++
++struct drm_bridge;
++
++#if IS_ENABLED(CONFIG_DRM_RCAR_LVDS)
++int rcar_lvds_clk_enable(struct drm_bridge *bridge, unsigned long freq);
++void rcar_lvds_clk_disable(struct drm_bridge *bridge);
++#else
++static inline int rcar_lvds_clk_enable(struct drm_bridge *bridge,
++				       unsigned long freq)
++{
++	return -ENOSYS;
++}
++static inline void rcar_lvds_clk_disable(struct drm_bridge *bridge) { }
++#endif /* CONFIG_DRM_RCAR_LVDS */
++
++#endif /* __RCAR_LVDS_H__ */
+diff --git a/drivers/gpu/drm/rcar-du/rcar_lvds_regs.h b/drivers/gpu/drm/rcar-du/rcar_lvds_regs.h
+index 2896835ca..87149f2f8 100644
+--- a/drivers/gpu/drm/rcar-du/rcar_lvds_regs.h
++++ b/drivers/gpu/drm/rcar-du/rcar_lvds_regs.h
+@@ -1,13 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0 */
+ /*
+  * rcar_lvds_regs.h  --  R-Car LVDS Interface Registers Definitions
+  *
+  * Copyright (C) 2013-2015 Renesas Electronics Corporation
+  *
+  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2
+- * as published by the Free Software Foundation.
+  */
+ 
+ #ifndef __RCAR_LVDS_REGS_H__
+@@ -21,7 +18,7 @@
+ #define LVDCR0_PLLON			(1 << 4)
+ #define LVDCR0_PWD			(1 << 2)		/* Gen3 only */
+ #define LVDCR0_BEN			(1 << 2)		/* Gen2 only */
+-#define LVDCR0_LVEN			(1 << 1)		/* Gen2 only */
++#define LVDCR0_LVEN			(1 << 1)
+ #define LVDCR0_LVRES			(1 << 0)
+ 
+ #define LVDCR1				0x0004
+@@ -30,21 +27,36 @@
+ #define LVDCR1_CLKSTBY			(3 << 0)
+ 
+ #define LVDPLLCR			0x0008
++/* Gen2 & V3M */
+ #define LVDPLLCR_CEEN			(1 << 14)
+ #define LVDPLLCR_FBEN			(1 << 13)
+ #define LVDPLLCR_COSEL			(1 << 12)
+-/* Gen2 */
+ #define LVDPLLCR_PLLDLYCNT_150M		(0x1bf << 0)
+ #define LVDPLLCR_PLLDLYCNT_121M		(0x22c << 0)
+ #define LVDPLLCR_PLLDLYCNT_60M		(0x77b << 0)
+ #define LVDPLLCR_PLLDLYCNT_38M		(0x69a << 0)
+ #define LVDPLLCR_PLLDLYCNT_MASK		(0x7ff << 0)
+-/* Gen3 */
++/* Gen3 but V3M,D3 and E3 */
+ #define LVDPLLCR_PLLDIVCNT_42M		(0x014cb << 0)
+ #define LVDPLLCR_PLLDIVCNT_85M		(0x00a45 << 0)
+ #define LVDPLLCR_PLLDIVCNT_128M		(0x006c3 << 0)
+ #define LVDPLLCR_PLLDIVCNT_148M		(0x046c1 << 0)
+ #define LVDPLLCR_PLLDIVCNT_MASK		(0x7ffff << 0)
++/* D3 and E3 */
++#define LVDPLLCR_PLLON			(1 << 22)
++#define LVDPLLCR_PLLSEL_PLL0		(0 << 20)
++#define LVDPLLCR_PLLSEL_LVX		(1 << 20)
++#define LVDPLLCR_PLLSEL_PLL1		(2 << 20)
++#define LVDPLLCR_CKSEL_LVX		(1 << 17)
++#define LVDPLLCR_CKSEL_EXTAL		(3 << 17)
++#define LVDPLLCR_CKSEL_DU_DOTCLKIN(n)	((5 + (n) * 2) << 17)
++#define LVDPLLCR_OCKSEL			(1 << 16)
++#define LVDPLLCR_STP_CLKOUTE		(1 << 14)
++#define LVDPLLCR_OUTCLKSEL		(1 << 12)
++#define LVDPLLCR_CLKOUT			(1 << 11)
++#define LVDPLLCR_PLLE(n)		((n) << 10)
++#define LVDPLLCR_PLLN(n)		((n) << 3)
++#define LVDPLLCR_PLLM(n)		((n) << 0)
+ 
+ #define LVDCTRCR			0x000c
+ #define LVDCTRCR_CTR3SEL_ZERO		(0 << 12)
+@@ -74,4 +86,26 @@
+ #define LVDCHCR_CHSEL_CH(n, c)		((((c) - (n)) & 3) << ((n) * 4))
+ #define LVDCHCR_CHSEL_MASK(n)		(3 << ((n) * 4))
+ 
++/* All registers below are specific to D3 and E3 */
++#define LVDSTRIPE			0x0014
++#define LVDSTRIPE_ST_TRGSEL_DISP	(0 << 2)
++#define LVDSTRIPE_ST_TRGSEL_HSYNC_R	(1 << 2)
++#define LVDSTRIPE_ST_TRGSEL_HSYNC_F	(2 << 2)
++#define LVDSTRIPE_ST_SWAP		(1 << 1)
++#define LVDSTRIPE_ST_ON			(1 << 0)
++
++#define LVDSCR				0x0018
++#define LVDSCR_DEPTH(n)			(((n) - 1) << 29)
++#define LVDSCR_BANDSET			(1 << 28)
++#define LVDSCR_TWGCNT(n)		((((n) - 256) / 16) << 24)
++#define LVDSCR_SDIV(n)			((n) << 22)
++#define LVDSCR_MODE			(1 << 21)
++#define LVDSCR_RSTN			(1 << 20)
++
++#define LVDDIV				0x001c
++#define LVDDIV_DIVSEL			(1 << 8)
++#define LVDDIV_DIVRESET			(1 << 7)
++#define LVDDIV_DIVSTP			(1 << 6)
++#define LVDDIV_DIV(n)			((n) << 0)
++
+ #endif /* __RCAR_LVDS_REGS_H__ */

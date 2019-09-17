@@ -1,0 +1,71 @@
+diff --git a/include/linux/compiler_types.h b/include/linux/compiler_types.h
+index 1a6da3043..accb98e86 100644
+--- a/include/linux/compiler_types.h
++++ b/include/linux/compiler_types.h
+@@ -176,9 +176,6 @@ struct ftrace_likely_data {
+  * compilers. We don't consider that to be an error, so set them to nothing.
+  * For example, some of them are for compiler specific plugins.
+  */
+-#ifndef __designated_init
+-# define __designated_init
+-#endif
+ 
+ #ifndef __latent_entropy
+ # define __latent_entropy
+@@ -197,10 +194,6 @@ struct ftrace_likely_data {
+ # define randomized_struct_fields_end
+ #endif
+ 
+-#ifndef __visible
+-#define __visible
+-#endif
+-
+ /*
+  * Assume alignment of return value.
+  */
+@@ -224,10 +217,6 @@ struct ftrace_likely_data {
+ #define __attribute_const__	__attribute__((__const__))
+ #endif
+ 
+-#ifndef __noclone
+-#define __noclone
+-#endif
+-
+ /* Helpers for emitting diagnostics in pragmas. */
+ #ifndef __diag
+ #define __diag(string)
+@@ -251,34 +240,6 @@ struct ftrace_likely_data {
+ #define __diag_error(compiler, version, option, comment) \
+ 	__diag_ ## compiler(version, error, option)
+ 
+-/*
+- * From the GCC manual:
+- *
+- * Many functions have no effects except the return value and their
+- * return value depends only on the parameters and/or global
+- * variables.  Such a function can be subject to common subexpression
+- * elimination and loop optimization just as an arithmetic operator
+- * would be.
+- * [...]
+- */
+-#define __pure			__attribute__((pure))
+-#define __aligned(x)		__attribute__((aligned(x)))
+-#define __aligned_largest	__attribute__((aligned))
+-#define __printf(a, b)		__attribute__((format(printf, a, b)))
+-#define __scanf(a, b)		__attribute__((format(scanf, a, b)))
+-#define __maybe_unused		__attribute__((unused))
+-#define __always_unused		__attribute__((unused))
+-#define __mode(x)		__attribute__((mode(x)))
+-#define __malloc		__attribute__((__malloc__))
+-#define __used			__attribute__((__used__))
+-#define __noreturn		__attribute__((noreturn))
+-#define __packed		__attribute__((packed))
+-#define __weak			__attribute__((weak))
+-#define __alias(symbol)		__attribute__((alias(#symbol)))
+-#define __cold			__attribute__((cold))
+-#define __section(S)		__attribute__((__section__(#S)))
+-
+-
+ #ifdef CONFIG_ENABLE_MUST_CHECK
+ #define __must_check		__attribute__((warn_unused_result))
+ #else

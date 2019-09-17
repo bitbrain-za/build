@@ -1,0 +1,193 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
+index e72a829c6..b84177659 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
+@@ -48,8 +48,6 @@
+ #include "sun50i-a64-sopine.dtsi"
+ 
+ #include <dt-bindings/gpio/gpio.h>
+-#include <dt-bindings/input/input.h>
+-#include <dt-bindings/pwm/pwm.h>
+ 
+ / {
+ 	model = "SoPine with baseboard";
+@@ -61,15 +59,6 @@
+ 		serial0 = &uart0;
+ 	};
+ 
+-	backlight: backlight {
+-		compatible = "pwm-backlight";
+-		pwms = <&pwm 0 50000 PWM_POLARITY_INVERTED>;
+-		brightness-levels = <0 10 20 30 40 50 60 70 80 90 100>;
+-		default-brightness-level = <8>;
+-		enable-gpios = <&pio 3 23 GPIO_ACTIVE_HIGH>; /* PD23 */
+-		power-supply = <&vdd_bl>;
+-	};
+-
+ 	chosen {
+ 		stdout-path = "serial0:115200n8";
+ 	};
+@@ -92,15 +81,10 @@
+ 		regulator-max-microvolt = <1800000>;
+ 	};
+ 
+-	vdd_bl: regulator@0 {
+-		compatible = "regulator-fixed";
+-		regulator-name = "bl-3v3";
+-		regulator-min-microvolt = <3300000>;
+-		regulator-max-microvolt = <3300000>;
+-		gpio = <&pio 7 6 GPIO_ACTIVE_HIGH>; /* PH6 */
+-		enable-active-high;
++	wifi_pwrseq: wifi_pwrseq {
++		compatible = "mmc-pwrseq-simple";
++		reset-gpios = <&r_pio 0 2 GPIO_ACTIVE_LOW>; /* PL2 */
+ 	};
+-
+ };
+ 
+ &ac_power_supply {
+@@ -119,10 +103,6 @@
+ 	status = "okay";
+ };
+ 
+-&cpu0 {
+-	cpu-supply = <&reg_dcdc2>;
+-};
+-
+ &dai {
+ 	status = "okay";
+ };
+@@ -131,27 +111,6 @@
+ 	status = "okay";
+ };
+ 
+-&dphy {
+-	status = "okay";
+-};
+-
+-&dsi {
+-	vcc-dsi-supply = <&reg_dldo1>;
+-	#address-cells = <1>;
+-	#size-cells = <0>;
+-	status = "okay";
+-
+-	panel@0 {
+-		compatible = "feiyang,fy07024di26a30d";
+-		reg = <0>;
+-		avdd-supply = <&reg_dc1sw>;
+-		dvdd-supply = <&reg_dc1sw>;
+-		cvdd-supply = <&reg_ldo_io1>;
+-		reset-gpios = <&pio 3 24 GPIO_ACTIVE_HIGH>; /* PD24 */
+-		backlight = <&backlight>;
+-	};
+-};
+-
+ &ehci0 {
+ 	status = "okay";
+ };
+@@ -180,40 +139,6 @@
+ 	};
+ };
+ 
+-&i2c0 {
+-	pinctrl-names = "default";
+-	pinctrl-0 = <&i2c0_pins>;
+-	status = "okay";
+-
+-	touchscreen@5d {
+-		compatible = "goodix,gt9271";
+-		reg = <0x5d>;
+-		interrupt-parent = <&pio>;
+-		interrupts = <7 4 IRQ_TYPE_LEVEL_HIGH>; /* PH4 */
+-		reset-gpios = <&pio 7 8 IRQ_TYPE_LEVEL_HIGH>; /* PH8 */
+-	};
+-};
+-
+-&i2c1 {
+-	pinctrl-names = "default";
+-	pinctrl-0 = <&i2c1_pins>;
+-	status = "okay";
+-
+-	bma223@18 {
+-		compatible = "bosch,bma223", "bosch,bma222e";
+-		reg = <0x18>;
+-		interrupt-parent = <&pio>;
+-		interrupts = <7 5 IRQ_TYPE_LEVEL_HIGH>; /* PH5 */
+-		mount-matrix = "0", "-1", "0",
+-			       "-1", "0", "0",
+-			       "0", "0", "-1";
+-	};
+-};
+-
+-&i2s2 {
+-	status = "okay";
+-};
+-
+ &mdio {
+ 	ext_rgmii_phy: ethernet-phy@1 {
+ 		compatible = "ethernet-phy-ieee802.3-c22";
+@@ -226,6 +151,7 @@
+ 	pinctrl-0 = <&mmc1_pins>;
+ 	vmmc-supply = <&reg_dldo4>;
+ 	vqmmc-supply = <&reg_eldo1>;
++	mmc-pwrseq = <&wifi_pwrseq>;
+ 	non-removable;
+ 	bus-width = <4>;
+ 	status = "okay";
+@@ -239,7 +165,6 @@
+ 	bus-width = <8>;
+ 	non-removable;
+ 	cap-mmc-hw-reset;
+-	mmc-hs200-1_8v;
+ 	status = "okay";
+ };
+ 
+@@ -278,46 +203,25 @@
+ };
+ 
+ &sound {
+-	status = "okay";
++	simple-audio-card,aux-devs = <&codec_analog>;
+ 	simple-audio-card,widgets = "Microphone", "Microphone Jack",
+ 				    "Headphone", "Headphone Jack";
+ 	simple-audio-card,routing =
+ 			"Left DAC", "AIF1 Slot 0 Left",
+ 			"Right DAC", "AIF1 Slot 0 Right",
+-			"Speaker", "LINEOUT",
+ 			"Headphone Jack", "HP",
+ 			"AIF1 Slot 0 Left ADC", "Left ADC",
+ 			"AIF1 Slot 0 Right ADC", "Right ADC",
+-			"Left ADC", "ADC",
+-			"Right ADC", "ADC",
+-			"Microphone Jack", "HBIAS",
+ 			"MIC2", "Microphone Jack";
+-};
+-
+-&sound_hdmi {
+ 	status = "okay";
+ };
+ 
+ &uart0 {
+ 	pinctrl-names = "default";
+-	pinctrl-0 = <&uart0_pins_a>;
++	pinctrl-0 = <&uart0_pb_pins>;
+ 	status = "okay";
+ };
+ 
+-&uart1 {
+-	pinctrl-names = "default";
+-	pinctrl-0 = <&uart1_pins>, <&uart1_rts_cts_pins>;
+-	status = "okay";
+-
+-	bluetooth {
+-		compatible = "realtek,rtl8723bs-bt";
+-		reset-gpios = <&r_pio 0 4 GPIO_ACTIVE_LOW>; /* PL4 */
+-		device-wake-gpios = <&r_pio 0 5 GPIO_ACTIVE_HIGH>; /* PL5 */
+-		host-wake-gpios = <&r_pio 0 6 GPIO_ACTIVE_HIGH>; /* PL6 */
+-		firmware-postfix = "pine64";
+-	};
+-};
+-
+ &usb_otg {
+ 	dr_mode = "host";
+ 	status = "okay";

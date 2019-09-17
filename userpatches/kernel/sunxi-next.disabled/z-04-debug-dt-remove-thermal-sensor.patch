@@ -1,0 +1,72 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi b/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
+index ae155057b..9c0d06302 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
+@@ -809,7 +809,7 @@
+ 			status = "disabled";
+ 		};
+ 
+-		ths: thermal-sensor@1c25000 {
++/*		ths: thermal-sensor@1c25000 {
+ 			compatible = "allwinner,sun50i-a64-ths";
+ 			reg = <0x01c25000 0x100>;
+ 			interrupts = <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;
+@@ -819,7 +819,7 @@
+ 			#io-channel-cells = <0>;
+ 			#thermal-sensor-cells = <1>;
+ 		};
+-
++*/
+ 		uart0: serial@1c28000 {
+ 			compatible = "snps,dw-apb-uart";
+ 			reg = <0x01c28000 0x400>;
+@@ -1210,10 +1210,10 @@
+ 		};
+ 	};
+ 
+-	thermal-zones {
++/*	thermal-zones {
+ 		cpu-thermal {
+ 			/* milliseconds */
+-			polling-delay-passive = <250>;
++/*			polling-delay-passive = <250>;
+ 			polling-delay = <1000>;
+ 			thermal-sensors = <&ths 0>;
+ 
+@@ -1231,21 +1231,21 @@
+ 			trips {
+ 				cpu_alert0: cpu-alert0 {
+ 					/* milliCelsius */
+-					temperature = <75000>;
++/*					temperature = <75000>;
+ 					hysteresis = <2000>;
+ 					type = "passive";
+ 				};
+ 
+ 				cpu_alert1: cpu-alert1 {
+ 					/* milliCelsius */
+-					temperature = <90000>;
++/*					temperature = <90000>;
+ 					hysteresis = <2000>;
+ 					type = "hot";
+ 				};
+ 
+ 				cpu_crit: cpu-crit {
+ 					/* milliCelsius */
+-					temperature = <105000>;
++/*					temperature = <105000>;
+ 					hysteresis = <2000>;
+ 					type = "critical";
+ 				};
+@@ -1254,9 +1254,9 @@
+ 
+ 		gpu-thermal {
+ 			/* milliseconds */
+-			polling-delay-passive = <250>;
++/*			polling-delay-passive = <250>;
+ 			polling-delay = <1000>;
+ 			thermal-sensors = <&ths 1>;
+ 		};
+-	};
++	};*/
+ };

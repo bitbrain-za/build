@@ -1,0 +1,13 @@
+diff --git a/drivers/gpu/drm/sun4i/sun4i_tcon.c b/drivers/gpu/drm/sun4i/sun4i_tcon.c
+index ba47b5737..46479de94 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_tcon.c
++++ b/drivers/gpu/drm/sun4i/sun4i_tcon.c
+@@ -343,6 +343,8 @@ static void sun4i_tcon0_mode_set_cpu(struct sun4i_tcon *tcon,
+ 
+ 	tcon->dclk_min_div = 4;
+ 	tcon->dclk_max_div = 127;
++	tcon->dclk_min_div = bpp / lanes;
++	tcon->dclk_max_div = bpp / lanes;
+ 
+ 	sun4i_tcon0_mode_set_common(tcon, mode);
+ 

@@ -1,0 +1,13 @@
+diff --git a/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c b/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
+index 5b98decee..56450baa3 100644
+--- a/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
++++ b/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
+@@ -585,7 +585,7 @@ static void sun6i_dsi_setup_timings(struct sun6i_dsi *dsi,
+ 	 */
+ #define HBP_PACKET_OVERHEAD	6
+ 	hbp = max((unsigned int)HBP_PACKET_OVERHEAD,
+-		  (mode->hsync_start - mode->hdisplay) * Bpp - HBP_PACKET_OVERHEAD);
++		  (mode->htotal - mode->hsync_end) * Bpp - HBP_PACKET_OVERHEAD);
+ 
+ 	/*
+ 	 * The frontporch is set using a blanking packet (4 bytes +

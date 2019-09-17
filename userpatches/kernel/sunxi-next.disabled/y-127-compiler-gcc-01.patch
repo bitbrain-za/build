@@ -1,0 +1,29 @@
+diff --git a/include/linux/compiler-gcc.h b/include/linux/compiler-gcc.h
+index 3ebee1ce6..22cd123f2 100644
+--- a/include/linux/compiler-gcc.h
++++ b/include/linux/compiler-gcc.h
+@@ -115,9 +115,6 @@
+ 		__builtin_unreachable();	\
+ 	} while (0)
+ 
+-/* Mark a function definition as prohibited from being cloned. */
+-#define __noclone	__attribute__((__noclone__, __optimize__("no-tracer")))
+-
+ #if defined(RANDSTRUCT_PLUGIN) && !defined(__CHECKER__)
+ #define __randomize_layout __attribute__((randomize_layout))
+ #define __no_randomize_layout __attribute__((no_randomize_layout))
+@@ -126,14 +123,6 @@
+ #define randomized_struct_fields_end	} __randomize_layout;
+ #endif
+ 
+-/*
+- * When used with Link Time Optimization, gcc can optimize away C functions or
+- * variables which are referenced only from assembly code.  __visible tells the
+- * optimizer that something else uses this function or variable, thus preventing
+- * this.
+- */
+-#define __visible	__attribute__((externally_visible))
+-
+ /* gcc version specific checks */
+ 
+ #if GCC_VERSION >= 40900 && !defined(__CHECKER__)

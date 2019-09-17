@@ -1,0 +1,2782 @@
+diff --git a/drivers/gpu/drm/bridge/cdns-dsi.c b/drivers/gpu/drm/bridge/cdns-dsi.c
+index ce9496d13..6166dca6b 100644
+--- a/drivers/gpu/drm/bridge/cdns-dsi.c
++++ b/drivers/gpu/drm/bridge/cdns-dsi.c
+@@ -7,12 +7,14 @@
+ 
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_bridge.h>
+-#include <drm/drm_crtc_helper.h>
++#include <drm/drm_drv.h>
+ #include <drm/drm_mipi_dsi.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ #include <video/mipi_display.h>
+ 
+ #include <linux/clk.h>
++#include <linux/interrupt.h>
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/of_address.h>
+@@ -21,6 +23,9 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/reset.h>
+ 
++#include <linux/phy/phy.h>
++#include <linux/phy/phy-mipi-dphy.h>
++
+ #define IP_CONF				0x0
+ #define SP_HS_FIFO_DEPTH(x)		(((x) & GENMASK(30, 26)) >> 26)
+ #define SP_LP_FIFO_DEPTH(x)		(((x) & GENMASK(25, 21)) >> 21)
+@@ -419,44 +424,11 @@
+ #define DSI_NULL_FRAME_OVERHEAD		6
+ #define DSI_EOT_PKT_SIZE		4
+ 
+-#define REG_WAKEUP_TIME_NS		800
+-#define DPHY_PLL_RATE_HZ		108000000
+-
+-/* DPHY registers */
+-#define DPHY_PMA_CMN(reg)		(reg)
+-#define DPHY_PMA_LCLK(reg)		(0x100 + (reg))
+-#define DPHY_PMA_LDATA(lane, reg)	(0x200 + ((lane) * 0x100) + (reg))
+-#define DPHY_PMA_RCLK(reg)		(0x600 + (reg))
+-#define DPHY_PMA_RDATA(lane, reg)	(0x700 + ((lane) * 0x100) + (reg))
+-#define DPHY_PCS(reg)			(0xb00 + (reg))
+-
+-#define DPHY_CMN_SSM			DPHY_PMA_CMN(0x20)
+-#define DPHY_CMN_SSM_EN			BIT(0)
+-#define DPHY_CMN_TX_MODE_EN		BIT(9)
+-
+-#define DPHY_CMN_PWM			DPHY_PMA_CMN(0x40)
+-#define DPHY_CMN_PWM_DIV(x)		((x) << 20)
+-#define DPHY_CMN_PWM_LOW(x)		((x) << 10)
+-#define DPHY_CMN_PWM_HIGH(x)		(x)
+-
+-#define DPHY_CMN_FBDIV			DPHY_PMA_CMN(0x4c)
+-#define DPHY_CMN_FBDIV_VAL(low, high)	(((high) << 11) | ((low) << 22))
+-#define DPHY_CMN_FBDIV_FROM_REG		(BIT(10) | BIT(21))
+-
+-#define DPHY_CMN_OPIPDIV		DPHY_PMA_CMN(0x50)
+-#define DPHY_CMN_IPDIV_FROM_REG		BIT(0)
+-#define DPHY_CMN_IPDIV(x)		((x) << 1)
+-#define DPHY_CMN_OPDIV_FROM_REG		BIT(6)
+-#define DPHY_CMN_OPDIV(x)		((x) << 7)
+-
+-#define DPHY_PSM_CFG			DPHY_PCS(0x4)
+-#define DPHY_PSM_CFG_FROM_REG		BIT(0)
+-#define DPHY_PSM_CLK_DIV(x)		((x) << 1)
+-
+ struct cdns_dsi_output {
+ 	struct mipi_dsi_device *dev;
+ 	struct drm_panel *panel;
+ 	struct drm_bridge *bridge;
++	union phy_configure_opts phy_opts;
+ };
+ 
+ enum cdns_dsi_input_id {
+@@ -465,14 +437,6 @@ enum cdns_dsi_input_id {
+ 	CDNS_DSC_INPUT,
+ };
+ 
+-struct cdns_dphy_cfg {
+-	u8 pll_ipdiv;
+-	u8 pll_opdiv;
+-	u16 pll_fbdiv;
+-	unsigned long lane_bps;
+-	unsigned int nlanes;
+-};
+-
+ struct cdns_dsi_cfg {
+ 	unsigned int hfp;
+ 	unsigned int hsa;
+@@ -481,34 +445,6 @@ struct cdns_dsi_cfg {
+ 	unsigned int htotal;
+ };
+ 
+-struct cdns_dphy;
+-
+-enum cdns_dphy_clk_lane_cfg {
+-	DPHY_CLK_CFG_LEFT_DRIVES_ALL = 0,
+-	DPHY_CLK_CFG_LEFT_DRIVES_RIGHT = 1,
+-	DPHY_CLK_CFG_LEFT_DRIVES_LEFT = 2,
+-	DPHY_CLK_CFG_RIGHT_DRIVES_ALL = 3,
+-};
+-
+-struct cdns_dphy_ops {
+-	int (*probe)(struct cdns_dphy *dphy);
+-	void (*remove)(struct cdns_dphy *dphy);
+-	void (*set_psm_div)(struct cdns_dphy *dphy, u8 div);
+-	void (*set_clk_lane_cfg)(struct cdns_dphy *dphy,
+-				 enum cdns_dphy_clk_lane_cfg cfg);
+-	void (*set_pll_cfg)(struct cdns_dphy *dphy,
+-			    const struct cdns_dphy_cfg *cfg);
+-	unsigned long (*get_wakeup_time_ns)(struct cdns_dphy *dphy);
+-};
+-
+-struct cdns_dphy {
+-	struct cdns_dphy_cfg cfg;
+-	void __iomem *regs;
+-	struct clk *psm_clk;
+-	struct clk *pll_ref_clk;
+-	const struct cdns_dphy_ops *ops;
+-};
+-
+ struct cdns_dsi_input {
+ 	enum cdns_dsi_input_id id;
+ 	struct drm_bridge bridge;
+@@ -526,7 +462,7 @@ struct cdns_dsi {
+ 	struct reset_control *dsi_p_rst;
+ 	struct clk *dsi_sys_clk;
+ 	bool link_initialized;
+-	struct cdns_dphy *dphy;
++	struct phy *dphy;
+ };
+ 
+ static inline struct cdns_dsi *input_to_dsi(struct cdns_dsi_input *input)
+@@ -545,173 +481,13 @@ bridge_to_cdns_dsi_input(struct drm_bridge *bridge)
+ 	return container_of(bridge, struct cdns_dsi_input, bridge);
+ }
+ 
+-static int cdns_dsi_get_dphy_pll_cfg(struct cdns_dphy *dphy,
+-				     struct cdns_dphy_cfg *cfg,
+-				     unsigned int dpi_htotal,
+-				     unsigned int dpi_bpp,
+-				     unsigned int dpi_hz,
+-				     unsigned int dsi_htotal,
+-				     unsigned int dsi_nlanes,
+-				     unsigned int *dsi_hfp_ext)
+-{
+-	u64 dlane_bps, dlane_bps_max, fbdiv, fbdiv_max, adj_dsi_htotal;
+-	unsigned long pll_ref_hz = clk_get_rate(dphy->pll_ref_clk);
+-
+-	memset(cfg, 0, sizeof(*cfg));
+-
+-	cfg->nlanes = dsi_nlanes;
+-
+-	if (pll_ref_hz < 9600000 || pll_ref_hz >= 150000000)
+-		return -EINVAL;
+-	else if (pll_ref_hz < 19200000)
+-		cfg->pll_ipdiv = 1;
+-	else if (pll_ref_hz < 38400000)
+-		cfg->pll_ipdiv = 2;
+-	else if (pll_ref_hz < 76800000)
+-		cfg->pll_ipdiv = 4;
+-	else
+-		cfg->pll_ipdiv = 8;
+-
+-	/*
+-	 * Make sure DSI htotal is aligned on a lane boundary when calculating
+-	 * the expected data rate. This is done by extending HFP in case of
+-	 * misalignment.
+-	 */
+-	adj_dsi_htotal = dsi_htotal;
+-	if (dsi_htotal % dsi_nlanes)
+-		adj_dsi_htotal += dsi_nlanes - (dsi_htotal % dsi_nlanes);
+-
+-	dlane_bps = (u64)dpi_hz * adj_dsi_htotal;
+-
+-	/* data rate in bytes/sec is not an integer, refuse the mode. */
+-	if (do_div(dlane_bps, dsi_nlanes * dpi_htotal))
+-		return -EINVAL;
+-
+-	/* data rate was in bytes/sec, convert to bits/sec. */
+-	dlane_bps *= 8;
+-
+-	if (dlane_bps > 2500000000UL || dlane_bps < 160000000UL)
+-		return -EINVAL;
+-	else if (dlane_bps >= 1250000000)
+-		cfg->pll_opdiv = 1;
+-	else if (dlane_bps >= 630000000)
+-		cfg->pll_opdiv = 2;
+-	else if (dlane_bps >= 320000000)
+-		cfg->pll_opdiv = 4;
+-	else if (dlane_bps >= 160000000)
+-		cfg->pll_opdiv = 8;
+-
+-	/*
+-	 * Allow a deviation of 0.2% on the per-lane data rate to try to
+-	 * recover a potential mismatch between DPI and PPI clks.
+-	 */
+-	dlane_bps_max = dlane_bps + DIV_ROUND_DOWN_ULL(dlane_bps, 500);
+-	fbdiv_max = DIV_ROUND_DOWN_ULL(dlane_bps_max * 2 *
+-				       cfg->pll_opdiv * cfg->pll_ipdiv,
+-				       pll_ref_hz);
+-	fbdiv = DIV_ROUND_UP_ULL(dlane_bps * 2 * cfg->pll_opdiv *
+-				 cfg->pll_ipdiv,
+-				 pll_ref_hz);
+-
+-	/*
+-	 * Iterate over all acceptable fbdiv and try to find an adjusted DSI
+-	 * htotal length providing an exact match.
+-	 *
+-	 * Note that we could do something even trickier by relying on the fact
+-	 * that a new line is not necessarily aligned on a lane boundary, so,
+-	 * by making adj_dsi_htotal non aligned on a dsi_lanes we can improve a
+-	 * bit the precision. With this, the step would be
+-	 *
+-	 *	pll_ref_hz / (2 * opdiv * ipdiv * nlanes)
+-	 *
+-	 * instead of
+-	 *
+-	 *	pll_ref_hz / (2 * opdiv * ipdiv)
+-	 *
+-	 * The drawback of this approach is that we would need to make sure the
+-	 * number or lines is a multiple of the realignment periodicity which is
+-	 * a function of the number of lanes and the original misalignment. For
+-	 * example, for NLANES = 4 and HTOTAL % NLANES = 3, it takes 4 lines
+-	 * to realign on a lane:
+-	 * LINE 0: expected number of bytes, starts emitting first byte of
+-	 *	   LINE 1 on LANE 3
+-	 * LINE 1: expected number of bytes, starts emitting first 2 bytes of
+-	 *	   LINE 2 on LANES 2 and 3
+-	 * LINE 2: expected number of bytes, starts emitting first 3 bytes of
+-	 *	   of LINE 3 on LANES 1, 2 and 3
+-	 * LINE 3: one byte less, now things are realigned on LANE 0 for LINE 4
+-	 *
+-	 * I figured this extra complexity was not worth the benefit, but if
+-	 * someone really has unfixable mismatch, that would be something to
+-	 * investigate.
+-	 */
+-	for (; fbdiv <= fbdiv_max; fbdiv++) {
+-		u32 rem;
+-
+-		adj_dsi_htotal = (u64)fbdiv * pll_ref_hz * dsi_nlanes *
+-				 dpi_htotal;
+-
+-		/*
+-		 * Do the division in 2 steps to avoid an overflow on the
+-		 * divider.
+-		 */
+-		rem = do_div(adj_dsi_htotal, dpi_hz);
+-		if (rem)
+-			continue;
+-
+-		rem = do_div(adj_dsi_htotal,
+-			     cfg->pll_opdiv * cfg->pll_ipdiv * 2 * 8);
+-		if (rem)
+-			continue;
+-
+-		cfg->pll_fbdiv = fbdiv;
+-		*dsi_hfp_ext = adj_dsi_htotal - dsi_htotal;
+-		break;
+-	}
+-
+-	/* No match, let's just reject the display mode. */
+-	if (!cfg->pll_fbdiv)
+-		return -EINVAL;
+-
+-	dlane_bps = DIV_ROUND_DOWN_ULL((u64)dpi_hz * adj_dsi_htotal * 8,
+-				       dsi_nlanes * dpi_htotal);
+-	cfg->lane_bps = dlane_bps;
+-
+-	return 0;
+-}
+-
+-static int cdns_dphy_setup_psm(struct cdns_dphy *dphy)
+-{
+-	unsigned long psm_clk_hz = clk_get_rate(dphy->psm_clk);
+-	unsigned long psm_div;
+-
+-	if (!psm_clk_hz || psm_clk_hz > 100000000)
+-		return -EINVAL;
+-
+-	psm_div = DIV_ROUND_CLOSEST(psm_clk_hz, 1000000);
+-	if (dphy->ops->set_psm_div)
+-		dphy->ops->set_psm_div(dphy, psm_div);
+-
+-	return 0;
+-}
+-
+-static void cdns_dphy_set_clk_lane_cfg(struct cdns_dphy *dphy,
+-				       enum cdns_dphy_clk_lane_cfg cfg)
+-{
+-	if (dphy->ops->set_clk_lane_cfg)
+-		dphy->ops->set_clk_lane_cfg(dphy, cfg);
+-}
+-
+-static void cdns_dphy_set_pll_cfg(struct cdns_dphy *dphy,
+-				  const struct cdns_dphy_cfg *cfg)
++static unsigned int mode_to_dpi_hfp(const struct drm_display_mode *mode,
++				    bool mode_valid_check)
+ {
+-	if (dphy->ops->set_pll_cfg)
+-		dphy->ops->set_pll_cfg(dphy, cfg);
+-}
++	if (mode_valid_check)
++		return mode->hsync_start - mode->hdisplay;
+ 
+-static unsigned long cdns_dphy_get_wakeup_time_ns(struct cdns_dphy *dphy)
+-{
+-	return dphy->ops->get_wakeup_time_ns(dphy);
++	return mode->crtc_hsync_start - mode->crtc_hdisplay;
+ }
+ 
+ static unsigned int dpi_to_dsi_timing(unsigned int dpi_timing,
+@@ -731,14 +507,12 @@ static unsigned int dpi_to_dsi_timing(unsigned int dpi_timing,
+ static int cdns_dsi_mode2cfg(struct cdns_dsi *dsi,
+ 			     const struct drm_display_mode *mode,
+ 			     struct cdns_dsi_cfg *dsi_cfg,
+-			     struct cdns_dphy_cfg *dphy_cfg,
+ 			     bool mode_valid_check)
+ {
+-	unsigned long dsi_htotal = 0, dsi_hss_hsa_hse_hbp = 0;
+ 	struct cdns_dsi_output *output = &dsi->output;
+-	unsigned int dsi_hfp_ext = 0, dpi_hfp, tmp;
++	unsigned int tmp;
+ 	bool sync_pulse = false;
+-	int bpp, nlanes, ret;
++	int bpp, nlanes;
+ 
+ 	memset(dsi_cfg, 0, sizeof(*dsi_cfg));
+ 
+@@ -757,8 +531,6 @@ static int cdns_dsi_mode2cfg(struct cdns_dsi *dsi,
+ 		       mode->crtc_hsync_end : mode->crtc_hsync_start);
+ 
+ 	dsi_cfg->hbp = dpi_to_dsi_timing(tmp, bpp, DSI_HBP_FRAME_OVERHEAD);
+-	dsi_htotal += dsi_cfg->hbp + DSI_HBP_FRAME_OVERHEAD;
+-	dsi_hss_hsa_hse_hbp += dsi_cfg->hbp + DSI_HBP_FRAME_OVERHEAD;
+ 
+ 	if (sync_pulse) {
+ 		if (mode_valid_check)
+@@ -768,49 +540,104 @@ static int cdns_dsi_mode2cfg(struct cdns_dsi *dsi,
+ 
+ 		dsi_cfg->hsa = dpi_to_dsi_timing(tmp, bpp,
+ 						 DSI_HSA_FRAME_OVERHEAD);
+-		dsi_htotal += dsi_cfg->hsa + DSI_HSA_FRAME_OVERHEAD;
+-		dsi_hss_hsa_hse_hbp += dsi_cfg->hsa + DSI_HSA_FRAME_OVERHEAD;
+ 	}
+ 
+ 	dsi_cfg->hact = dpi_to_dsi_timing(mode_valid_check ?
+ 					  mode->hdisplay : mode->crtc_hdisplay,
+ 					  bpp, 0);
+-	dsi_htotal += dsi_cfg->hact;
++	dsi_cfg->hfp = dpi_to_dsi_timing(mode_to_dpi_hfp(mode, mode_valid_check),
++					 bpp, DSI_HFP_FRAME_OVERHEAD);
+ 
+-	if (mode_valid_check)
+-		dpi_hfp = mode->hsync_start - mode->hdisplay;
+-	else
+-		dpi_hfp = mode->crtc_hsync_start - mode->crtc_hdisplay;
++	return 0;
++}
++
++static int cdns_dsi_adjust_phy_config(struct cdns_dsi *dsi,
++			      struct cdns_dsi_cfg *dsi_cfg,
++			      struct phy_configure_opts_mipi_dphy *phy_cfg,
++			      const struct drm_display_mode *mode,
++			      bool mode_valid_check)
++{
++	struct cdns_dsi_output *output = &dsi->output;
++	unsigned long long dlane_bps;
++	unsigned long adj_dsi_htotal;
++	unsigned long dsi_htotal;
++	unsigned long dpi_htotal;
++	unsigned long dpi_hz;
++	unsigned int dsi_hfp_ext;
++	unsigned int lanes = output->dev->lanes;
++
++	dsi_htotal = dsi_cfg->hbp + DSI_HBP_FRAME_OVERHEAD;
++	if (output->dev->mode_flags & MIPI_DSI_MODE_VIDEO_SYNC_PULSE)
++		dsi_htotal += dsi_cfg->hsa + DSI_HSA_FRAME_OVERHEAD;
+ 
+-	dsi_cfg->hfp = dpi_to_dsi_timing(dpi_hfp, bpp, DSI_HFP_FRAME_OVERHEAD);
++	dsi_htotal += dsi_cfg->hact;
+ 	dsi_htotal += dsi_cfg->hfp + DSI_HFP_FRAME_OVERHEAD;
+ 
+-	if (mode_valid_check)
+-		ret = cdns_dsi_get_dphy_pll_cfg(dsi->dphy, dphy_cfg,
+-						mode->htotal, bpp,
+-						mode->clock * 1000,
+-						dsi_htotal, nlanes,
+-						&dsi_hfp_ext);
+-	else
+-		ret = cdns_dsi_get_dphy_pll_cfg(dsi->dphy, dphy_cfg,
+-						mode->crtc_htotal, bpp,
+-						mode->crtc_clock * 1000,
+-						dsi_htotal, nlanes,
+-						&dsi_hfp_ext);
++	/*
++	 * Make sure DSI htotal is aligned on a lane boundary when calculating
++	 * the expected data rate. This is done by extending HFP in case of
++	 * misalignment.
++	 */
++	adj_dsi_htotal = dsi_htotal;
++	if (dsi_htotal % lanes)
++		adj_dsi_htotal += lanes - (dsi_htotal % lanes);
++
++	dpi_hz = (mode_valid_check ? mode->clock : mode->crtc_clock) * 1000;
++	dlane_bps = (unsigned long long)dpi_hz * adj_dsi_htotal;
++
++	/* data rate in bytes/sec is not an integer, refuse the mode. */
++	dpi_htotal = mode_valid_check ? mode->htotal : mode->crtc_htotal;
++	if (do_div(dlane_bps, lanes * dpi_htotal))
++		return -EINVAL;
++
++	/* data rate was in bytes/sec, convert to bits/sec. */
++	phy_cfg->hs_clk_rate = dlane_bps * 8;
+ 
++	dsi_hfp_ext = adj_dsi_htotal - dsi_htotal;
++	dsi_cfg->hfp += dsi_hfp_ext;
++	dsi_cfg->htotal = dsi_htotal + dsi_hfp_ext;
++
++	return 0;
++}
++
++static int cdns_dsi_check_conf(struct cdns_dsi *dsi,
++			       const struct drm_display_mode *mode,
++			       struct cdns_dsi_cfg *dsi_cfg,
++			       bool mode_valid_check)
++{
++	struct cdns_dsi_output *output = &dsi->output;
++	struct phy_configure_opts_mipi_dphy *phy_cfg = &output->phy_opts.mipi_dphy;
++	unsigned long dsi_hss_hsa_hse_hbp;
++	unsigned int nlanes = output->dev->lanes;
++	int ret;
++
++	ret = cdns_dsi_mode2cfg(dsi, mode, dsi_cfg, mode_valid_check);
+ 	if (ret)
+ 		return ret;
+ 
+-	dsi_cfg->hfp += dsi_hfp_ext;
+-	dsi_htotal += dsi_hfp_ext;
+-	dsi_cfg->htotal = dsi_htotal;
++	phy_mipi_dphy_get_default_config(mode->crtc_clock * 1000,
++					 mipi_dsi_pixel_format_to_bpp(output->dev->format),
++					 nlanes, phy_cfg);
++
++	ret = cdns_dsi_adjust_phy_config(dsi, dsi_cfg, phy_cfg, mode, mode_valid_check);
++	if (ret)
++		return ret;
++
++	ret = phy_validate(dsi->dphy, PHY_MODE_MIPI_DPHY, 0, &output->phy_opts);
++	if (ret)
++		return ret;
++
++	dsi_hss_hsa_hse_hbp = dsi_cfg->hbp + DSI_HBP_FRAME_OVERHEAD;
++	if (output->dev->mode_flags & MIPI_DSI_MODE_VIDEO_SYNC_PULSE)
++		dsi_hss_hsa_hse_hbp += dsi_cfg->hsa + DSI_HSA_FRAME_OVERHEAD;
+ 
+ 	/*
+ 	 * Make sure DPI(HFP) > DSI(HSS+HSA+HSE+HBP) to guarantee that the FIFO
+ 	 * is empty before we start a receiving a new line on the DPI
+ 	 * interface.
+ 	 */
+-	if ((u64)dphy_cfg->lane_bps * dpi_hfp * nlanes <
++	if ((u64)phy_cfg->hs_clk_rate *
++	    mode_to_dpi_hfp(mode, mode_valid_check) * nlanes <
+ 	    (u64)dsi_hss_hsa_hse_hbp *
+ 	    (mode_valid_check ? mode->clock : mode->crtc_clock) * 1000)
+ 		return -EINVAL;
+@@ -840,9 +667,8 @@ cdns_dsi_bridge_mode_valid(struct drm_bridge *bridge,
+ 	struct cdns_dsi_input *input = bridge_to_cdns_dsi_input(bridge);
+ 	struct cdns_dsi *dsi = input_to_dsi(input);
+ 	struct cdns_dsi_output *output = &dsi->output;
+-	struct cdns_dphy_cfg dphy_cfg;
+ 	struct cdns_dsi_cfg dsi_cfg;
+-	int bpp, nlanes, ret;
++	int bpp, ret;
+ 
+ 	/*
+ 	 * VFP_DSI should be less than VFP_DPI and VFP_DSI should be at
+@@ -860,11 +686,9 @@ cdns_dsi_bridge_mode_valid(struct drm_bridge *bridge,
+ 	if ((mode->hdisplay * bpp) % 32)
+ 		return MODE_H_ILLEGAL;
+ 
+-	nlanes = output->dev->lanes;
+-
+-	ret = cdns_dsi_mode2cfg(dsi, mode, &dsi_cfg, &dphy_cfg, true);
++	ret = cdns_dsi_check_conf(dsi, mode, &dsi_cfg, true);
+ 	if (ret)
+-		return MODE_CLOCK_RANGE;
++		return MODE_BAD;
+ 
+ 	return MODE_OK;
+ }
+@@ -885,9 +709,9 @@ static void cdns_dsi_bridge_disable(struct drm_bridge *bridge)
+ 	pm_runtime_put(dsi->base.dev);
+ }
+ 
+-static void cdns_dsi_hs_init(struct cdns_dsi *dsi,
+-			     const struct cdns_dphy_cfg *dphy_cfg)
++static void cdns_dsi_hs_init(struct cdns_dsi *dsi)
+ {
++	struct cdns_dsi_output *output = &dsi->output;
+ 	u32 status;
+ 
+ 	/*
+@@ -898,30 +722,10 @@ static void cdns_dsi_hs_init(struct cdns_dsi *dsi,
+ 	       DPHY_CMN_PDN | DPHY_PLL_PDN,
+ 	       dsi->regs + MCTL_DPHY_CFG0);
+ 
+-	/*
+-	 * Configure the internal PSM clk divider so that the DPHY has a
+-	 * 1MHz clk (or something close).
+-	 */
+-	WARN_ON_ONCE(cdns_dphy_setup_psm(dsi->dphy));
+-
+-	/*
+-	 * Configure attach clk lanes to data lanes: the DPHY has 2 clk lanes
+-	 * and 8 data lanes, each clk lane can be attache different set of
+-	 * data lanes. The 2 groups are named 'left' and 'right', so here we
+-	 * just say that we want the 'left' clk lane to drive the 'left' data
+-	 * lanes.
+-	 */
+-	cdns_dphy_set_clk_lane_cfg(dsi->dphy, DPHY_CLK_CFG_LEFT_DRIVES_LEFT);
+-
+-	/*
+-	 * Configure the DPHY PLL that will be used to generate the TX byte
+-	 * clk.
+-	 */
+-	cdns_dphy_set_pll_cfg(dsi->dphy, dphy_cfg);
+-
+-	/* Start TX state machine. */
+-	writel(DPHY_CMN_SSM_EN | DPHY_CMN_TX_MODE_EN,
+-	       dsi->dphy->regs + DPHY_CMN_SSM);
++	phy_init(dsi->dphy);
++	phy_set_mode(dsi->dphy, PHY_MODE_MIPI_DPHY);
++	phy_configure(dsi->dphy, &output->phy_opts);
++	phy_power_on(dsi->dphy);
+ 
+ 	/* Activate the PLL and wait until it's locked. */
+ 	writel(PLL_LOCKED, dsi->regs + MCTL_MAIN_STS_CLR);
+@@ -931,7 +735,7 @@ static void cdns_dsi_hs_init(struct cdns_dsi *dsi,
+ 					status & PLL_LOCKED, 100, 100));
+ 	/* De-assert data and clock reset lines. */
+ 	writel(DPHY_CMN_PSO | DPHY_ALL_D_PDN | DPHY_C_PDN | DPHY_CMN_PDN |
+-	       DPHY_D_RSTB(dphy_cfg->nlanes) | DPHY_C_RSTB,
++	       DPHY_D_RSTB(output->dev->lanes) | DPHY_C_RSTB,
+ 	       dsi->regs + MCTL_DPHY_CFG0);
+ }
+ 
+@@ -977,7 +781,7 @@ static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
+ 	struct cdns_dsi *dsi = input_to_dsi(input);
+ 	struct cdns_dsi_output *output = &dsi->output;
+ 	struct drm_display_mode *mode;
+-	struct cdns_dphy_cfg dphy_cfg;
++	struct phy_configure_opts_mipi_dphy *phy_cfg = &output->phy_opts.mipi_dphy;
+ 	unsigned long tx_byte_period;
+ 	struct cdns_dsi_cfg dsi_cfg;
+ 	u32 tmp, reg_wakeup, div;
+@@ -990,9 +794,9 @@ static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
+ 	bpp = mipi_dsi_pixel_format_to_bpp(output->dev->format);
+ 	nlanes = output->dev->lanes;
+ 
+-	WARN_ON_ONCE(cdns_dsi_mode2cfg(dsi, mode, &dsi_cfg, &dphy_cfg, false));
++	WARN_ON_ONCE(cdns_dsi_check_conf(dsi, mode, &dsi_cfg, false));
+ 
+-	cdns_dsi_hs_init(dsi, &dphy_cfg);
++	cdns_dsi_hs_init(dsi);
+ 	cdns_dsi_init_link(dsi);
+ 
+ 	writel(HBP_LEN(dsi_cfg.hbp) | HSA_LEN(dsi_cfg.hsa),
+@@ -1028,9 +832,8 @@ static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
+ 		tmp -= DIV_ROUND_UP(DSI_EOT_PKT_SIZE, nlanes);
+ 
+ 	tx_byte_period = DIV_ROUND_DOWN_ULL((u64)NSEC_PER_SEC * 8,
+-					    dphy_cfg.lane_bps);
+-	reg_wakeup = cdns_dphy_get_wakeup_time_ns(dsi->dphy) /
+-		     tx_byte_period;
++					    phy_cfg->hs_clk_rate);
++	reg_wakeup = (phy_cfg->hs_prepare + phy_cfg->hs_zero) / tx_byte_period;
+ 	writel(REG_WAKEUP_TIME(reg_wakeup) | REG_LINE_DURATION(tmp),
+ 	       dsi->regs + VID_DPHY_TIME);
+ 
+@@ -1344,8 +1147,6 @@ static int __maybe_unused cdns_dsi_resume(struct device *dev)
+ 	reset_control_deassert(dsi->dsi_p_rst);
+ 	clk_prepare_enable(dsi->dsi_p_clk);
+ 	clk_prepare_enable(dsi->dsi_sys_clk);
+-	clk_prepare_enable(dsi->dphy->psm_clk);
+-	clk_prepare_enable(dsi->dphy->pll_ref_clk);
+ 
+ 	return 0;
+ }
+@@ -1354,8 +1155,6 @@ static int __maybe_unused cdns_dsi_suspend(struct device *dev)
+ {
+ 	struct cdns_dsi *dsi = dev_get_drvdata(dev);
+ 
+-	clk_disable_unprepare(dsi->dphy->pll_ref_clk);
+-	clk_disable_unprepare(dsi->dphy->psm_clk);
+ 	clk_disable_unprepare(dsi->dsi_sys_clk);
+ 	clk_disable_unprepare(dsi->dsi_p_clk);
+ 	reset_control_assert(dsi->dsi_p_rst);
+@@ -1366,121 +1165,6 @@ static int __maybe_unused cdns_dsi_suspend(struct device *dev)
+ static UNIVERSAL_DEV_PM_OPS(cdns_dsi_pm_ops, cdns_dsi_suspend, cdns_dsi_resume,
+ 			    NULL);
+ 
+-static unsigned long cdns_dphy_ref_get_wakeup_time_ns(struct cdns_dphy *dphy)
+-{
+-	/* Default wakeup time is 800 ns (in a simulated environment). */
+-	return 800;
+-}
+-
+-static void cdns_dphy_ref_set_pll_cfg(struct cdns_dphy *dphy,
+-				      const struct cdns_dphy_cfg *cfg)
+-{
+-	u32 fbdiv_low, fbdiv_high;
+-
+-	fbdiv_low = (cfg->pll_fbdiv / 4) - 2;
+-	fbdiv_high = cfg->pll_fbdiv - fbdiv_low - 2;
+-
+-	writel(DPHY_CMN_IPDIV_FROM_REG | DPHY_CMN_OPDIV_FROM_REG |
+-	       DPHY_CMN_IPDIV(cfg->pll_ipdiv) |
+-	       DPHY_CMN_OPDIV(cfg->pll_opdiv),
+-	       dphy->regs + DPHY_CMN_OPIPDIV);
+-	writel(DPHY_CMN_FBDIV_FROM_REG |
+-	       DPHY_CMN_FBDIV_VAL(fbdiv_low, fbdiv_high),
+-	       dphy->regs + DPHY_CMN_FBDIV);
+-	writel(DPHY_CMN_PWM_HIGH(6) | DPHY_CMN_PWM_LOW(0x101) |
+-	       DPHY_CMN_PWM_DIV(0x8),
+-	       dphy->regs + DPHY_CMN_PWM);
+-}
+-
+-static void cdns_dphy_ref_set_psm_div(struct cdns_dphy *dphy, u8 div)
+-{
+-	writel(DPHY_PSM_CFG_FROM_REG | DPHY_PSM_CLK_DIV(div),
+-	       dphy->regs + DPHY_PSM_CFG);
+-}
+-
+-/*
+- * This is the reference implementation of DPHY hooks. Specific integration of
+- * this IP may have to re-implement some of them depending on how they decided
+- * to wire things in the SoC.
+- */
+-static const struct cdns_dphy_ops ref_dphy_ops = {
+-	.get_wakeup_time_ns = cdns_dphy_ref_get_wakeup_time_ns,
+-	.set_pll_cfg = cdns_dphy_ref_set_pll_cfg,
+-	.set_psm_div = cdns_dphy_ref_set_psm_div,
+-};
+-
+-static const struct of_device_id cdns_dphy_of_match[] = {
+-	{ .compatible = "cdns,dphy", .data = &ref_dphy_ops },
+-	{ /* sentinel */ },
+-};
+-
+-static struct cdns_dphy *cdns_dphy_probe(struct platform_device *pdev)
+-{
+-	const struct of_device_id *match;
+-	struct cdns_dphy *dphy;
+-	struct of_phandle_args args;
+-	struct resource res;
+-	int ret;
+-
+-	ret = of_parse_phandle_with_args(pdev->dev.of_node, "phys",
+-					 "#phy-cells", 0, &args);
+-	if (ret)
+-		return ERR_PTR(-ENOENT);
+-
+-	match = of_match_node(cdns_dphy_of_match, args.np);
+-	if (!match || !match->data)
+-		return ERR_PTR(-EINVAL);
+-
+-	dphy = devm_kzalloc(&pdev->dev, sizeof(*dphy), GFP_KERNEL);
+-	if (!dphy)
+-		return ERR_PTR(-ENOMEM);
+-
+-	dphy->ops = match->data;
+-
+-	ret = of_address_to_resource(args.np, 0, &res);
+-	if (ret)
+-		return ERR_PTR(ret);
+-
+-	dphy->regs = devm_ioremap_resource(&pdev->dev, &res);
+-	if (IS_ERR(dphy->regs))
+-		return ERR_CAST(dphy->regs);
+-
+-	dphy->psm_clk = of_clk_get_by_name(args.np, "psm");
+-	if (IS_ERR(dphy->psm_clk))
+-		return ERR_CAST(dphy->psm_clk);
+-
+-	dphy->pll_ref_clk = of_clk_get_by_name(args.np, "pll_ref");
+-	if (IS_ERR(dphy->pll_ref_clk)) {
+-		ret = PTR_ERR(dphy->pll_ref_clk);
+-		goto err_put_psm_clk;
+-	}
+-
+-	if (dphy->ops->probe) {
+-		ret = dphy->ops->probe(dphy);
+-		if (ret)
+-			goto err_put_pll_ref_clk;
+-	}
+-
+-	return dphy;
+-
+-err_put_pll_ref_clk:
+-	clk_put(dphy->pll_ref_clk);
+-
+-err_put_psm_clk:
+-	clk_put(dphy->psm_clk);
+-
+-	return ERR_PTR(ret);
+-}
+-
+-static void cdns_dphy_remove(struct cdns_dphy *dphy)
+-{
+-	if (dphy->ops->remove)
+-		dphy->ops->remove(dphy);
+-
+-	clk_put(dphy->pll_ref_clk);
+-	clk_put(dphy->psm_clk);
+-}
+-
+ static int cdns_dsi_drm_probe(struct platform_device *pdev)
+ {
+ 	struct cdns_dsi *dsi;
+@@ -1519,13 +1203,13 @@ static int cdns_dsi_drm_probe(struct platform_device *pdev)
+ 	if (irq < 0)
+ 		return irq;
+ 
+-	dsi->dphy = cdns_dphy_probe(pdev);
++	dsi->dphy = devm_phy_get(&pdev->dev, "dphy");
+ 	if (IS_ERR(dsi->dphy))
+ 		return PTR_ERR(dsi->dphy);
+ 
+ 	ret = clk_prepare_enable(dsi->dsi_p_clk);
+ 	if (ret)
+-		goto err_remove_dphy;
++		return ret;
+ 
+ 	val = readl(dsi->regs + ID_REG);
+ 	if (REV_VENDOR_ID(val) != 0xcad) {
+@@ -1583,9 +1267,6 @@ static int cdns_dsi_drm_probe(struct platform_device *pdev)
+ err_disable_pclk:
+ 	clk_disable_unprepare(dsi->dsi_p_clk);
+ 
+-err_remove_dphy:
+-	cdns_dphy_remove(dsi->dphy);
+-
+ 	return ret;
+ }
+ 
+@@ -1595,7 +1276,6 @@ static int cdns_dsi_drm_remove(struct platform_device *pdev)
+ 
+ 	mipi_dsi_host_unregister(&dsi->base);
+ 	pm_runtime_disable(&pdev->dev);
+-	cdns_dphy_remove(dsi->dphy);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/bridge/dumb-vga-dac.c b/drivers/gpu/drm/bridge/dumb-vga-dac.c
+index 9b706789a..0805801f4 100644
+--- a/drivers/gpu/drm/bridge/dumb-vga-dac.c
++++ b/drivers/gpu/drm/bridge/dumb-vga-dac.c
+@@ -18,7 +18,7 @@
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
++#include <drm/drm_probe_helper.h>
+ 
+ struct dumb_vga {
+ 	struct drm_bridge	bridge;
+diff --git a/drivers/gpu/drm/bridge/lvds-encoder.c b/drivers/gpu/drm/bridge/lvds-encoder.c
+index f56c92f7a..ae8fc597e 100644
+--- a/drivers/gpu/drm/bridge/lvds-encoder.c
++++ b/drivers/gpu/drm/bridge/lvds-encoder.c
+@@ -11,11 +11,13 @@
+ #include <drm/drm_bridge.h>
+ #include <drm/drm_panel.h>
+ 
++#include <linux/gpio/consumer.h>
+ #include <linux/of_graph.h>
+ 
+ struct lvds_encoder {
+ 	struct drm_bridge bridge;
+ 	struct drm_bridge *panel_bridge;
++	struct gpio_desc *powerdown_gpio;
+ };
+ 
+ static int lvds_encoder_attach(struct drm_bridge *bridge)
+@@ -28,54 +30,85 @@ static int lvds_encoder_attach(struct drm_bridge *bridge)
+ 				 bridge);
+ }
+ 
++static void lvds_encoder_enable(struct drm_bridge *bridge)
++{
++	struct lvds_encoder *lvds_encoder = container_of(bridge,
++							 struct lvds_encoder,
++							 bridge);
++
++	if (lvds_encoder->powerdown_gpio)
++		gpiod_set_value_cansleep(lvds_encoder->powerdown_gpio, 0);
++}
++
++static void lvds_encoder_disable(struct drm_bridge *bridge)
++{
++	struct lvds_encoder *lvds_encoder = container_of(bridge,
++							 struct lvds_encoder,
++							 bridge);
++
++	if (lvds_encoder->powerdown_gpio)
++		gpiod_set_value_cansleep(lvds_encoder->powerdown_gpio, 1);
++}
++
+ static struct drm_bridge_funcs funcs = {
+ 	.attach = lvds_encoder_attach,
++	.enable = lvds_encoder_enable,
++	.disable = lvds_encoder_disable,
+ };
+ 
+ static int lvds_encoder_probe(struct platform_device *pdev)
+ {
++	struct device *dev = &pdev->dev;
+ 	struct device_node *port;
+ 	struct device_node *endpoint;
+ 	struct device_node *panel_node;
+ 	struct drm_panel *panel;
+ 	struct lvds_encoder *lvds_encoder;
+ 
+-	lvds_encoder = devm_kzalloc(&pdev->dev, sizeof(*lvds_encoder),
+-				    GFP_KERNEL);
++	lvds_encoder = devm_kzalloc(dev, sizeof(*lvds_encoder), GFP_KERNEL);
+ 	if (!lvds_encoder)
+ 		return -ENOMEM;
+ 
++	lvds_encoder->powerdown_gpio = devm_gpiod_get_optional(dev, "powerdown",
++							       GPIOD_OUT_HIGH);
++	if (IS_ERR(lvds_encoder->powerdown_gpio)) {
++		int err = PTR_ERR(lvds_encoder->powerdown_gpio);
++
++		if (err != -EPROBE_DEFER)
++			dev_err(dev, "powerdown GPIO failure: %d\n", err);
++		return err;
++	}
++
+ 	/* Locate the panel DT node. */
+-	port = of_graph_get_port_by_id(pdev->dev.of_node, 1);
++	port = of_graph_get_port_by_id(dev->of_node, 1);
+ 	if (!port) {
+-		dev_dbg(&pdev->dev, "port 1 not found\n");
++		dev_dbg(dev, "port 1 not found\n");
+ 		return -ENXIO;
+ 	}
+ 
+ 	endpoint = of_get_child_by_name(port, "endpoint");
+ 	of_node_put(port);
+ 	if (!endpoint) {
+-		dev_dbg(&pdev->dev, "no endpoint for port 1\n");
++		dev_dbg(dev, "no endpoint for port 1\n");
+ 		return -ENXIO;
+ 	}
+ 
+ 	panel_node = of_graph_get_remote_port_parent(endpoint);
+ 	of_node_put(endpoint);
+ 	if (!panel_node) {
+-		dev_dbg(&pdev->dev, "no remote endpoint for port 1\n");
++		dev_dbg(dev, "no remote endpoint for port 1\n");
+ 		return -ENXIO;
+ 	}
+ 
+ 	panel = of_drm_find_panel(panel_node);
+ 	of_node_put(panel_node);
+ 	if (IS_ERR(panel)) {
+-		dev_dbg(&pdev->dev, "panel not found, deferring probe\n");
++		dev_dbg(dev, "panel not found, deferring probe\n");
+ 		return PTR_ERR(panel);
+ 	}
+ 
+ 	lvds_encoder->panel_bridge =
+-		devm_drm_panel_bridge_add(&pdev->dev,
+-					  panel, DRM_MODE_CONNECTOR_LVDS);
++		devm_drm_panel_bridge_add(dev, panel, DRM_MODE_CONNECTOR_LVDS);
+ 	if (IS_ERR(lvds_encoder->panel_bridge))
+ 		return PTR_ERR(lvds_encoder->panel_bridge);
+ 
+@@ -83,7 +116,7 @@ static int lvds_encoder_probe(struct platform_device *pdev)
+ 	 * but we need a bridge attached to our of_node for our user
+ 	 * to look up.
+ 	 */
+-	lvds_encoder->bridge.of_node = pdev->dev.of_node;
++	lvds_encoder->bridge.of_node = dev->of_node;
+ 	lvds_encoder->bridge.funcs = &funcs;
+ 	drm_bridge_add(&lvds_encoder->bridge);
+ 
+diff --git a/drivers/gpu/drm/bridge/megachips-stdpxxxx-ge-b850v3-fw.c b/drivers/gpu/drm/bridge/megachips-stdpxxxx-ge-b850v3-fw.c
+index 2136c97ae..a01028ec4 100644
+--- a/drivers/gpu/drm/bridge/megachips-stdpxxxx-ge-b850v3-fw.c
++++ b/drivers/gpu/drm/bridge/megachips-stdpxxxx-ge-b850v3-fw.c
+@@ -36,8 +36,8 @@
+ #include <linux/of.h>
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_edid.h>
++#include <drm/drm_probe_helper.h>
+ #include <drm/drmP.h>
+ 
+ #define EDID_EXT_BLOCK_CNT 0x7E
+diff --git a/drivers/gpu/drm/bridge/nxp-ptn3460.c b/drivers/gpu/drm/bridge/nxp-ptn3460.c
+index a3e817aba..fb335afea 100644
+--- a/drivers/gpu/drm/bridge/nxp-ptn3460.c
++++ b/drivers/gpu/drm/bridge/nxp-ptn3460.c
+@@ -22,10 +22,10 @@
+ #include <linux/of_gpio.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_edid.h>
+ #include <drm/drm_of.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ #include <drm/drmP.h>
+ 
+ #define PTN3460_EDID_ADDR			0x0
+diff --git a/drivers/gpu/drm/bridge/panel.c b/drivers/gpu/drm/bridge/panel.c
+index 7cbaba213..38eeaf8ba 100644
+--- a/drivers/gpu/drm/bridge/panel.c
++++ b/drivers/gpu/drm/bridge/panel.c
+@@ -12,9 +12,9 @@
+ #include <drm/drm_panel.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_connector.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_encoder.h>
+ #include <drm/drm_modeset_helper_vtables.h>
++#include <drm/drm_probe_helper.h>
+ #include <drm/drm_panel.h>
+ 
+ struct panel_bridge {
+@@ -134,8 +134,8 @@ static const struct drm_bridge_funcs panel_bridge_bridge_funcs = {
+ };
+ 
+ /**
+- * drm_panel_bridge_add - Creates a drm_bridge and drm_connector that
+- * just calls the appropriate functions from drm_panel.
++ * drm_panel_bridge_add - Creates a &drm_bridge and &drm_connector that
++ * just calls the appropriate functions from &drm_panel.
+  *
+  * @panel: The drm_panel being wrapped.  Must be non-NULL.
+  * @connector_type: The DRM_MODE_CONNECTOR_* for the connector to be
+@@ -149,9 +149,12 @@ static const struct drm_bridge_funcs panel_bridge_bridge_funcs = {
+  * passed to drm_bridge_attach().  The drm_panel_prepare() and related
+  * functions can be dropped from the encoder driver (they're now
+  * called by the KMS helpers before calling into the encoder), along
+- * with connector creation.  When done with the bridge,
+- * drm_bridge_detach() should be called as normal, then
++ * with connector creation.  When done with the bridge (after
++ * drm_mode_config_cleanup() if the bridge has already been attached), then
+  * drm_panel_bridge_remove() to free it.
++ *
++ * See devm_drm_panel_bridge_add() for an automatically manged version of this
++ * function.
+  */
+ struct drm_bridge *drm_panel_bridge_add(struct drm_panel *panel,
+ 					u32 connector_type)
+@@ -210,6 +213,17 @@ static void devm_drm_panel_bridge_release(struct device *dev, void *res)
+ 	drm_panel_bridge_remove(*bridge);
+ }
+ 
++/**
++ * devm_drm_panel_bridge_add - Creates a managed &drm_bridge and &drm_connector
++ * that just calls the appropriate functions from &drm_panel.
++ * @dev: device to tie the bridge lifetime to
++ * @panel: The drm_panel being wrapped.  Must be non-NULL.
++ * @connector_type: The DRM_MODE_CONNECTOR_* for the connector to be
++ * created.
++ *
++ * This is the managed version of drm_panel_bridge_add() which automatically
++ * calls drm_panel_bridge_remove() when @dev is unbound.
++ */
+ struct drm_bridge *devm_drm_panel_bridge_add(struct device *dev,
+ 					     struct drm_panel *panel,
+ 					     u32 connector_type)
+diff --git a/drivers/gpu/drm/bridge/parade-ps8622.c b/drivers/gpu/drm/bridge/parade-ps8622.c
+index 7334d1b62..fda1395b7 100644
+--- a/drivers/gpu/drm/bridge/parade-ps8622.c
++++ b/drivers/gpu/drm/bridge/parade-ps8622.c
+@@ -26,9 +26,9 @@
+ #include <linux/regulator/consumer.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_of.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ #include <drm/drmP.h>
+ 
+ /* Brightness scale on the Parade chip */
+diff --git a/drivers/gpu/drm/bridge/sii902x.c b/drivers/gpu/drm/bridge/sii902x.c
+index 0cc6dbbcd..08e12fef1 100644
+--- a/drivers/gpu/drm/bridge/sii902x.c
++++ b/drivers/gpu/drm/bridge/sii902x.c
+@@ -1,4 +1,6 @@
+ /*
++ * Copyright (C) 2018 Renesas Electronics
++ *
+  * Copyright (C) 2016 Atmel
+  *		      Bo Shen <voice.shen@atmel.com>
+  *
+@@ -21,14 +23,15 @@
+  */
+ 
+ #include <linux/gpio/consumer.h>
++#include <linux/i2c-mux.h>
+ #include <linux/i2c.h>
+ #include <linux/module.h>
+ #include <linux/regmap.h>
+ 
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_edid.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #define SII902X_TPI_VIDEO_DATA			0x0
+ 
+@@ -86,8 +89,49 @@ struct sii902x {
+ 	struct drm_bridge bridge;
+ 	struct drm_connector connector;
+ 	struct gpio_desc *reset_gpio;
++	struct i2c_mux_core *i2cmux;
+ };
+ 
++static int sii902x_read_unlocked(struct i2c_client *i2c, u8 reg, u8 *val)
++{
++	union i2c_smbus_data data;
++	int ret;
++
++	ret = __i2c_smbus_xfer(i2c->adapter, i2c->addr, i2c->flags,
++			       I2C_SMBUS_READ, reg, I2C_SMBUS_BYTE_DATA, &data);
++
++	if (ret < 0)
++		return ret;
++
++	*val = data.byte;
++	return 0;
++}
++
++static int sii902x_write_unlocked(struct i2c_client *i2c, u8 reg, u8 val)
++{
++	union i2c_smbus_data data;
++
++	data.byte = val;
++
++	return __i2c_smbus_xfer(i2c->adapter, i2c->addr, i2c->flags,
++				I2C_SMBUS_WRITE, reg, I2C_SMBUS_BYTE_DATA,
++				&data);
++}
++
++static int sii902x_update_bits_unlocked(struct i2c_client *i2c, u8 reg, u8 mask,
++					u8 val)
++{
++	int ret;
++	u8 status;
++
++	ret = sii902x_read_unlocked(i2c, reg, &status);
++	if (ret)
++		return ret;
++	status &= ~mask;
++	status |= val & mask;
++	return sii902x_write_unlocked(i2c, reg, status);
++}
++
+ static inline struct sii902x *bridge_to_sii902x(struct drm_bridge *bridge)
+ {
+ 	return container_of(bridge, struct sii902x, bridge);
+@@ -135,41 +179,11 @@ static const struct drm_connector_funcs sii902x_connector_funcs = {
+ static int sii902x_get_modes(struct drm_connector *connector)
+ {
+ 	struct sii902x *sii902x = connector_to_sii902x(connector);
+-	struct regmap *regmap = sii902x->regmap;
+ 	u32 bus_format = MEDIA_BUS_FMT_RGB888_1X24;
+-	struct device *dev = &sii902x->i2c->dev;
+-	unsigned long timeout;
+-	unsigned int retries;
+-	unsigned int status;
+ 	struct edid *edid;
+-	int num = 0;
+-	int ret;
+-
+-	ret = regmap_update_bits(regmap, SII902X_SYS_CTRL_DATA,
+-				 SII902X_SYS_CTRL_DDC_BUS_REQ,
+-				 SII902X_SYS_CTRL_DDC_BUS_REQ);
+-	if (ret)
+-		return ret;
+-
+-	timeout = jiffies +
+-		  msecs_to_jiffies(SII902X_I2C_BUS_ACQUISITION_TIMEOUT_MS);
+-	do {
+-		ret = regmap_read(regmap, SII902X_SYS_CTRL_DATA, &status);
+-		if (ret)
+-			return ret;
+-	} while (!(status & SII902X_SYS_CTRL_DDC_BUS_GRTD) &&
+-		 time_before(jiffies, timeout));
++	int num = 0, ret;
+ 
+-	if (!(status & SII902X_SYS_CTRL_DDC_BUS_GRTD)) {
+-		dev_err(dev, "failed to acquire the i2c bus\n");
+-		return -ETIMEDOUT;
+-	}
+-
+-	ret = regmap_write(regmap, SII902X_SYS_CTRL_DATA, status);
+-	if (ret)
+-		return ret;
+-
+-	edid = drm_get_edid(connector, sii902x->i2c->adapter);
++	edid = drm_get_edid(connector, sii902x->i2cmux->adapter[0]);
+ 	drm_connector_update_edid_property(connector, edid);
+ 	if (edid) {
+ 		num = drm_add_edid_modes(connector, edid);
+@@ -181,42 +195,6 @@ static int sii902x_get_modes(struct drm_connector *connector)
+ 	if (ret)
+ 		return ret;
+ 
+-	/*
+-	 * Sometimes the I2C bus can stall after failure to use the
+-	 * EDID channel. Retry a few times to see if things clear
+-	 * up, else continue anyway.
+-	 */
+-	retries = 5;
+-	do {
+-		ret = regmap_read(regmap, SII902X_SYS_CTRL_DATA,
+-				  &status);
+-		retries--;
+-	} while (ret && retries);
+-	if (ret)
+-		dev_err(dev, "failed to read status (%d)\n", ret);
+-
+-	ret = regmap_update_bits(regmap, SII902X_SYS_CTRL_DATA,
+-				 SII902X_SYS_CTRL_DDC_BUS_REQ |
+-				 SII902X_SYS_CTRL_DDC_BUS_GRTD, 0);
+-	if (ret)
+-		return ret;
+-
+-	timeout = jiffies +
+-		  msecs_to_jiffies(SII902X_I2C_BUS_ACQUISITION_TIMEOUT_MS);
+-	do {
+-		ret = regmap_read(regmap, SII902X_SYS_CTRL_DATA, &status);
+-		if (ret)
+-			return ret;
+-	} while (status & (SII902X_SYS_CTRL_DDC_BUS_REQ |
+-			   SII902X_SYS_CTRL_DDC_BUS_GRTD) &&
+-		 time_before(jiffies, timeout));
+-
+-	if (status & (SII902X_SYS_CTRL_DDC_BUS_REQ |
+-		      SII902X_SYS_CTRL_DDC_BUS_GRTD)) {
+-		dev_err(dev, "failed to release the i2c bus\n");
+-		return -ETIMEDOUT;
+-	}
+-
+ 	return num;
+ }
+ 
+@@ -254,18 +232,17 @@ static void sii902x_bridge_enable(struct drm_bridge *bridge)
+ }
+ 
+ static void sii902x_bridge_mode_set(struct drm_bridge *bridge,
+-				    struct drm_display_mode *mode,
+-				    struct drm_display_mode *adj)
++				    const struct drm_display_mode *mode,
++				    const struct drm_display_mode *adj)
+ {
+ 	struct sii902x *sii902x = bridge_to_sii902x(bridge);
+ 	struct regmap *regmap = sii902x->regmap;
+ 	u8 buf[HDMI_INFOFRAME_SIZE(AVI)];
+ 	struct hdmi_avi_infoframe frame;
+-	u16 pixel_clock_10kHz = adj->clock / 10;
+ 	int ret;
+ 
+-	buf[0] = pixel_clock_10kHz & 0xff;
+-	buf[1] = pixel_clock_10kHz >> 8;
++	buf[0] = adj->clock;
++	buf[1] = adj->clock >> 8;
+ 	buf[2] = adj->vrefresh;
+ 	buf[3] = 0x00;
+ 	buf[4] = adj->hdisplay;
+@@ -281,7 +258,8 @@ static void sii902x_bridge_mode_set(struct drm_bridge *bridge,
+ 	if (ret)
+ 		return;
+ 
+-	ret = drm_hdmi_avi_infoframe_from_display_mode(&frame, adj, false);
++	ret = drm_hdmi_avi_infoframe_from_display_mode(&frame,
++						       &sii902x->connector, adj);
+ 	if (ret < 0) {
+ 		DRM_ERROR("couldn't fill AVI infoframe\n");
+ 		return;
+@@ -367,6 +345,121 @@ static irqreturn_t sii902x_interrupt(int irq, void *data)
+ 	return IRQ_HANDLED;
+ }
+ 
++/*
++ * The purpose of sii902x_i2c_bypass_select is to enable the pass through
++ * mode of the HDMI transmitter. Do not use regmap from within this function,
++ * only use sii902x_*_unlocked functions to read/modify/write registers.
++ * We are holding the parent adapter lock here, keep this in mind before
++ * adding more i2c transactions.
++ *
++ * Also, since SII902X_SYS_CTRL_DATA is used with regmap_update_bits elsewhere
++ * in this driver, we need to make sure that we only touch 0x1A[2:1] from
++ * within sii902x_i2c_bypass_select and sii902x_i2c_bypass_deselect, and that
++ * we leave the remaining bits as we have found them.
++ */
++static int sii902x_i2c_bypass_select(struct i2c_mux_core *mux, u32 chan_id)
++{
++	struct sii902x *sii902x = i2c_mux_priv(mux);
++	struct device *dev = &sii902x->i2c->dev;
++	unsigned long timeout;
++	u8 status;
++	int ret;
++
++	ret = sii902x_update_bits_unlocked(sii902x->i2c, SII902X_SYS_CTRL_DATA,
++					   SII902X_SYS_CTRL_DDC_BUS_REQ,
++					   SII902X_SYS_CTRL_DDC_BUS_REQ);
++	if (ret)
++		return ret;
++
++	timeout = jiffies +
++		  msecs_to_jiffies(SII902X_I2C_BUS_ACQUISITION_TIMEOUT_MS);
++	do {
++		ret = sii902x_read_unlocked(sii902x->i2c, SII902X_SYS_CTRL_DATA,
++					    &status);
++		if (ret)
++			return ret;
++	} while (!(status & SII902X_SYS_CTRL_DDC_BUS_GRTD) &&
++		 time_before(jiffies, timeout));
++
++	if (!(status & SII902X_SYS_CTRL_DDC_BUS_GRTD)) {
++		dev_err(dev, "Failed to acquire the i2c bus\n");
++		return -ETIMEDOUT;
++	}
++
++	return sii902x_write_unlocked(sii902x->i2c, SII902X_SYS_CTRL_DATA,
++				      status);
++}
++
++/*
++ * The purpose of sii902x_i2c_bypass_deselect is to disable the pass through
++ * mode of the HDMI transmitter. Do not use regmap from within this function,
++ * only use sii902x_*_unlocked functions to read/modify/write registers.
++ * We are holding the parent adapter lock here, keep this in mind before
++ * adding more i2c transactions.
++ *
++ * Also, since SII902X_SYS_CTRL_DATA is used with regmap_update_bits elsewhere
++ * in this driver, we need to make sure that we only touch 0x1A[2:1] from
++ * within sii902x_i2c_bypass_select and sii902x_i2c_bypass_deselect, and that
++ * we leave the remaining bits as we have found them.
++ */
++static int sii902x_i2c_bypass_deselect(struct i2c_mux_core *mux, u32 chan_id)
++{
++	struct sii902x *sii902x = i2c_mux_priv(mux);
++	struct device *dev = &sii902x->i2c->dev;
++	unsigned long timeout;
++	unsigned int retries;
++	u8 status;
++	int ret;
++
++	/*
++	 * When the HDMI transmitter is in pass through mode, we need an
++	 * (undocumented) additional delay between STOP and START conditions
++	 * to guarantee the bus won't get stuck.
++	 */
++	udelay(30);
++
++	/*
++	 * Sometimes the I2C bus can stall after failure to use the
++	 * EDID channel. Retry a few times to see if things clear
++	 * up, else continue anyway.
++	 */
++	retries = 5;
++	do {
++		ret = sii902x_read_unlocked(sii902x->i2c, SII902X_SYS_CTRL_DATA,
++					    &status);
++		retries--;
++	} while (ret && retries);
++	if (ret) {
++		dev_err(dev, "failed to read status (%d)\n", ret);
++		return ret;
++	}
++
++	ret = sii902x_update_bits_unlocked(sii902x->i2c, SII902X_SYS_CTRL_DATA,
++					   SII902X_SYS_CTRL_DDC_BUS_REQ |
++					   SII902X_SYS_CTRL_DDC_BUS_GRTD, 0);
++	if (ret)
++		return ret;
++
++	timeout = jiffies +
++		  msecs_to_jiffies(SII902X_I2C_BUS_ACQUISITION_TIMEOUT_MS);
++	do {
++		ret = sii902x_read_unlocked(sii902x->i2c, SII902X_SYS_CTRL_DATA,
++					    &status);
++		if (ret)
++			return ret;
++	} while (status & (SII902X_SYS_CTRL_DDC_BUS_REQ |
++			   SII902X_SYS_CTRL_DDC_BUS_GRTD) &&
++		 time_before(jiffies, timeout));
++
++	if (status & (SII902X_SYS_CTRL_DDC_BUS_REQ |
++		      SII902X_SYS_CTRL_DDC_BUS_GRTD)) {
++		dev_err(dev, "failed to release the i2c bus\n");
++		return -ETIMEDOUT;
++	}
++
++	return 0;
++}
++
+ static int sii902x_probe(struct i2c_client *client,
+ 			 const struct i2c_device_id *id)
+ {
+@@ -376,6 +469,13 @@ static int sii902x_probe(struct i2c_client *client,
+ 	u8 chipid[4];
+ 	int ret;
+ 
++	ret = i2c_check_functionality(client->adapter,
++				      I2C_FUNC_SMBUS_BYTE_DATA);
++	if (!ret) {
++		dev_err(dev, "I2C adapter not suitable\n");
++		return -EIO;
++	}
++
+ 	sii902x = devm_kzalloc(dev, sizeof(*sii902x), GFP_KERNEL);
+ 	if (!sii902x)
+ 		return -ENOMEM;
+@@ -434,7 +534,15 @@ static int sii902x_probe(struct i2c_client *client,
+ 
+ 	i2c_set_clientdata(client, sii902x);
+ 
+-	return 0;
++	sii902x->i2cmux = i2c_mux_alloc(client->adapter, dev,
++					1, 0, I2C_MUX_GATE,
++					sii902x_i2c_bypass_select,
++					sii902x_i2c_bypass_deselect);
++	if (!sii902x->i2cmux)
++		return -ENOMEM;
++
++	sii902x->i2cmux->priv = sii902x;
++	return i2c_mux_add_adapter(sii902x->i2cmux, 0, 0, 0);
+ }
+ 
+ static int sii902x_remove(struct i2c_client *client)
+@@ -442,6 +550,7 @@ static int sii902x_remove(struct i2c_client *client)
+ {
+ 	struct sii902x *sii902x = i2c_get_clientdata(client);
+ 
++	i2c_mux_del_adapters(sii902x->i2cmux);
+ 	drm_bridge_remove(&sii902x->bridge);
+ 
+ 	return 0;
+diff --git a/drivers/gpu/drm/bridge/sil-sii8620.c b/drivers/gpu/drm/bridge/sil-sii8620.c
+index a6e8f4591..0cc293a6a 100644
+--- a/drivers/gpu/drm/bridge/sil-sii8620.c
++++ b/drivers/gpu/drm/bridge/sil-sii8620.c
+@@ -1104,8 +1104,7 @@ static void sii8620_set_infoframes(struct sii8620 *ctx,
+ 	int ret;
+ 
+ 	ret = drm_hdmi_avi_infoframe_from_display_mode(&frm.avi,
+-						       mode,
+-						       true);
++						       NULL, mode);
+ 	if (ctx->use_packed_pixel)
+ 		frm.avi.colorspace = HDMI_COLORSPACE_YUV422;
+ 
+diff --git a/drivers/gpu/drm/bridge/tc358764.c b/drivers/gpu/drm/bridge/tc358764.c
+new file mode 100644
+index 000000000..a20e454dd
+--- /dev/null
++++ b/drivers/gpu/drm/bridge/tc358764.c
+@@ -0,0 +1,499 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2018 Samsung Electronics Co., Ltd
++ *
++ * Authors:
++ *	Andrzej Hajda <a.hajda@samsung.com>
++ *	Maciej Purski <m.purski@samsung.com>
++ */
++
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_crtc.h>
++#include <drm/drm_fb_helper.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_of.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drmP.h>
++#include <linux/gpio/consumer.h>
++#include <linux/of_graph.h>
++#include <linux/regulator/consumer.h>
++#include <video/mipi_display.h>
++
++#define FLD_MASK(start, end)    (((1 << ((start) - (end) + 1)) - 1) << (end))
++#define FLD_VAL(val, start, end) (((val) << (end)) & FLD_MASK(start, end))
++
++/* PPI layer registers */
++#define PPI_STARTPPI		0x0104 /* START control bit */
++#define PPI_LPTXTIMECNT		0x0114 /* LPTX timing signal */
++#define PPI_LANEENABLE		0x0134 /* Enables each lane */
++#define PPI_TX_RX_TA		0x013C /* BTA timing parameters */
++#define PPI_D0S_CLRSIPOCOUNT	0x0164 /* Assertion timer for Lane 0 */
++#define PPI_D1S_CLRSIPOCOUNT	0x0168 /* Assertion timer for Lane 1 */
++#define PPI_D2S_CLRSIPOCOUNT	0x016C /* Assertion timer for Lane 2 */
++#define PPI_D3S_CLRSIPOCOUNT	0x0170 /* Assertion timer for Lane 3 */
++#define PPI_START_FUNCTION	1
++
++/* DSI layer registers */
++#define DSI_STARTDSI		0x0204 /* START control bit of DSI-TX */
++#define DSI_LANEENABLE		0x0210 /* Enables each lane */
++#define DSI_RX_START		1
++
++/* Video path registers */
++#define VP_CTRL			0x0450 /* Video Path Control */
++#define VP_CTRL_MSF(v)		FLD_VAL(v, 0, 0) /* Magic square in RGB666 */
++#define VP_CTRL_VTGEN(v)	FLD_VAL(v, 4, 4) /* Use chip clock for timing */
++#define VP_CTRL_EVTMODE(v)	FLD_VAL(v, 5, 5) /* Event mode */
++#define VP_CTRL_RGB888(v)	FLD_VAL(v, 8, 8) /* RGB888 mode */
++#define VP_CTRL_VSDELAY(v)	FLD_VAL(v, 31, 20) /* VSYNC delay */
++#define VP_CTRL_HSPOL		BIT(17) /* Polarity of HSYNC signal */
++#define VP_CTRL_DEPOL		BIT(18) /* Polarity of DE signal */
++#define VP_CTRL_VSPOL		BIT(19) /* Polarity of VSYNC signal */
++#define VP_HTIM1		0x0454 /* Horizontal Timing Control 1 */
++#define VP_HTIM1_HBP(v)		FLD_VAL(v, 24, 16)
++#define VP_HTIM1_HSYNC(v)	FLD_VAL(v, 8, 0)
++#define VP_HTIM2		0x0458 /* Horizontal Timing Control 2 */
++#define VP_HTIM2_HFP(v)		FLD_VAL(v, 24, 16)
++#define VP_HTIM2_HACT(v)	FLD_VAL(v, 10, 0)
++#define VP_VTIM1		0x045C /* Vertical Timing Control 1 */
++#define VP_VTIM1_VBP(v)		FLD_VAL(v, 23, 16)
++#define VP_VTIM1_VSYNC(v)	FLD_VAL(v, 7, 0)
++#define VP_VTIM2		0x0460 /* Vertical Timing Control 2 */
++#define VP_VTIM2_VFP(v)		FLD_VAL(v, 23, 16)
++#define VP_VTIM2_VACT(v)	FLD_VAL(v, 10, 0)
++#define VP_VFUEN		0x0464 /* Video Frame Timing Update Enable */
++
++/* LVDS registers */
++#define LV_MX0003		0x0480 /* Mux input bit 0 to 3 */
++#define LV_MX0407		0x0484 /* Mux input bit 4 to 7 */
++#define LV_MX0811		0x0488 /* Mux input bit 8 to 11 */
++#define LV_MX1215		0x048C /* Mux input bit 12 to 15 */
++#define LV_MX1619		0x0490 /* Mux input bit 16 to 19 */
++#define LV_MX2023		0x0494 /* Mux input bit 20 to 23 */
++#define LV_MX2427		0x0498 /* Mux input bit 24 to 27 */
++#define LV_MX(b0, b1, b2, b3)	(FLD_VAL(b0, 4, 0) | FLD_VAL(b1, 12, 8) | \
++				FLD_VAL(b2, 20, 16) | FLD_VAL(b3, 28, 24))
++
++/* Input bit numbers used in mux registers */
++enum {
++	LVI_R0,
++	LVI_R1,
++	LVI_R2,
++	LVI_R3,
++	LVI_R4,
++	LVI_R5,
++	LVI_R6,
++	LVI_R7,
++	LVI_G0,
++	LVI_G1,
++	LVI_G2,
++	LVI_G3,
++	LVI_G4,
++	LVI_G5,
++	LVI_G6,
++	LVI_G7,
++	LVI_B0,
++	LVI_B1,
++	LVI_B2,
++	LVI_B3,
++	LVI_B4,
++	LVI_B5,
++	LVI_B6,
++	LVI_B7,
++	LVI_HS,
++	LVI_VS,
++	LVI_DE,
++	LVI_L0
++};
++
++#define LV_CFG			0x049C /* LVDS Configuration */
++#define LV_PHY0			0x04A0 /* LVDS PHY 0 */
++#define LV_PHY0_RST(v)		FLD_VAL(v, 22, 22) /* PHY reset */
++#define LV_PHY0_IS(v)		FLD_VAL(v, 15, 14)
++#define LV_PHY0_ND(v)		FLD_VAL(v, 4, 0) /* Frequency range select */
++#define LV_PHY0_PRBS_ON(v)	FLD_VAL(v, 20, 16) /* Clock/Data Flag pins */
++
++/* System registers */
++#define SYS_RST			0x0504 /* System Reset */
++#define SYS_ID			0x0580 /* System ID */
++
++#define SYS_RST_I2CS		BIT(0) /* Reset I2C-Slave controller */
++#define SYS_RST_I2CM		BIT(1) /* Reset I2C-Master controller */
++#define SYS_RST_LCD		BIT(2) /* Reset LCD controller */
++#define SYS_RST_BM		BIT(3) /* Reset Bus Management controller */
++#define SYS_RST_DSIRX		BIT(4) /* Reset DSI-RX and App controller */
++#define SYS_RST_REG		BIT(5) /* Reset Register module */
++
++#define LPX_PERIOD		2
++#define TTA_SURE		3
++#define TTA_GET			0x20000
++
++/* Lane enable PPI and DSI register bits */
++#define LANEENABLE_CLEN		BIT(0)
++#define LANEENABLE_L0EN		BIT(1)
++#define LANEENABLE_L1EN		BIT(2)
++#define LANEENABLE_L2EN		BIT(3)
++#define LANEENABLE_L3EN		BIT(4)
++
++/* LVCFG fields */
++#define LV_CFG_LVEN		BIT(0)
++#define LV_CFG_LVDLINK		BIT(1)
++#define LV_CFG_CLKPOL1		BIT(2)
++#define LV_CFG_CLKPOL2		BIT(3)
++
++static const char * const tc358764_supplies[] = {
++	"vddc", "vddio", "vddlvds"
++};
++
++struct tc358764 {
++	struct device *dev;
++	struct drm_bridge bridge;
++	struct drm_connector connector;
++	struct regulator_bulk_data supplies[ARRAY_SIZE(tc358764_supplies)];
++	struct gpio_desc *gpio_reset;
++	struct drm_panel *panel;
++	int error;
++};
++
++static int tc358764_clear_error(struct tc358764 *ctx)
++{
++	int ret = ctx->error;
++
++	ctx->error = 0;
++	return ret;
++}
++
++static void tc358764_read(struct tc358764 *ctx, u16 addr, u32 *val)
++{
++	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
++	ssize_t ret;
++
++	if (ctx->error)
++		return;
++
++	cpu_to_le16s(&addr);
++	ret = mipi_dsi_generic_read(dsi, &addr, sizeof(addr), val, sizeof(*val));
++	if (ret >= 0)
++		le32_to_cpus(val);
++
++	dev_dbg(ctx->dev, "read: %d, addr: %d\n", addr, *val);
++}
++
++static void tc358764_write(struct tc358764 *ctx, u16 addr, u32 val)
++{
++	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
++	ssize_t ret;
++	u8 data[6];
++
++	if (ctx->error)
++		return;
++
++	data[0] = addr;
++	data[1] = addr >> 8;
++	data[2] = val;
++	data[3] = val >> 8;
++	data[4] = val >> 16;
++	data[5] = val >> 24;
++
++	ret = mipi_dsi_generic_write(dsi, data, sizeof(data));
++	if (ret < 0)
++		ctx->error = ret;
++}
++
++static inline struct tc358764 *bridge_to_tc358764(struct drm_bridge *bridge)
++{
++	return container_of(bridge, struct tc358764, bridge);
++}
++
++static inline
++struct tc358764 *connector_to_tc358764(struct drm_connector *connector)
++{
++	return container_of(connector, struct tc358764, connector);
++}
++
++static int tc358764_init(struct tc358764 *ctx)
++{
++	u32 v = 0;
++
++	tc358764_read(ctx, SYS_ID, &v);
++	if (ctx->error)
++		return tc358764_clear_error(ctx);
++	dev_info(ctx->dev, "ID: %#x\n", v);
++
++	/* configure PPI counters */
++	tc358764_write(ctx, PPI_TX_RX_TA, TTA_GET | TTA_SURE);
++	tc358764_write(ctx, PPI_LPTXTIMECNT, LPX_PERIOD);
++	tc358764_write(ctx, PPI_D0S_CLRSIPOCOUNT, 5);
++	tc358764_write(ctx, PPI_D1S_CLRSIPOCOUNT, 5);
++	tc358764_write(ctx, PPI_D2S_CLRSIPOCOUNT, 5);
++	tc358764_write(ctx, PPI_D3S_CLRSIPOCOUNT, 5);
++
++	/* enable four data lanes and clock lane */
++	tc358764_write(ctx, PPI_LANEENABLE, LANEENABLE_L3EN | LANEENABLE_L2EN |
++		       LANEENABLE_L1EN | LANEENABLE_L0EN | LANEENABLE_CLEN);
++	tc358764_write(ctx, DSI_LANEENABLE, LANEENABLE_L3EN | LANEENABLE_L2EN |
++		       LANEENABLE_L1EN | LANEENABLE_L0EN | LANEENABLE_CLEN);
++
++	/* start */
++	tc358764_write(ctx, PPI_STARTPPI, PPI_START_FUNCTION);
++	tc358764_write(ctx, DSI_STARTDSI, DSI_RX_START);
++
++	/* configure video path */
++	tc358764_write(ctx, VP_CTRL, VP_CTRL_VSDELAY(15) | VP_CTRL_RGB888(1) |
++		       VP_CTRL_EVTMODE(1) | VP_CTRL_HSPOL | VP_CTRL_VSPOL);
++
++	/* reset PHY */
++	tc358764_write(ctx, LV_PHY0, LV_PHY0_RST(1) |
++		       LV_PHY0_PRBS_ON(4) | LV_PHY0_IS(2) | LV_PHY0_ND(6));
++	tc358764_write(ctx, LV_PHY0, LV_PHY0_PRBS_ON(4) | LV_PHY0_IS(2) |
++		       LV_PHY0_ND(6));
++
++	/* reset bridge */
++	tc358764_write(ctx, SYS_RST, SYS_RST_LCD);
++
++	/* set bit order */
++	tc358764_write(ctx, LV_MX0003, LV_MX(LVI_R0, LVI_R1, LVI_R2, LVI_R3));
++	tc358764_write(ctx, LV_MX0407, LV_MX(LVI_R4, LVI_R7, LVI_R5, LVI_G0));
++	tc358764_write(ctx, LV_MX0811, LV_MX(LVI_G1, LVI_G2, LVI_G6, LVI_G7));
++	tc358764_write(ctx, LV_MX1215, LV_MX(LVI_G3, LVI_G4, LVI_G5, LVI_B0));
++	tc358764_write(ctx, LV_MX1619, LV_MX(LVI_B6, LVI_B7, LVI_B1, LVI_B2));
++	tc358764_write(ctx, LV_MX2023, LV_MX(LVI_B3, LVI_B4, LVI_B5, LVI_L0));
++	tc358764_write(ctx, LV_MX2427, LV_MX(LVI_HS, LVI_VS, LVI_DE, LVI_R6));
++	tc358764_write(ctx, LV_CFG, LV_CFG_CLKPOL2 | LV_CFG_CLKPOL1 |
++		       LV_CFG_LVEN);
++
++	return tc358764_clear_error(ctx);
++}
++
++static void tc358764_reset(struct tc358764 *ctx)
++{
++	gpiod_set_value(ctx->gpio_reset, 1);
++	usleep_range(1000, 2000);
++	gpiod_set_value(ctx->gpio_reset, 0);
++	usleep_range(1000, 2000);
++}
++
++static int tc358764_get_modes(struct drm_connector *connector)
++{
++	struct tc358764 *ctx = connector_to_tc358764(connector);
++
++	return drm_panel_get_modes(ctx->panel);
++}
++
++static const
++struct drm_connector_helper_funcs tc358764_connector_helper_funcs = {
++	.get_modes = tc358764_get_modes,
++};
++
++static const struct drm_connector_funcs tc358764_connector_funcs = {
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.destroy = drm_connector_cleanup,
++	.reset = drm_atomic_helper_connector_reset,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++};
++
++static void tc358764_disable(struct drm_bridge *bridge)
++{
++	struct tc358764 *ctx = bridge_to_tc358764(bridge);
++	int ret = drm_panel_disable(bridge_to_tc358764(bridge)->panel);
++
++	if (ret < 0)
++		dev_err(ctx->dev, "error disabling panel (%d)\n", ret);
++}
++
++static void tc358764_post_disable(struct drm_bridge *bridge)
++{
++	struct tc358764 *ctx = bridge_to_tc358764(bridge);
++	int ret;
++
++	ret = drm_panel_unprepare(ctx->panel);
++	if (ret < 0)
++		dev_err(ctx->dev, "error unpreparing panel (%d)\n", ret);
++	tc358764_reset(ctx);
++	usleep_range(10000, 15000);
++	ret = regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++	if (ret < 0)
++		dev_err(ctx->dev, "error disabling regulators (%d)\n", ret);
++}
++
++static void tc358764_pre_enable(struct drm_bridge *bridge)
++{
++	struct tc358764 *ctx = bridge_to_tc358764(bridge);
++	int ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++	if (ret < 0)
++		dev_err(ctx->dev, "error enabling regulators (%d)\n", ret);
++	usleep_range(10000, 15000);
++	tc358764_reset(ctx);
++	ret = tc358764_init(ctx);
++	if (ret < 0)
++		dev_err(ctx->dev, "error initializing bridge (%d)\n", ret);
++	ret = drm_panel_prepare(ctx->panel);
++	if (ret < 0)
++		dev_err(ctx->dev, "error preparing panel (%d)\n", ret);
++}
++
++static void tc358764_enable(struct drm_bridge *bridge)
++{
++	struct tc358764 *ctx = bridge_to_tc358764(bridge);
++	int ret = drm_panel_enable(ctx->panel);
++
++	if (ret < 0)
++		dev_err(ctx->dev, "error enabling panel (%d)\n", ret);
++}
++
++static int tc358764_attach(struct drm_bridge *bridge)
++{
++	struct tc358764 *ctx = bridge_to_tc358764(bridge);
++	struct drm_device *drm = bridge->dev;
++	int ret;
++
++	ctx->connector.polled = DRM_CONNECTOR_POLL_HPD;
++	ret = drm_connector_init(drm, &ctx->connector,
++				 &tc358764_connector_funcs,
++				 DRM_MODE_CONNECTOR_LVDS);
++	if (ret) {
++		DRM_ERROR("Failed to initialize connector\n");
++		return ret;
++	}
++
++	drm_connector_helper_add(&ctx->connector,
++				 &tc358764_connector_helper_funcs);
++	drm_connector_attach_encoder(&ctx->connector, bridge->encoder);
++	drm_panel_attach(ctx->panel, &ctx->connector);
++	ctx->connector.funcs->reset(&ctx->connector);
++	drm_fb_helper_add_one_connector(drm->fb_helper, &ctx->connector);
++	drm_connector_register(&ctx->connector);
++
++	return 0;
++}
++
++static void tc358764_detach(struct drm_bridge *bridge)
++{
++	struct tc358764 *ctx = bridge_to_tc358764(bridge);
++	struct drm_device *drm = bridge->dev;
++
++	drm_connector_unregister(&ctx->connector);
++	drm_fb_helper_remove_one_connector(drm->fb_helper, &ctx->connector);
++	drm_panel_detach(ctx->panel);
++	ctx->panel = NULL;
++	drm_connector_put(&ctx->connector);
++}
++
++static const struct drm_bridge_funcs tc358764_bridge_funcs = {
++	.disable = tc358764_disable,
++	.post_disable = tc358764_post_disable,
++	.enable = tc358764_enable,
++	.pre_enable = tc358764_pre_enable,
++	.attach = tc358764_attach,
++	.detach = tc358764_detach,
++};
++
++static int tc358764_parse_dt(struct tc358764 *ctx)
++{
++	struct device *dev = ctx->dev;
++	int ret;
++
++	ctx->gpio_reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(ctx->gpio_reset)) {
++		dev_err(dev, "no reset GPIO pin provided\n");
++		return PTR_ERR(ctx->gpio_reset);
++	}
++
++	ret = drm_of_find_panel_or_bridge(ctx->dev->of_node, 1, 0, &ctx->panel,
++					  NULL);
++	if (ret && ret != -EPROBE_DEFER)
++		dev_err(dev, "cannot find panel (%d)\n", ret);
++
++	return ret;
++}
++
++static int tc358764_configure_regulators(struct tc358764 *ctx)
++{
++	int i, ret;
++
++	for (i = 0; i < ARRAY_SIZE(ctx->supplies); ++i)
++		ctx->supplies[i].supply = tc358764_supplies[i];
++
++	ret = devm_regulator_bulk_get(ctx->dev, ARRAY_SIZE(ctx->supplies),
++				      ctx->supplies);
++	if (ret < 0)
++		dev_err(ctx->dev, "failed to get regulators: %d\n", ret);
++
++	return ret;
++}
++
++static int tc358764_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct tc358764 *ctx;
++	int ret;
++
++	ctx = devm_kzalloc(dev, sizeof(struct tc358764), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	ctx->dev = dev;
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST
++		| MIPI_DSI_MODE_VIDEO_AUTO_VERT | MIPI_DSI_MODE_LPM;
++
++	ret = tc358764_parse_dt(ctx);
++	if (ret < 0)
++		return ret;
++
++	ret = tc358764_configure_regulators(ctx);
++	if (ret < 0)
++		return ret;
++
++	ctx->bridge.funcs = &tc358764_bridge_funcs;
++	ctx->bridge.of_node = dev->of_node;
++
++	drm_bridge_add(&ctx->bridge);
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		drm_bridge_remove(&ctx->bridge);
++		dev_err(dev, "failed to attach dsi\n");
++	}
++
++	return ret;
++}
++
++static int tc358764_remove(struct mipi_dsi_device *dsi)
++{
++	struct tc358764 *ctx = mipi_dsi_get_drvdata(dsi);
++
++	mipi_dsi_detach(dsi);
++	drm_bridge_remove(&ctx->bridge);
++
++	return 0;
++}
++
++static const struct of_device_id tc358764_of_match[] = {
++	{ .compatible = "toshiba,tc358764" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, tc358764_of_match);
++
++static struct mipi_dsi_driver tc358764_driver = {
++	.probe = tc358764_probe,
++	.remove = tc358764_remove,
++	.driver = {
++		.name = "tc358764",
++		.owner = THIS_MODULE,
++		.of_match_table = tc358764_of_match,
++	},
++};
++module_mipi_dsi_driver(tc358764_driver);
++
++MODULE_AUTHOR("Andrzej Hajda <a.hajda@samsung.com>");
++MODULE_AUTHOR("Maciej Purski <m.purski@samsung.com>");
++MODULE_DESCRIPTION("MIPI-DSI based Driver for TC358764 DSI/LVDS Bridge");
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/gpu/drm/bridge/tc358767.c b/drivers/gpu/drm/bridge/tc358767.c
+index aaca5248d..888980d4b 100644
+--- a/drivers/gpu/drm/bridge/tc358767.c
++++ b/drivers/gpu/drm/bridge/tc358767.c
+@@ -34,11 +34,11 @@
+ #include <linux/slab.h>
+ 
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_dp_helper.h>
+ #include <drm/drm_edid.h>
+ #include <drm/drm_of.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ 
+ /* Registers */
+ 
+@@ -208,7 +208,7 @@ struct tc_data {
+ 	/* display edid */
+ 	struct edid		*edid;
+ 	/* current mode */
+-	struct drm_display_mode	*mode;
++	const struct drm_display_mode	*mode;
+ 
+ 	u32			rev;
+ 	u8			assr;
+@@ -657,7 +657,8 @@ static int tc_get_display_props(struct tc_data *tc)
+ 	return ret;
+ }
+ 
+-static int tc_set_video_mode(struct tc_data *tc, struct drm_display_mode *mode)
++static int tc_set_video_mode(struct tc_data *tc,
++			     const struct drm_display_mode *mode)
+ {
+ 	int ret;
+ 	int vid_sync_dly;
+@@ -1136,8 +1137,8 @@ static enum drm_mode_status tc_connector_mode_valid(struct drm_connector *connec
+ }
+ 
+ static void tc_bridge_mode_set(struct drm_bridge *bridge,
+-			       struct drm_display_mode *mode,
+-			       struct drm_display_mode *adj)
++			       const struct drm_display_mode *mode,
++			       const struct drm_display_mode *adj)
+ {
+ 	struct tc_data *tc = bridge_to_tc(bridge);
+ 
+@@ -1149,13 +1150,6 @@ static int tc_connector_get_modes(struct drm_connector *connector)
+ 	struct tc_data *tc = connector_to_tc(connector);
+ 	struct edid *edid;
+ 	unsigned int count;
+-	int ret;
+-
+-	ret = tc_get_display_props(tc);
+-	if (ret < 0) {
+-		dev_err(tc->dev, "failed to read display props: %d\n", ret);
+-		return 0;
+-	}
+ 
+ 	if (tc->panel && tc->panel->funcs && tc->panel->funcs->get_modes) {
+ 		count = tc->panel->funcs->get_modes(tc->panel);
+@@ -1216,7 +1210,8 @@ static int tc_bridge_attach(struct drm_bridge *bridge)
+ 	/* Create eDP connector */
+ 	drm_connector_helper_add(&tc->connector, &tc_connector_helper_funcs);
+ 	ret = drm_connector_init(drm, &tc->connector, &tc_connector_funcs,
+-				 DRM_MODE_CONNECTOR_eDP);
++				 tc->panel ? DRM_MODE_CONNECTOR_eDP :
++				 DRM_MODE_CONNECTOR_DisplayPort);
+ 	if (ret)
+ 		return ret;
+ 
+diff --git a/drivers/gpu/drm/bridge/thc63lvd1024.c b/drivers/gpu/drm/bridge/thc63lvd1024.c
+index c8b9edd5a..b083a7405 100644
+--- a/drivers/gpu/drm/bridge/thc63lvd1024.c
++++ b/drivers/gpu/drm/bridge/thc63lvd1024.c
+@@ -45,6 +45,23 @@ static int thc63_attach(struct drm_bridge *bridge)
+ 	return drm_bridge_attach(bridge->encoder, thc63->next, bridge);
+ }
+ 
++static enum drm_mode_status thc63_mode_valid(struct drm_bridge *bridge,
++					const struct drm_display_mode *mode)
++{
++	/*
++	 * The THC63LVD1024 clock frequency range is 8 to 135 MHz in single-in
++	 * mode. Note that the limits are different in dual-in, single-out mode,
++	 * and will need to be adjusted accordingly.
++	 */
++	if (mode->clock < 8000)
++		return MODE_CLOCK_LOW;
++
++	if (mode->clock > 135000)
++		return MODE_CLOCK_HIGH;
++
++	return MODE_OK;
++}
++
+ static void thc63_enable(struct drm_bridge *bridge)
+ {
+ 	struct thc63_dev *thc63 = to_thc63(bridge);
+@@ -77,6 +94,7 @@ static void thc63_disable(struct drm_bridge *bridge)
+ 
+ static const struct drm_bridge_funcs thc63_bridge_func = {
+ 	.attach	= thc63_attach,
++	.mode_valid = thc63_mode_valid,
+ 	.enable = thc63_enable,
+ 	.disable = thc63_disable,
+ };
+diff --git a/drivers/gpu/drm/bridge/ti-sn65dsi86.c b/drivers/gpu/drm/bridge/ti-sn65dsi86.c
+new file mode 100644
+index 000000000..f72ee137e
+--- /dev/null
++++ b/drivers/gpu/drm/bridge/ti-sn65dsi86.c
+@@ -0,0 +1,782 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (c) 2018, The Linux Foundation. All rights reserved.
++ */
++
++#include <drm/drmP.h>
++#include <drm/drm_atomic.h>
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_dp_helper.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_of.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++#include <linux/clk.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/iopoll.h>
++#include <linux/of_graph.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++
++#define SN_DEVICE_REV_REG			0x08
++#define SN_DPPLL_SRC_REG			0x0A
++#define  DPPLL_CLK_SRC_DSICLK			BIT(0)
++#define  REFCLK_FREQ_MASK			GENMASK(3, 1)
++#define  REFCLK_FREQ(x)				((x) << 1)
++#define  DPPLL_SRC_DP_PLL_LOCK			BIT(7)
++#define SN_PLL_ENABLE_REG			0x0D
++#define SN_DSI_LANES_REG			0x10
++#define  CHA_DSI_LANES_MASK			GENMASK(4, 3)
++#define  CHA_DSI_LANES(x)			((x) << 3)
++#define SN_DSIA_CLK_FREQ_REG			0x12
++#define SN_CHA_ACTIVE_LINE_LENGTH_LOW_REG	0x20
++#define SN_CHA_VERTICAL_DISPLAY_SIZE_LOW_REG	0x24
++#define SN_CHA_HSYNC_PULSE_WIDTH_LOW_REG	0x2C
++#define SN_CHA_HSYNC_PULSE_WIDTH_HIGH_REG	0x2D
++#define  CHA_HSYNC_POLARITY			BIT(7)
++#define SN_CHA_VSYNC_PULSE_WIDTH_LOW_REG	0x30
++#define SN_CHA_VSYNC_PULSE_WIDTH_HIGH_REG	0x31
++#define  CHA_VSYNC_POLARITY			BIT(7)
++#define SN_CHA_HORIZONTAL_BACK_PORCH_REG	0x34
++#define SN_CHA_VERTICAL_BACK_PORCH_REG		0x36
++#define SN_CHA_HORIZONTAL_FRONT_PORCH_REG	0x38
++#define SN_CHA_VERTICAL_FRONT_PORCH_REG		0x3A
++#define SN_ENH_FRAME_REG			0x5A
++#define  VSTREAM_ENABLE				BIT(3)
++#define SN_DATA_FORMAT_REG			0x5B
++#define SN_HPD_DISABLE_REG			0x5C
++#define  HPD_DISABLE				BIT(0)
++#define SN_AUX_WDATA_REG(x)			(0x64 + (x))
++#define SN_AUX_ADDR_19_16_REG			0x74
++#define SN_AUX_ADDR_15_8_REG			0x75
++#define SN_AUX_ADDR_7_0_REG			0x76
++#define SN_AUX_LENGTH_REG			0x77
++#define SN_AUX_CMD_REG				0x78
++#define  AUX_CMD_SEND				BIT(0)
++#define  AUX_CMD_REQ(x)				((x) << 4)
++#define SN_AUX_RDATA_REG(x)			(0x79 + (x))
++#define SN_SSC_CONFIG_REG			0x93
++#define  DP_NUM_LANES_MASK			GENMASK(5, 4)
++#define  DP_NUM_LANES(x)			((x) << 4)
++#define SN_DATARATE_CONFIG_REG			0x94
++#define  DP_DATARATE_MASK			GENMASK(7, 5)
++#define  DP_DATARATE(x)				((x) << 5)
++#define SN_ML_TX_MODE_REG			0x96
++#define  ML_TX_MAIN_LINK_OFF			0
++#define  ML_TX_NORMAL_MODE			BIT(0)
++#define SN_AUX_CMD_STATUS_REG			0xF4
++#define  AUX_IRQ_STATUS_AUX_RPLY_TOUT		BIT(3)
++#define  AUX_IRQ_STATUS_AUX_SHORT		BIT(5)
++#define  AUX_IRQ_STATUS_NAT_I2C_FAIL		BIT(6)
++
++#define MIN_DSI_CLK_FREQ_MHZ	40
++
++/* fudge factor required to account for 8b/10b encoding */
++#define DP_CLK_FUDGE_NUM	10
++#define DP_CLK_FUDGE_DEN	8
++
++/* Matches DP_AUX_MAX_PAYLOAD_BYTES (for now) */
++#define SN_AUX_MAX_PAYLOAD_BYTES	16
++
++#define SN_REGULATOR_SUPPLY_NUM		4
++
++struct ti_sn_bridge {
++	struct device			*dev;
++	struct regmap			*regmap;
++	struct drm_dp_aux		aux;
++	struct drm_bridge		bridge;
++	struct drm_connector		connector;
++	struct device_node		*host_node;
++	struct mipi_dsi_device		*dsi;
++	struct clk			*refclk;
++	struct drm_panel		*panel;
++	struct gpio_desc		*enable_gpio;
++	struct regulator_bulk_data	supplies[SN_REGULATOR_SUPPLY_NUM];
++};
++
++static const struct regmap_range ti_sn_bridge_volatile_ranges[] = {
++	{ .range_min = 0, .range_max = 0xFF },
++};
++
++static const struct regmap_access_table ti_sn_bridge_volatile_table = {
++	.yes_ranges = ti_sn_bridge_volatile_ranges,
++	.n_yes_ranges = ARRAY_SIZE(ti_sn_bridge_volatile_ranges),
++};
++
++static const struct regmap_config ti_sn_bridge_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.volatile_table = &ti_sn_bridge_volatile_table,
++	.cache_type = REGCACHE_NONE,
++};
++
++static void ti_sn_bridge_write_u16(struct ti_sn_bridge *pdata,
++				   unsigned int reg, u16 val)
++{
++	regmap_write(pdata->regmap, reg, val & 0xFF);
++	regmap_write(pdata->regmap, reg + 1, val >> 8);
++}
++
++static int __maybe_unused ti_sn_bridge_resume(struct device *dev)
++{
++	struct ti_sn_bridge *pdata = dev_get_drvdata(dev);
++	int ret;
++
++	ret = regulator_bulk_enable(SN_REGULATOR_SUPPLY_NUM, pdata->supplies);
++	if (ret) {
++		DRM_ERROR("failed to enable supplies %d\n", ret);
++		return ret;
++	}
++
++	gpiod_set_value(pdata->enable_gpio, 1);
++
++	return ret;
++}
++
++static int __maybe_unused ti_sn_bridge_suspend(struct device *dev)
++{
++	struct ti_sn_bridge *pdata = dev_get_drvdata(dev);
++	int ret;
++
++	gpiod_set_value(pdata->enable_gpio, 0);
++
++	ret = regulator_bulk_disable(SN_REGULATOR_SUPPLY_NUM, pdata->supplies);
++	if (ret)
++		DRM_ERROR("failed to disable supplies %d\n", ret);
++
++	return ret;
++}
++
++static const struct dev_pm_ops ti_sn_bridge_pm_ops = {
++	SET_RUNTIME_PM_OPS(ti_sn_bridge_suspend, ti_sn_bridge_resume, NULL)
++};
++
++/* Connector funcs */
++static struct ti_sn_bridge *
++connector_to_ti_sn_bridge(struct drm_connector *connector)
++{
++	return container_of(connector, struct ti_sn_bridge, connector);
++}
++
++static int ti_sn_bridge_connector_get_modes(struct drm_connector *connector)
++{
++	struct ti_sn_bridge *pdata = connector_to_ti_sn_bridge(connector);
++
++	return drm_panel_get_modes(pdata->panel);
++}
++
++static enum drm_mode_status
++ti_sn_bridge_connector_mode_valid(struct drm_connector *connector,
++				  struct drm_display_mode *mode)
++{
++	/* maximum supported resolution is 4K at 60 fps */
++	if (mode->clock > 594000)
++		return MODE_CLOCK_HIGH;
++
++	return MODE_OK;
++}
++
++static struct drm_connector_helper_funcs ti_sn_bridge_connector_helper_funcs = {
++	.get_modes = ti_sn_bridge_connector_get_modes,
++	.mode_valid = ti_sn_bridge_connector_mode_valid,
++};
++
++static enum drm_connector_status
++ti_sn_bridge_connector_detect(struct drm_connector *connector, bool force)
++{
++	/**
++	 * TODO: Currently if drm_panel is present, then always
++	 * return the status as connected. Need to add support to detect
++	 * device state for hot pluggable scenarios.
++	 */
++	return connector_status_connected;
++}
++
++static const struct drm_connector_funcs ti_sn_bridge_connector_funcs = {
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.detect = ti_sn_bridge_connector_detect,
++	.destroy = drm_connector_cleanup,
++	.reset = drm_atomic_helper_connector_reset,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++};
++
++static struct ti_sn_bridge *bridge_to_ti_sn_bridge(struct drm_bridge *bridge)
++{
++	return container_of(bridge, struct ti_sn_bridge, bridge);
++}
++
++static int ti_sn_bridge_parse_regulators(struct ti_sn_bridge *pdata)
++{
++	unsigned int i;
++	const char * const ti_sn_bridge_supply_names[] = {
++		"vcca", "vcc", "vccio", "vpll",
++	};
++
++	for (i = 0; i < SN_REGULATOR_SUPPLY_NUM; i++)
++		pdata->supplies[i].supply = ti_sn_bridge_supply_names[i];
++
++	return devm_regulator_bulk_get(pdata->dev, SN_REGULATOR_SUPPLY_NUM,
++				       pdata->supplies);
++}
++
++static int ti_sn_bridge_attach(struct drm_bridge *bridge)
++{
++	int ret, val;
++	struct ti_sn_bridge *pdata = bridge_to_ti_sn_bridge(bridge);
++	struct mipi_dsi_host *host;
++	struct mipi_dsi_device *dsi;
++	const struct mipi_dsi_device_info info = { .type = "ti_sn_bridge",
++						   .channel = 0,
++						   .node = NULL,
++						 };
++
++	ret = drm_connector_init(bridge->dev, &pdata->connector,
++				 &ti_sn_bridge_connector_funcs,
++				 DRM_MODE_CONNECTOR_eDP);
++	if (ret) {
++		DRM_ERROR("Failed to initialize connector with drm\n");
++		return ret;
++	}
++
++	drm_connector_helper_add(&pdata->connector,
++				 &ti_sn_bridge_connector_helper_funcs);
++	drm_connector_attach_encoder(&pdata->connector, bridge->encoder);
++
++	/*
++	 * TODO: ideally finding host resource and dsi dev registration needs
++	 * to be done in bridge probe. But some existing DSI host drivers will
++	 * wait for any of the drm_bridge/drm_panel to get added to the global
++	 * bridge/panel list, before completing their probe. So if we do the
++	 * dsi dev registration part in bridge probe, before populating in
++	 * the global bridge list, then it will cause deadlock as dsi host probe
++	 * will never complete, neither our bridge probe. So keeping it here
++	 * will satisfy most of the existing host drivers. Once the host driver
++	 * is fixed we can move the below code to bridge probe safely.
++	 */
++	host = of_find_mipi_dsi_host_by_node(pdata->host_node);
++	if (!host) {
++		DRM_ERROR("failed to find dsi host\n");
++		ret = -ENODEV;
++		goto err_dsi_host;
++	}
++
++	dsi = mipi_dsi_device_register_full(host, &info);
++	if (IS_ERR(dsi)) {
++		DRM_ERROR("failed to create dsi device\n");
++		ret = PTR_ERR(dsi);
++		goto err_dsi_host;
++	}
++
++	/* TODO: setting to 4 lanes always for now */
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
++			  MIPI_DSI_MODE_EOT_PACKET | MIPI_DSI_MODE_VIDEO_HSE;
++
++	/* check if continuous dsi clock is required or not */
++	pm_runtime_get_sync(pdata->dev);
++	regmap_read(pdata->regmap, SN_DPPLL_SRC_REG, &val);
++	pm_runtime_put(pdata->dev);
++	if (!(val & DPPLL_CLK_SRC_DSICLK))
++		dsi->mode_flags |= MIPI_DSI_CLOCK_NON_CONTINUOUS;
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		DRM_ERROR("failed to attach dsi to host\n");
++		goto err_dsi_attach;
++	}
++	pdata->dsi = dsi;
++
++	/* attach panel to bridge */
++	drm_panel_attach(pdata->panel, &pdata->connector);
++
++	return 0;
++
++err_dsi_attach:
++	mipi_dsi_device_unregister(dsi);
++err_dsi_host:
++	drm_connector_cleanup(&pdata->connector);
++	return ret;
++}
++
++static void ti_sn_bridge_disable(struct drm_bridge *bridge)
++{
++	struct ti_sn_bridge *pdata = bridge_to_ti_sn_bridge(bridge);
++
++	drm_panel_disable(pdata->panel);
++
++	/* disable video stream */
++	regmap_update_bits(pdata->regmap, SN_ENH_FRAME_REG, VSTREAM_ENABLE, 0);
++	/* semi auto link training mode OFF */
++	regmap_write(pdata->regmap, SN_ML_TX_MODE_REG, 0);
++	/* disable DP PLL */
++	regmap_write(pdata->regmap, SN_PLL_ENABLE_REG, 0);
++
++	drm_panel_unprepare(pdata->panel);
++}
++
++static u32 ti_sn_bridge_get_dsi_freq(struct ti_sn_bridge *pdata)
++{
++	u32 bit_rate_khz, clk_freq_khz;
++	struct drm_display_mode *mode =
++		&pdata->bridge.encoder->crtc->state->adjusted_mode;
++
++	bit_rate_khz = mode->clock *
++			mipi_dsi_pixel_format_to_bpp(pdata->dsi->format);
++	clk_freq_khz = bit_rate_khz / (pdata->dsi->lanes * 2);
++
++	return clk_freq_khz;
++}
++
++/* clk frequencies supported by bridge in Hz in case derived from REFCLK pin */
++static const u32 ti_sn_bridge_refclk_lut[] = {
++	12000000,
++	19200000,
++	26000000,
++	27000000,
++	38400000,
++};
++
++/* clk frequencies supported by bridge in Hz in case derived from DACP/N pin */
++static const u32 ti_sn_bridge_dsiclk_lut[] = {
++	468000000,
++	384000000,
++	416000000,
++	486000000,
++	460800000,
++};
++
++static void ti_sn_bridge_set_refclk_freq(struct ti_sn_bridge *pdata)
++{
++	int i;
++	u32 refclk_rate;
++	const u32 *refclk_lut;
++	size_t refclk_lut_size;
++
++	if (pdata->refclk) {
++		refclk_rate = clk_get_rate(pdata->refclk);
++		refclk_lut = ti_sn_bridge_refclk_lut;
++		refclk_lut_size = ARRAY_SIZE(ti_sn_bridge_refclk_lut);
++		clk_prepare_enable(pdata->refclk);
++	} else {
++		refclk_rate = ti_sn_bridge_get_dsi_freq(pdata) * 1000;
++		refclk_lut = ti_sn_bridge_dsiclk_lut;
++		refclk_lut_size = ARRAY_SIZE(ti_sn_bridge_dsiclk_lut);
++	}
++
++	/* for i equals to refclk_lut_size means default frequency */
++	for (i = 0; i < refclk_lut_size; i++)
++		if (refclk_lut[i] == refclk_rate)
++			break;
++
++	regmap_update_bits(pdata->regmap, SN_DPPLL_SRC_REG, REFCLK_FREQ_MASK,
++			   REFCLK_FREQ(i));
++}
++
++/**
++ * LUT index corresponds to register value and
++ * LUT values corresponds to dp data rate supported
++ * by the bridge in Mbps unit.
++ */
++static const unsigned int ti_sn_bridge_dp_rate_lut[] = {
++	0, 1620, 2160, 2430, 2700, 3240, 4320, 5400
++};
++
++static void ti_sn_bridge_set_dsi_dp_rate(struct ti_sn_bridge *pdata)
++{
++	unsigned int bit_rate_mhz, clk_freq_mhz, dp_rate_mhz;
++	unsigned int val, i;
++	struct drm_display_mode *mode =
++		&pdata->bridge.encoder->crtc->state->adjusted_mode;
++
++	/* set DSIA clk frequency */
++	bit_rate_mhz = (mode->clock / 1000) *
++			mipi_dsi_pixel_format_to_bpp(pdata->dsi->format);
++	clk_freq_mhz = bit_rate_mhz / (pdata->dsi->lanes * 2);
++
++	/* for each increment in val, frequency increases by 5MHz */
++	val = (MIN_DSI_CLK_FREQ_MHZ / 5) +
++		(((clk_freq_mhz - MIN_DSI_CLK_FREQ_MHZ) / 5) & 0xFF);
++	regmap_write(pdata->regmap, SN_DSIA_CLK_FREQ_REG, val);
++
++	/* set DP data rate */
++	dp_rate_mhz = ((bit_rate_mhz / pdata->dsi->lanes) * DP_CLK_FUDGE_NUM) /
++							DP_CLK_FUDGE_DEN;
++	for (i = 0; i < ARRAY_SIZE(ti_sn_bridge_dp_rate_lut) - 1; i++)
++		if (ti_sn_bridge_dp_rate_lut[i] > dp_rate_mhz)
++			break;
++
++	regmap_update_bits(pdata->regmap, SN_DATARATE_CONFIG_REG,
++			   DP_DATARATE_MASK, DP_DATARATE(i));
++}
++
++static void ti_sn_bridge_set_video_timings(struct ti_sn_bridge *pdata)
++{
++	struct drm_display_mode *mode =
++		&pdata->bridge.encoder->crtc->state->adjusted_mode;
++	u8 hsync_polarity = 0, vsync_polarity = 0;
++
++	if (mode->flags & DRM_MODE_FLAG_PHSYNC)
++		hsync_polarity = CHA_HSYNC_POLARITY;
++	if (mode->flags & DRM_MODE_FLAG_PVSYNC)
++		vsync_polarity = CHA_VSYNC_POLARITY;
++
++	ti_sn_bridge_write_u16(pdata, SN_CHA_ACTIVE_LINE_LENGTH_LOW_REG,
++			       mode->hdisplay);
++	ti_sn_bridge_write_u16(pdata, SN_CHA_VERTICAL_DISPLAY_SIZE_LOW_REG,
++			       mode->vdisplay);
++	regmap_write(pdata->regmap, SN_CHA_HSYNC_PULSE_WIDTH_LOW_REG,
++		     (mode->hsync_end - mode->hsync_start) & 0xFF);
++	regmap_write(pdata->regmap, SN_CHA_HSYNC_PULSE_WIDTH_HIGH_REG,
++		     (((mode->hsync_end - mode->hsync_start) >> 8) & 0x7F) |
++		     hsync_polarity);
++	regmap_write(pdata->regmap, SN_CHA_VSYNC_PULSE_WIDTH_LOW_REG,
++		     (mode->vsync_end - mode->vsync_start) & 0xFF);
++	regmap_write(pdata->regmap, SN_CHA_VSYNC_PULSE_WIDTH_HIGH_REG,
++		     (((mode->vsync_end - mode->vsync_start) >> 8) & 0x7F) |
++		     vsync_polarity);
++
++	regmap_write(pdata->regmap, SN_CHA_HORIZONTAL_BACK_PORCH_REG,
++		     (mode->htotal - mode->hsync_end) & 0xFF);
++	regmap_write(pdata->regmap, SN_CHA_VERTICAL_BACK_PORCH_REG,
++		     (mode->vtotal - mode->vsync_end) & 0xFF);
++
++	regmap_write(pdata->regmap, SN_CHA_HORIZONTAL_FRONT_PORCH_REG,
++		     (mode->hsync_start - mode->hdisplay) & 0xFF);
++	regmap_write(pdata->regmap, SN_CHA_VERTICAL_FRONT_PORCH_REG,
++		     (mode->vsync_start - mode->vdisplay) & 0xFF);
++
++	usleep_range(10000, 10500); /* 10ms delay recommended by spec */
++}
++
++static void ti_sn_bridge_enable(struct drm_bridge *bridge)
++{
++	struct ti_sn_bridge *pdata = bridge_to_ti_sn_bridge(bridge);
++	unsigned int val;
++	int ret;
++
++	/* DSI_A lane config */
++	val = CHA_DSI_LANES(4 - pdata->dsi->lanes);
++	regmap_update_bits(pdata->regmap, SN_DSI_LANES_REG,
++			   CHA_DSI_LANES_MASK, val);
++
++	/* DP lane config */
++	val = DP_NUM_LANES(pdata->dsi->lanes - 1);
++	regmap_update_bits(pdata->regmap, SN_SSC_CONFIG_REG, DP_NUM_LANES_MASK,
++			   val);
++
++	/* set dsi/dp clk frequency value */
++	ti_sn_bridge_set_dsi_dp_rate(pdata);
++
++	/* enable DP PLL */
++	regmap_write(pdata->regmap, SN_PLL_ENABLE_REG, 1);
++
++	ret = regmap_read_poll_timeout(pdata->regmap, SN_DPPLL_SRC_REG, val,
++				       val & DPPLL_SRC_DP_PLL_LOCK, 1000,
++				       50 * 1000);
++	if (ret) {
++		DRM_ERROR("DP_PLL_LOCK polling failed (%d)\n", ret);
++		return;
++	}
++
++	/**
++	 * The SN65DSI86 only supports ASSR Display Authentication method and
++	 * this method is enabled by default. An eDP panel must support this
++	 * authentication method. We need to enable this method in the eDP panel
++	 * at DisplayPort address 0x0010A prior to link training.
++	 */
++	drm_dp_dpcd_writeb(&pdata->aux, DP_EDP_CONFIGURATION_SET,
++			   DP_ALTERNATE_SCRAMBLER_RESET_ENABLE);
++
++	/* Semi auto link training mode */
++	regmap_write(pdata->regmap, SN_ML_TX_MODE_REG, 0x0A);
++	ret = regmap_read_poll_timeout(pdata->regmap, SN_ML_TX_MODE_REG, val,
++				       val == ML_TX_MAIN_LINK_OFF ||
++				       val == ML_TX_NORMAL_MODE, 1000,
++				       500 * 1000);
++	if (ret) {
++		DRM_ERROR("Training complete polling failed (%d)\n", ret);
++		return;
++	} else if (val == ML_TX_MAIN_LINK_OFF) {
++		DRM_ERROR("Link training failed, link is off\n");
++		return;
++	}
++
++	/* config video parameters */
++	ti_sn_bridge_set_video_timings(pdata);
++
++	/* enable video stream */
++	regmap_update_bits(pdata->regmap, SN_ENH_FRAME_REG, VSTREAM_ENABLE,
++			   VSTREAM_ENABLE);
++
++	drm_panel_enable(pdata->panel);
++}
++
++static void ti_sn_bridge_pre_enable(struct drm_bridge *bridge)
++{
++	struct ti_sn_bridge *pdata = bridge_to_ti_sn_bridge(bridge);
++
++	pm_runtime_get_sync(pdata->dev);
++
++	/* configure bridge ref_clk */
++	ti_sn_bridge_set_refclk_freq(pdata);
++
++	/*
++	 * HPD on this bridge chip is a bit useless.  This is an eDP bridge
++	 * so the HPD is an internal signal that's only there to signal that
++	 * the panel is done powering up.  ...but the bridge chip debounces
++	 * this signal by between 100 ms and 400 ms (depending on process,
++	 * voltage, and temperate--I measured it at about 200 ms).  One
++	 * particular panel asserted HPD 84 ms after it was powered on meaning
++	 * that we saw HPD 284 ms after power on.  ...but the same panel said
++	 * that instead of looking at HPD you could just hardcode a delay of
++	 * 200 ms.  We'll assume that the panel driver will have the hardcoded
++	 * delay in its prepare and always disable HPD.
++	 *
++	 * If HPD somehow makes sense on some future panel we'll have to
++	 * change this to be conditional on someone specifying that HPD should
++	 * be used.
++	 */
++	regmap_update_bits(pdata->regmap, SN_HPD_DISABLE_REG, HPD_DISABLE,
++			   HPD_DISABLE);
++
++	drm_panel_prepare(pdata->panel);
++}
++
++static void ti_sn_bridge_post_disable(struct drm_bridge *bridge)
++{
++	struct ti_sn_bridge *pdata = bridge_to_ti_sn_bridge(bridge);
++
++	if (pdata->refclk)
++		clk_disable_unprepare(pdata->refclk);
++
++	pm_runtime_put_sync(pdata->dev);
++}
++
++static const struct drm_bridge_funcs ti_sn_bridge_funcs = {
++	.attach = ti_sn_bridge_attach,
++	.pre_enable = ti_sn_bridge_pre_enable,
++	.enable = ti_sn_bridge_enable,
++	.disable = ti_sn_bridge_disable,
++	.post_disable = ti_sn_bridge_post_disable,
++};
++
++static struct ti_sn_bridge *aux_to_ti_sn_bridge(struct drm_dp_aux *aux)
++{
++	return container_of(aux, struct ti_sn_bridge, aux);
++}
++
++static ssize_t ti_sn_aux_transfer(struct drm_dp_aux *aux,
++				  struct drm_dp_aux_msg *msg)
++{
++	struct ti_sn_bridge *pdata = aux_to_ti_sn_bridge(aux);
++	u32 request = msg->request & ~DP_AUX_I2C_MOT;
++	u32 request_val = AUX_CMD_REQ(msg->request);
++	u8 *buf = (u8 *)msg->buffer;
++	unsigned int val;
++	int ret, i;
++
++	if (msg->size > SN_AUX_MAX_PAYLOAD_BYTES)
++		return -EINVAL;
++
++	switch (request) {
++	case DP_AUX_NATIVE_WRITE:
++	case DP_AUX_I2C_WRITE:
++	case DP_AUX_NATIVE_READ:
++	case DP_AUX_I2C_READ:
++		regmap_write(pdata->regmap, SN_AUX_CMD_REG, request_val);
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	regmap_write(pdata->regmap, SN_AUX_ADDR_19_16_REG,
++		     (msg->address >> 16) & 0xF);
++	regmap_write(pdata->regmap, SN_AUX_ADDR_15_8_REG,
++		     (msg->address >> 8) & 0xFF);
++	regmap_write(pdata->regmap, SN_AUX_ADDR_7_0_REG, msg->address & 0xFF);
++
++	regmap_write(pdata->regmap, SN_AUX_LENGTH_REG, msg->size);
++
++	if (request == DP_AUX_NATIVE_WRITE || request == DP_AUX_I2C_WRITE) {
++		for (i = 0; i < msg->size; i++)
++			regmap_write(pdata->regmap, SN_AUX_WDATA_REG(i),
++				     buf[i]);
++	}
++
++	regmap_write(pdata->regmap, SN_AUX_CMD_REG, request_val | AUX_CMD_SEND);
++
++	ret = regmap_read_poll_timeout(pdata->regmap, SN_AUX_CMD_REG, val,
++				       !(val & AUX_CMD_SEND), 200,
++				       50 * 1000);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(pdata->regmap, SN_AUX_CMD_STATUS_REG, &val);
++	if (ret)
++		return ret;
++	else if ((val & AUX_IRQ_STATUS_NAT_I2C_FAIL)
++		 || (val & AUX_IRQ_STATUS_AUX_RPLY_TOUT)
++		 || (val & AUX_IRQ_STATUS_AUX_SHORT))
++		return -ENXIO;
++
++	if (request == DP_AUX_NATIVE_WRITE || request == DP_AUX_I2C_WRITE)
++		return msg->size;
++
++	for (i = 0; i < msg->size; i++) {
++		unsigned int val;
++		ret = regmap_read(pdata->regmap, SN_AUX_RDATA_REG(i),
++				  &val);
++		if (ret)
++			return ret;
++
++		WARN_ON(val & ~0xFF);
++		buf[i] = (u8)(val & 0xFF);
++	}
++
++	return msg->size;
++}
++
++static int ti_sn_bridge_parse_dsi_host(struct ti_sn_bridge *pdata)
++{
++	struct device_node *np = pdata->dev->of_node;
++
++	pdata->host_node = of_graph_get_remote_node(np, 0, 0);
++
++	if (!pdata->host_node) {
++		DRM_ERROR("remote dsi host node not found\n");
++		return -ENODEV;
++	}
++
++	return 0;
++}
++
++static int ti_sn_bridge_probe(struct i2c_client *client,
++			      const struct i2c_device_id *id)
++{
++	struct ti_sn_bridge *pdata;
++	int ret;
++
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
++		DRM_ERROR("device doesn't support I2C\n");
++		return -ENODEV;
++	}
++
++	pdata = devm_kzalloc(&client->dev, sizeof(struct ti_sn_bridge),
++			     GFP_KERNEL);
++	if (!pdata)
++		return -ENOMEM;
++
++	pdata->regmap = devm_regmap_init_i2c(client,
++					     &ti_sn_bridge_regmap_config);
++	if (IS_ERR(pdata->regmap)) {
++		DRM_ERROR("regmap i2c init failed\n");
++		return PTR_ERR(pdata->regmap);
++	}
++
++	pdata->dev = &client->dev;
++
++	ret = drm_of_find_panel_or_bridge(pdata->dev->of_node, 1, 0,
++					  &pdata->panel, NULL);
++	if (ret) {
++		DRM_ERROR("could not find any panel node\n");
++		return ret;
++	}
++
++	dev_set_drvdata(&client->dev, pdata);
++
++	pdata->enable_gpio = devm_gpiod_get(pdata->dev, "enable",
++					    GPIOD_OUT_LOW);
++	if (IS_ERR(pdata->enable_gpio)) {
++		DRM_ERROR("failed to get enable gpio from DT\n");
++		ret = PTR_ERR(pdata->enable_gpio);
++		return ret;
++	}
++
++	ret = ti_sn_bridge_parse_regulators(pdata);
++	if (ret) {
++		DRM_ERROR("failed to parse regulators\n");
++		return ret;
++	}
++
++	pdata->refclk = devm_clk_get(pdata->dev, "refclk");
++	if (IS_ERR(pdata->refclk)) {
++		ret = PTR_ERR(pdata->refclk);
++		if (ret == -EPROBE_DEFER)
++			return ret;
++		DRM_DEBUG_KMS("refclk not found\n");
++		pdata->refclk = NULL;
++	}
++
++	ret = ti_sn_bridge_parse_dsi_host(pdata);
++	if (ret)
++		return ret;
++
++	pm_runtime_enable(pdata->dev);
++
++	i2c_set_clientdata(client, pdata);
++
++	pdata->aux.name = "ti-sn65dsi86-aux";
++	pdata->aux.dev = pdata->dev;
++	pdata->aux.transfer = ti_sn_aux_transfer;
++	drm_dp_aux_register(&pdata->aux);
++
++	pdata->bridge.funcs = &ti_sn_bridge_funcs;
++	pdata->bridge.of_node = client->dev.of_node;
++
++	drm_bridge_add(&pdata->bridge);
++
++	return 0;
++}
++
++static int ti_sn_bridge_remove(struct i2c_client *client)
++{
++	struct ti_sn_bridge *pdata = i2c_get_clientdata(client);
++
++	if (!pdata)
++		return -EINVAL;
++
++	of_node_put(pdata->host_node);
++
++	pm_runtime_disable(pdata->dev);
++
++	if (pdata->dsi) {
++		mipi_dsi_detach(pdata->dsi);
++		mipi_dsi_device_unregister(pdata->dsi);
++	}
++
++	drm_bridge_remove(&pdata->bridge);
++
++	return 0;
++}
++
++static struct i2c_device_id ti_sn_bridge_id[] = {
++	{ "ti,sn65dsi86", 0},
++	{},
++};
++MODULE_DEVICE_TABLE(i2c, ti_sn_bridge_id);
++
++static const struct of_device_id ti_sn_bridge_match_table[] = {
++	{.compatible = "ti,sn65dsi86"},
++	{},
++};
++MODULE_DEVICE_TABLE(of, ti_sn_bridge_match_table);
++
++static struct i2c_driver ti_sn_bridge_driver = {
++	.driver = {
++		.name = "ti_sn65dsi86",
++		.of_match_table = ti_sn_bridge_match_table,
++		.pm = &ti_sn_bridge_pm_ops,
++	},
++	.probe = ti_sn_bridge_probe,
++	.remove = ti_sn_bridge_remove,
++	.id_table = ti_sn_bridge_id,
++};
++module_i2c_driver(ti_sn_bridge_driver);
++
++MODULE_AUTHOR("Sandeep Panda <spanda@codeaurora.org>");
++MODULE_DESCRIPTION("sn65dsi86 DSI to eDP bridge driver");
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/gpu/drm/bridge/ti-tfp410.c b/drivers/gpu/drm/bridge/ti-tfp410.c
+index c3e32138c..7bfb4f338 100644
+--- a/drivers/gpu/drm/bridge/ti-tfp410.c
++++ b/drivers/gpu/drm/bridge/ti-tfp410.c
+@@ -20,7 +20,7 @@
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #define HOTPLUG_DEBOUNCE_MS		1100
+ 

@@ -1,0 +1,154 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts
+index 5810cf7de..f4b294a36 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts
+@@ -63,7 +63,6 @@
+ 		stdout-path = "serial0:115200n8";
+ 	};
+ 
+-
+ 	hdmi-connector {
+ 		compatible = "hdmi-connector";
+ 		type = "a";
+@@ -86,17 +85,18 @@
+ };
+ 
+ &codec_analog {
++	hpvcc-supply = <&reg_eldo1>;
+ 	status = "okay";
+ };
+ 
+-&cpu0 {
+-	cpu-supply = <&reg_dcdc2>;
+-};
+-
+ &dai {
+ 	status = "okay";
+ };
+ 
++&cpu0 {
++	cpu-supply = <&reg_dcdc2>;
++};
++
+ &de {
+ 	status = "okay";
+ };
+@@ -140,10 +140,6 @@
+ 	bias-pull-up;
+ };
+ 
+-&i2s2 {
+-	status = "okay";
+-};
+-
+ &mdio {
+ 	ext_rmii_phy1: ethernet-phy@1 {
+ 		compatible = "ethernet-phy-ieee802.3-c22";
+@@ -193,6 +189,14 @@
+ 
+ #include "axp803.dtsi"
+ 
++&ac_power_supply {
++	status = "okay";
++};
++
++&battery_power_supply {
++	status = "okay";
++};
++
+ &reg_aldo2 {
+ 	regulator-always-on;
+ 	regulator-min-microvolt = <1800000>;
+@@ -296,36 +300,29 @@
+ 	vcc-hdmi-supply = <&reg_dldo1>;
+ };
+ 
+-/* On Euler connector */
+-&spdif {
+-	status = "disabled";
+-};
+-
+ &sound {
+-	status = "okay";
++	simple-audio-card,aux-devs = <&codec_analog>;
+ 	simple-audio-card,widgets = "Microphone", "Microphone Jack",
+ 				    "Headphone", "Headphone Jack";
+ 	simple-audio-card,routing =
+ 			"Left DAC", "AIF1 Slot 0 Left",
+ 			"Right DAC", "AIF1 Slot 0 Right",
+-			"Speaker", "LINEOUT",
+ 			"Headphone Jack", "HP",
+ 			"AIF1 Slot 0 Left ADC", "Left ADC",
+ 			"AIF1 Slot 0 Right ADC", "Right ADC",
+-			"Left ADC", "ADC",
+-			"Right ADC", "ADC",
+-			"Microphone Jack", "HBIAS",
+ 			"MIC2", "Microphone Jack";
++	status = "okay";
+ };
+ 
+-&sound_hdmi {
+-	status = "okay";
++/* On Euler connector */
++&spdif {
++	status = "disabled";
+ };
+ 
+ /* On Exp and Euler connectors */
+ &uart0 {
+ 	pinctrl-names = "default";
+-	pinctrl-0 = <&uart0_pins_a>;
++	pinctrl-0 = <&uart0_pb_pins>;
+ 	status = "okay";
+ };
+ 
+@@ -333,15 +330,7 @@
+ &uart1 {
+ 	pinctrl-names = "default";
+ 	pinctrl-0 = <&uart1_pins>, <&uart1_rts_cts_pins>;
+-	status = "okay";
+-
+-	bluetooth {
+-		compatible = "realtek,rtl8723bs-bt";
+-		reset-gpios = <&r_pio 0 4 GPIO_ACTIVE_LOW>; /* PL4 */
+-		device-wake-gpios = <&r_pio 0 5 GPIO_ACTIVE_HIGH>; /* PL5 */
+-		host-wake-gpios = <&r_pio 0 6 GPIO_ACTIVE_HIGH>; /* PL6 */
+-		firmware-postfix = "pine64";
+-	};
++	status = "disabled";
+ };
+ 
+ /* On Pi-2 connector */
+@@ -373,32 +362,3 @@
+ &usbphy {
+ 	status = "okay";
+ };
+-
+-&spi0 {
+-        status = "okay";
+-        spi-flash@0 {
+-                #address-cells = <1>;
+-                #size-cells = <0>;
+-                compatible = "jedec,spi-nor";
+-                reg = <0>; /* Chip select 0 */
+-                spi-max-frequency = <10000000>;
+-                status = "disabled";
+-                partitions {
+-                        compatible = "fixed-partitions";
+-                        #address-cells = <1>;
+-                        #size-cells = <1>;
+-                        partition@0 {
+-                                label = "uboot";
+-                                reg = <0x0 0x100000>;
+-                        };
+-                        partition@100000 {
+-                                label = "env";
+-                                reg = <0x100000 0x100000>;
+-                        };
+-                        partition@200000 {
+-                                label = "data";
+-                                reg = <0x200000 0x200000>;
+-                        };
+-                };
+-        };
+-};

@@ -1,0 +1,23 @@
+diff --git a/include/linux/compiler_types.h b/include/linux/compiler_types.h
+index 4809c5ee0..7dc06df25 100644
+--- a/include/linux/compiler_types.h
++++ b/include/linux/compiler_types.h
+@@ -129,7 +129,8 @@ struct ftrace_likely_data {
+  */
+ #define __naked			__attribute__((__naked__)) notrace
+ 
+-#define __compiler_offsetof(a, b)	__builtin_offsetof(a, b)
++#define __compiler_offsetof(a, b)	\
++	__builtin_offsetof(a, b)
+ 
+ #define __inline__ inline
+ #define __inline   inline
+@@ -217,8 +218,6 @@ struct ftrace_likely_data {
+ #define __diag_error(compiler, version, option, comment) \
+ 	__diag_ ## compiler(version, error, option)
+ 
+-#define __compiler_offsetof(a, b)	__builtin_offsetof(a, b)
+-
+ /*
+  * Force always-inline if the user requests it so via the .config.
+  * GCC does not warn about unused static inline functions for

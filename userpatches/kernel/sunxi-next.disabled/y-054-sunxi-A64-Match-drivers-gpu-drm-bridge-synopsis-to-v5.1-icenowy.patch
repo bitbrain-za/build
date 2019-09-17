@@ -1,0 +1,718 @@
+diff --git a/drivers/gpu/drm/bridge/synopsys/dw-hdmi-ahb-audio.c b/drivers/gpu/drm/bridge/synopsys/dw-hdmi-ahb-audio.c
+index cf3f0caf9..ed7af7518 100644
+--- a/drivers/gpu/drm/bridge/synopsys/dw-hdmi-ahb-audio.c
++++ b/drivers/gpu/drm/bridge/synopsys/dw-hdmi-ahb-audio.c
+@@ -614,7 +614,6 @@ static int snd_dw_hdmi_suspend(struct device *dev)
+ 	struct snd_dw_hdmi *dw = dev_get_drvdata(dev);
+ 
+ 	snd_power_change_state(dw->card, SNDRV_CTL_POWER_D3cold);
+-	snd_pcm_suspend_all(dw->pcm);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/bridge/synopsys/dw-hdmi-i2s-audio.c b/drivers/gpu/drm/bridge/synopsys/dw-hdmi-i2s-audio.c
+index 8f9c8a6b4..5cbb71a86 100644
+--- a/drivers/gpu/drm/bridge/synopsys/dw-hdmi-i2s-audio.c
++++ b/drivers/gpu/drm/bridge/synopsys/dw-hdmi-i2s-audio.c
+@@ -1,13 +1,14 @@
++// SPDX-License-Identifier: GPL-2.0
+ /*
+  * dw-hdmi-i2s-audio.c
+  *
+  * Copyright (c) 2017 Renesas Solutions Corp.
+  * Kuninori Morimoto <kuninori.morimoto.gx@renesas.com>
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2 as
+- * published by the Free Software Foundation.
+  */
++
++#include <linux/dma-mapping.h>
++#include <linux/module.h>
++
+ #include <drm/bridge/dw_hdmi.h>
+ 
+ #include <sound/hdmi-codec.h>
+diff --git a/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c b/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c
+index 822d0093a..93c43e78e 100644
+--- a/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c
++++ b/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c
+@@ -25,9 +25,10 @@
+ #include <drm/drm_of.h>
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_edid.h>
+ #include <drm/drm_encoder_slave.h>
++#include <drm/drm_scdc_helper.h>
++#include <drm/drm_probe_helper.h>
+ #include <drm/bridge/dw_hdmi.h>
+ 
+ #include <uapi/linux/media-bus-format.h>
+@@ -43,6 +44,11 @@
+ 
+ #define HDMI_EDID_LEN		512
+ 
++/* DW-HDMI Controller >= 0x200a are at least compliant with SCDC version 1 */
++#define SCDC_MIN_SOURCE_VERSION	0x1
++
++#define HDMI14_MAX_TMDSCLK	340000000
++
+ enum hdmi_datamap {
+ 	RGB444_8B = 0x01,
+ 	RGB444_10B = 0x03,
+@@ -93,6 +99,7 @@ struct hdmi_vmode {
+ 	unsigned int mpixelclock;
+ 	unsigned int mpixelrepetitioninput;
+ 	unsigned int mpixelrepetitionoutput;
++	unsigned int mtmdsclock;
+ };
+ 
+ struct hdmi_data_info {
+@@ -424,22 +431,16 @@ static struct i2c_adapter *dw_hdmi_i2c_adapter(struct dw_hdmi *hdmi)
+ static void hdmi_set_cts_n(struct dw_hdmi *hdmi, unsigned int cts,
+ 			   unsigned int n)
+ {
+-	if (!hdmi->plat_data->auto_cts) {
+-		/* Must be set/cleared first */
+-		hdmi_modb(hdmi, 0, HDMI_AUD_CTS3_CTS_MANUAL, HDMI_AUD_CTS3);
++	/* Must be set/cleared first */
++	hdmi_modb(hdmi, 0, HDMI_AUD_CTS3_CTS_MANUAL, HDMI_AUD_CTS3);
+ 
+-		/* nshift factor = 0 */
+-		hdmi_modb(hdmi, 0, HDMI_AUD_CTS3_N_SHIFT_MASK, HDMI_AUD_CTS3);
++	/* nshift factor = 0 */
++	hdmi_modb(hdmi, 0, HDMI_AUD_CTS3_N_SHIFT_MASK, HDMI_AUD_CTS3);
+ 
+-		hdmi_writeb(hdmi,
+-			    ((cts >> 16) & HDMI_AUD_CTS3_AUDCTS19_16_MASK) |
+-			    HDMI_AUD_CTS3_CTS_MANUAL, HDMI_AUD_CTS3);
+-		hdmi_writeb(hdmi, (cts >> 8) & 0xff, HDMI_AUD_CTS2);
+-		hdmi_writeb(hdmi, cts & 0xff, HDMI_AUD_CTS1);
+-	} else {
+-		/* set automatic CTS calculation */
+-		hdmi_writeb(hdmi, 0x00, HDMI_AUD_CTS3);
+-	}
++	hdmi_writeb(hdmi, ((cts >> 16) & HDMI_AUD_CTS3_AUDCTS19_16_MASK) |
++		    HDMI_AUD_CTS3_CTS_MANUAL, HDMI_AUD_CTS3);
++	hdmi_writeb(hdmi, (cts >> 8) & 0xff, HDMI_AUD_CTS2);
++	hdmi_writeb(hdmi, cts & 0xff, HDMI_AUD_CTS1);
+ 
+ 	hdmi_writeb(hdmi, (n >> 16) & 0x0f, HDMI_AUD_N3);
+ 	hdmi_writeb(hdmi, (n >> 8) & 0xff, HDMI_AUD_N2);
+@@ -543,7 +544,7 @@ static void hdmi_init_clk_regenerator(struct dw_hdmi *hdmi)
+ static void hdmi_clk_regenerator_update_pixel_clock(struct dw_hdmi *hdmi)
+ {
+ 	mutex_lock(&hdmi->audio_mutex);
+-	hdmi_set_clk_regenerator(hdmi, hdmi->hdmi_data.video_mode.mpixelclock,
++	hdmi_set_clk_regenerator(hdmi, hdmi->hdmi_data.video_mode.mtmdsclock,
+ 				 hdmi->sample_rate);
+ 	mutex_unlock(&hdmi->audio_mutex);
+ }
+@@ -552,7 +553,7 @@ void dw_hdmi_set_sample_rate(struct dw_hdmi *hdmi, unsigned int rate)
+ {
+ 	mutex_lock(&hdmi->audio_mutex);
+ 	hdmi->sample_rate = rate;
+-	hdmi_set_clk_regenerator(hdmi, hdmi->hdmi_data.video_mode.mpixelclock,
++	hdmi_set_clk_regenerator(hdmi, hdmi->hdmi_data.video_mode.mtmdsclock,
+ 				 hdmi->sample_rate);
+ 	mutex_unlock(&hdmi->audio_mutex);
+ }
+@@ -653,6 +654,20 @@ static bool hdmi_bus_fmt_is_yuv422(unsigned int bus_format)
+ 	}
+ }
+ 
++static bool hdmi_bus_fmt_is_yuv420(unsigned int bus_format)
++{
++	switch (bus_format) {
++	case MEDIA_BUS_FMT_UYYVYY8_0_5X24:
++	case MEDIA_BUS_FMT_UYYVYY10_0_5X30:
++	case MEDIA_BUS_FMT_UYYVYY12_0_5X36:
++	case MEDIA_BUS_FMT_UYYVYY16_0_5X48:
++		return true;
++
++	default:
++		return false;
++	}
++}
++
+ static int hdmi_bus_fmt_color_depth(unsigned int bus_format)
+ {
+ 	switch (bus_format) {
+@@ -882,7 +897,8 @@ static void hdmi_video_packetize(struct dw_hdmi *hdmi)
+ 	u8 val, vp_conf;
+ 
+ 	if (hdmi_bus_fmt_is_rgb(hdmi->hdmi_data.enc_out_bus_format) ||
+-	    hdmi_bus_fmt_is_yuv444(hdmi->hdmi_data.enc_out_bus_format)) {
++	    hdmi_bus_fmt_is_yuv444(hdmi->hdmi_data.enc_out_bus_format) ||
++	    hdmi_bus_fmt_is_yuv420(hdmi->hdmi_data.enc_out_bus_format)) {
+ 		switch (hdmi_bus_fmt_color_depth(
+ 					hdmi->hdmi_data.enc_out_bus_format)) {
+ 		case 8:
+@@ -1021,6 +1037,33 @@ void dw_hdmi_phy_i2c_write(struct dw_hdmi *hdmi, unsigned short data,
+ }
+ EXPORT_SYMBOL_GPL(dw_hdmi_phy_i2c_write);
+ 
++/*
++ * HDMI2.0 Specifies the following procedure for High TMDS Bit Rates:
++ * - The Source shall suspend transmission of the TMDS clock and data
++ * - The Source shall write to the TMDS_Bit_Clock_Ratio bit to change it
++ * from a 0 to a 1 or from a 1 to a 0
++ * - The Source shall allow a minimum of 1 ms and a maximum of 100 ms from
++ * the time the TMDS_Bit_Clock_Ratio bit is written until resuming
++ * transmission of TMDS clock and data
++ *
++ * To respect the 100ms maximum delay, the dw_hdmi_set_high_tmds_clock_ratio()
++ * helper should called right before enabling the TMDS Clock and Data in
++ * the PHY configuration callback.
++ */
++void dw_hdmi_set_high_tmds_clock_ratio(struct dw_hdmi *hdmi)
++{
++	unsigned long mtmdsclock = hdmi->hdmi_data.video_mode.mtmdsclock;
++
++	/* Control for TMDS Bit Period/TMDS Clock-Period Ratio */
++	if (hdmi->connector.display_info.hdmi.scdc.supported) {
++		if (mtmdsclock > HDMI14_MAX_TMDSCLK)
++			drm_scdc_set_high_tmds_clock_ratio(hdmi->ddc, 1);
++		else
++			drm_scdc_set_high_tmds_clock_ratio(hdmi->ddc, 0);
++	}
++}
++EXPORT_SYMBOL_GPL(dw_hdmi_set_high_tmds_clock_ratio);
++
+ static void dw_hdmi_phy_enable_powerdown(struct dw_hdmi *hdmi, bool enable)
+ {
+ 	hdmi_mask_writeb(hdmi, !enable, HDMI_PHY_CONF0,
+@@ -1171,6 +1214,8 @@ static int hdmi_phy_configure_dwc_hdmi_3d_tx(struct dw_hdmi *hdmi,
+ 	const struct dw_hdmi_curr_ctrl *curr_ctrl = pdata->cur_ctr;
+ 	const struct dw_hdmi_phy_config *phy_config = pdata->phy_config;
+ 
++	/* TOFIX Will need 420 specific PHY configuration tables */
++
+ 	/* PLL/MPLL Cfg - always match on final entry */
+ 	for (; mpll_config->mpixelclock != ~0UL; mpll_config++)
+ 		if (mpixelclock <= mpll_config->mpixelclock)
+@@ -1218,10 +1263,13 @@ static int hdmi_phy_configure(struct dw_hdmi *hdmi)
+ 	const struct dw_hdmi_phy_data *phy = hdmi->phy.data;
+ 	const struct dw_hdmi_plat_data *pdata = hdmi->plat_data;
+ 	unsigned long mpixelclock = hdmi->hdmi_data.video_mode.mpixelclock;
++	unsigned long mtmdsclock = hdmi->hdmi_data.video_mode.mtmdsclock;
+ 	int ret;
+ 
+ 	dw_hdmi_phy_power_off(hdmi);
+ 
++	dw_hdmi_set_high_tmds_clock_ratio(hdmi);
++
+ 	/* Leave low power consumption mode by asserting SVSRET. */
+ 	if (phy->has_svsret)
+ 		dw_hdmi_phy_enable_svsret(hdmi, 1);
+@@ -1243,6 +1291,10 @@ static int hdmi_phy_configure(struct dw_hdmi *hdmi)
+ 		return ret;
+ 	}
+ 
++	/* Wait for resuming transmission of TMDS clock and data */
++	if (mtmdsclock > HDMI14_MAX_TMDSCLK)
++		msleep(100);
++
+ 	return dw_hdmi_phy_power_on(hdmi);
+ }
+ 
+@@ -1350,12 +1402,15 @@ static void hdmi_config_AVI(struct dw_hdmi *hdmi, struct drm_display_mode *mode)
+ 	u8 val;
+ 
+ 	/* Initialise info frame from DRM mode */
+-	drm_hdmi_avi_infoframe_from_display_mode(&frame, mode, false);
++	drm_hdmi_avi_infoframe_from_display_mode(&frame,
++						 &hdmi->connector, mode);
+ 
+ 	if (hdmi_bus_fmt_is_yuv444(hdmi->hdmi_data.enc_out_bus_format))
+ 		frame.colorspace = HDMI_COLORSPACE_YUV444;
+ 	else if (hdmi_bus_fmt_is_yuv422(hdmi->hdmi_data.enc_out_bus_format))
+ 		frame.colorspace = HDMI_COLORSPACE_YUV422;
++	else if (hdmi_bus_fmt_is_yuv420(hdmi->hdmi_data.enc_out_bus_format))
++		frame.colorspace = HDMI_COLORSPACE_YUV420;
+ 	else
+ 		frame.colorspace = HDMI_COLORSPACE_RGB;
+ 
+@@ -1509,17 +1564,23 @@ static void hdmi_config_vendor_specific_infoframe(struct dw_hdmi *hdmi,
+ static void hdmi_av_composer(struct dw_hdmi *hdmi,
+ 			     const struct drm_display_mode *mode)
+ {
+-	u8 inv_val;
++	u8 inv_val, bytes;
++	struct drm_hdmi_info *hdmi_info = &hdmi->connector.display_info.hdmi;
+ 	struct hdmi_vmode *vmode = &hdmi->hdmi_data.video_mode;
+ 	int hblank, vblank, h_de_hs, v_de_vs, hsync_len, vsync_len;
+-	unsigned int vdisplay;
++	unsigned int vdisplay, hdisplay;
+ 
+-	vmode->mpixelclock = mode->clock * 1000;
++	vmode->mtmdsclock = vmode->mpixelclock = mode->clock * 1000;
+ 
+ 	dev_dbg(hdmi->dev, "final pixclk = %d\n", vmode->mpixelclock);
+ 
++	if (hdmi_bus_fmt_is_yuv420(hdmi->hdmi_data.enc_out_bus_format))
++		vmode->mtmdsclock /= 2;
++
+ 	/* Set up HDMI_FC_INVIDCONF */
+-	inv_val = (hdmi->hdmi_data.hdcp_enable ?
++	inv_val = (hdmi->hdmi_data.hdcp_enable ||
++		   vmode->mtmdsclock > HDMI14_MAX_TMDSCLK ||
++		   hdmi_info->scdc.scrambling.low_rates ?
+ 		HDMI_FC_INVIDCONF_HDCP_KEEPOUT_ACTIVE :
+ 		HDMI_FC_INVIDCONF_HDCP_KEEPOUT_INACTIVE);
+ 
+@@ -1552,6 +1613,22 @@ static void hdmi_av_composer(struct dw_hdmi *hdmi,
+ 
+ 	hdmi_writeb(hdmi, inv_val, HDMI_FC_INVIDCONF);
+ 
++	hdisplay = mode->hdisplay;
++	hblank = mode->htotal - mode->hdisplay;
++	h_de_hs = mode->hsync_start - mode->hdisplay;
++	hsync_len = mode->hsync_end - mode->hsync_start;
++
++	/*
++	 * When we're setting a YCbCr420 mode, we need
++	 * to adjust the horizontal timing to suit.
++	 */
++	if (hdmi_bus_fmt_is_yuv420(hdmi->hdmi_data.enc_out_bus_format)) {
++		hdisplay /= 2;
++		hblank /= 2;
++		h_de_hs /= 2;
++		hsync_len /= 2;
++	}
++
+ 	vdisplay = mode->vdisplay;
+ 	vblank = mode->vtotal - mode->vdisplay;
+ 	v_de_vs = mode->vsync_start - mode->vdisplay;
+@@ -1568,16 +1645,54 @@ static void hdmi_av_composer(struct dw_hdmi *hdmi,
+ 		vsync_len /= 2;
+ 	}
+ 
++	/* Scrambling Control */
++	if (hdmi_info->scdc.supported) {
++		if (vmode->mtmdsclock > HDMI14_MAX_TMDSCLK ||
++		    hdmi_info->scdc.scrambling.low_rates) {
++			/*
++			 * HDMI2.0 Specifies the following procedure:
++			 * After the Source Device has determined that
++			 * SCDC_Present is set (=1), the Source Device should
++			 * write the accurate Version of the Source Device
++			 * to the Source Version field in the SCDCS.
++			 * Source Devices compliant shall set the
++			 * Source Version = 1.
++			 */
++			drm_scdc_readb(&hdmi->i2c->adap, SCDC_SINK_VERSION,
++				       &bytes);
++			drm_scdc_writeb(&hdmi->i2c->adap, SCDC_SOURCE_VERSION,
++				min_t(u8, bytes, SCDC_MIN_SOURCE_VERSION));
++
++			/* Enabled Scrambling in the Sink */
++			drm_scdc_set_scrambling(&hdmi->i2c->adap, 1);
++
++			/*
++			 * To activate the scrambler feature, you must ensure
++			 * that the quasi-static configuration bit
++			 * fc_invidconf.HDCP_keepout is set at configuration
++			 * time, before the required mc_swrstzreq.tmdsswrst_req
++			 * reset request is issued.
++			 */
++			hdmi_writeb(hdmi, (u8)~HDMI_MC_SWRSTZ_TMDSSWRST_REQ,
++				    HDMI_MC_SWRSTZ);
++			hdmi_writeb(hdmi, 1, HDMI_FC_SCRAMBLER_CTRL);
++		} else {
++			hdmi_writeb(hdmi, 0, HDMI_FC_SCRAMBLER_CTRL);
++			hdmi_writeb(hdmi, (u8)~HDMI_MC_SWRSTZ_TMDSSWRST_REQ,
++				    HDMI_MC_SWRSTZ);
++			drm_scdc_set_scrambling(&hdmi->i2c->adap, 0);
++		}
++	}
++
+ 	/* Set up horizontal active pixel width */
+-	hdmi_writeb(hdmi, mode->hdisplay >> 8, HDMI_FC_INHACTV1);
+-	hdmi_writeb(hdmi, mode->hdisplay, HDMI_FC_INHACTV0);
++	hdmi_writeb(hdmi, hdisplay >> 8, HDMI_FC_INHACTV1);
++	hdmi_writeb(hdmi, hdisplay, HDMI_FC_INHACTV0);
+ 
+ 	/* Set up vertical active lines */
+ 	hdmi_writeb(hdmi, vdisplay >> 8, HDMI_FC_INVACTV1);
+ 	hdmi_writeb(hdmi, vdisplay, HDMI_FC_INVACTV0);
+ 
+ 	/* Set up horizontal blanking pixel region width */
+-	hblank = mode->htotal - mode->hdisplay;
+ 	hdmi_writeb(hdmi, hblank >> 8, HDMI_FC_INHBLANK1);
+ 	hdmi_writeb(hdmi, hblank, HDMI_FC_INHBLANK0);
+ 
+@@ -1585,7 +1700,6 @@ static void hdmi_av_composer(struct dw_hdmi *hdmi,
+ 	hdmi_writeb(hdmi, vblank, HDMI_FC_INVBLANK);
+ 
+ 	/* Set up HSYNC active edge delay width (in pixel clks) */
+-	h_de_hs = mode->hsync_start - mode->hdisplay;
+ 	hdmi_writeb(hdmi, h_de_hs >> 8, HDMI_FC_HSYNCINDELAY1);
+ 	hdmi_writeb(hdmi, h_de_hs, HDMI_FC_HSYNCINDELAY0);
+ 
+@@ -1593,7 +1707,6 @@ static void hdmi_av_composer(struct dw_hdmi *hdmi,
+ 	hdmi_writeb(hdmi, v_de_vs, HDMI_FC_VSYNCINDELAY);
+ 
+ 	/* Set up HSYNC active pulse width (in pixel clks) */
+-	hsync_len = mode->hsync_end - mode->hsync_start;
+ 	hdmi_writeb(hdmi, hsync_len >> 8, HDMI_FC_HSYNCINWIDTH1);
+ 	hdmi_writeb(hdmi, hsync_len, HDMI_FC_HSYNCINWIDTH0);
+ 
+@@ -1670,6 +1783,7 @@ static void dw_hdmi_clear_overflow(struct dw_hdmi *hdmi)
+ 	case 0x131a:
+ 	case 0x132a:
+ 	case 0x201a:
++	case 0x212a:
+ 		count = 1;
+ 		break;
+ 	default:
+@@ -1963,7 +2077,6 @@ static const struct drm_connector_funcs dw_hdmi_connector_funcs = {
+ 
+ static const struct drm_connector_helper_funcs dw_hdmi_connector_helper_funcs = {
+ 	.get_modes = dw_hdmi_connector_get_modes,
+-	.best_encoder = drm_atomic_helper_best_encoder,
+ };
+ 
+ static int dw_hdmi_bridge_attach(struct drm_bridge *bridge)
+@@ -2004,8 +2117,8 @@ dw_hdmi_bridge_mode_valid(struct drm_bridge *bridge,
+ }
+ 
+ static void dw_hdmi_bridge_mode_set(struct drm_bridge *bridge,
+-				    struct drm_display_mode *orig_mode,
+-				    struct drm_display_mode *mode)
++				    const struct drm_display_mode *orig_mode,
++				    const struct drm_display_mode *mode)
+ {
+ 	struct dw_hdmi *hdmi = bridge->driver_private;
+ 
+@@ -2013,6 +2126,7 @@ static void dw_hdmi_bridge_mode_set(struct drm_bridge *bridge,
+ 
+ 	/* Store the display mode for plugin/DKMS poweron events */
+ 	memcpy(&hdmi->previous_mode, mode, sizeof(hdmi->previous_mode));
++	dw_hdmi_setup(hdmi, mode);
+ 
+ 	mutex_unlock(&hdmi->mutex);
+ }
+@@ -2211,7 +2325,9 @@ static int dw_hdmi_detect_phy(struct dw_hdmi *hdmi)
+ 	unsigned int i;
+ 	u8 phy_type;
+ 
+-	phy_type = hdmi_readb(hdmi, HDMI_CONFIG2_ID);
++	phy_type = hdmi->plat_data->phy_force_vendor ?
++				DW_HDMI_PHY_VENDOR_PHY :
++				hdmi_readb(hdmi, HDMI_CONFIG2_ID);
+ 
+ 	if (phy_type == DW_HDMI_PHY_VENDOR_PHY) {
+ 		/* Vendor PHYs require support from the glue layer. */
+diff --git a/drivers/gpu/drm/bridge/synopsys/dw-hdmi.h b/drivers/gpu/drm/bridge/synopsys/dw-hdmi.h
+index 9d90eb9c4..3f3c616eb 100644
+--- a/drivers/gpu/drm/bridge/synopsys/dw-hdmi.h
++++ b/drivers/gpu/drm/bridge/synopsys/dw-hdmi.h
+@@ -255,6 +255,7 @@
+ #define HDMI_FC_MASK2                           0x10DA
+ #define HDMI_FC_POL2                            0x10DB
+ #define HDMI_FC_PRCONF                          0x10E0
++#define HDMI_FC_SCRAMBLER_CTRL                  0x10E1
+ 
+ #define HDMI_FC_GMD_STAT                        0x1100
+ #define HDMI_FC_GMD_EN                          0x1101
+diff --git a/drivers/gpu/drm/bridge/synopsys/dw-mipi-dsi.c b/drivers/gpu/drm/bridge/synopsys/dw-mipi-dsi.c
+index fd7999642..e915ae8c9 100644
+--- a/drivers/gpu/drm/bridge/synopsys/dw-mipi-dsi.c
++++ b/drivers/gpu/drm/bridge/synopsys/dw-mipi-dsi.c
+@@ -19,9 +19,9 @@
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_bridge.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_mipi_dsi.h>
+ #include <drm/drm_of.h>
++#include <drm/drm_probe_helper.h>
+ #include <drm/bridge/dw_mipi_dsi.h>
+ #include <video/mipi_display.h>
+ 
+@@ -230,14 +230,25 @@ struct dw_mipi_dsi {
+ 	u32 format;
+ 	unsigned long mode_flags;
+ 
++	struct dw_mipi_dsi *master; /* dual-dsi master ptr */
++	struct dw_mipi_dsi *slave; /* dual-dsi slave ptr */
++
+ 	const struct dw_mipi_dsi_plat_data *plat_data;
+ };
+ 
++/*
++ * Check if either a link to a master or slave is present
++ */
++static inline bool dw_mipi_is_dual_mode(struct dw_mipi_dsi *dsi)
++{
++	return dsi->slave || dsi->master;
++}
++
+ /*
+  * The controller should generate 2 frames before
+  * preparing the peripheral.
+  */
+-static void dw_mipi_dsi_wait_for_two_frames(struct drm_display_mode *mode)
++static void dw_mipi_dsi_wait_for_two_frames(const struct drm_display_mode *mode)
+ {
+ 	int refresh, two_frames;
+ 
+@@ -270,6 +281,7 @@ static int dw_mipi_dsi_host_attach(struct mipi_dsi_host *host,
+ 				   struct mipi_dsi_device *device)
+ {
+ 	struct dw_mipi_dsi *dsi = host_to_dsi(host);
++	const struct dw_mipi_dsi_plat_data *pdata = dsi->plat_data;
+ 	struct drm_bridge *bridge;
+ 	struct drm_panel *panel;
+ 	int ret;
+@@ -300,6 +312,12 @@ static int dw_mipi_dsi_host_attach(struct mipi_dsi_host *host,
+ 
+ 	drm_bridge_add(&dsi->bridge);
+ 
++	if (pdata->host_ops && pdata->host_ops->attach) {
++		ret = pdata->host_ops->attach(pdata->priv_data, device);
++		if (ret < 0)
++			return ret;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -307,6 +325,14 @@ static int dw_mipi_dsi_host_detach(struct mipi_dsi_host *host,
+ 				   struct mipi_dsi_device *device)
+ {
+ 	struct dw_mipi_dsi *dsi = host_to_dsi(host);
++	const struct dw_mipi_dsi_plat_data *pdata = dsi->plat_data;
++	int ret;
++
++	if (pdata->host_ops && pdata->host_ops->detach) {
++		ret = pdata->host_ops->detach(pdata->priv_data, device);
++		if (ret < 0)
++			return ret;
++	}
+ 
+ 	drm_of_panel_bridge_remove(host->dev->of_node, 1, 0);
+ 
+@@ -441,10 +467,17 @@ static ssize_t dw_mipi_dsi_host_transfer(struct mipi_dsi_host *host,
+ 	}
+ 
+ 	dw_mipi_message_config(dsi, msg);
++	if (dsi->slave)
++		dw_mipi_message_config(dsi->slave, msg);
+ 
+ 	ret = dw_mipi_dsi_write(dsi, &packet);
+ 	if (ret)
+ 		return ret;
++	if (dsi->slave) {
++		ret = dw_mipi_dsi_write(dsi->slave, &packet);
++		if (ret)
++			return ret;
++	}
+ 
+ 	if (msg->rx_buf && msg->rx_len) {
+ 		ret = dw_mipi_dsi_read(dsi, msg);
+@@ -531,7 +564,7 @@ static void dw_mipi_dsi_init(struct dw_mipi_dsi *dsi)
+ }
+ 
+ static void dw_mipi_dsi_dpi_config(struct dw_mipi_dsi *dsi,
+-				   struct drm_display_mode *mode)
++				   const struct drm_display_mode *mode)
+ {
+ 	u32 val = 0, color = 0;
+ 
+@@ -574,7 +607,7 @@ static void dw_mipi_dsi_packet_handler_config(struct dw_mipi_dsi *dsi)
+ }
+ 
+ static void dw_mipi_dsi_video_packet_config(struct dw_mipi_dsi *dsi,
+-					    struct drm_display_mode *mode)
++					    const struct drm_display_mode *mode)
+ {
+ 	/*
+ 	 * TODO dw drv improvements
+@@ -583,7 +616,11 @@ static void dw_mipi_dsi_video_packet_config(struct dw_mipi_dsi *dsi,
+ 	 * DSI_VNPCR.NPSIZE... especially because this driver supports
+ 	 * non-burst video modes, see dw_mipi_dsi_video_mode_config()...
+ 	 */
+-	dsi_write(dsi, DSI_VID_PKT_SIZE, VID_PKT_SIZE(mode->hdisplay));
++
++	dsi_write(dsi, DSI_VID_PKT_SIZE,
++		       dw_mipi_is_dual_mode(dsi) ?
++				VID_PKT_SIZE(mode->hdisplay / 2) :
++				VID_PKT_SIZE(mode->hdisplay));
+ }
+ 
+ static void dw_mipi_dsi_command_mode_config(struct dw_mipi_dsi *dsi)
+@@ -605,7 +642,7 @@ static void dw_mipi_dsi_command_mode_config(struct dw_mipi_dsi *dsi)
+ 
+ /* Get lane byte clock cycles. */
+ static u32 dw_mipi_dsi_get_hcomponent_lbcc(struct dw_mipi_dsi *dsi,
+-					   struct drm_display_mode *mode,
++					   const struct drm_display_mode *mode,
+ 					   u32 hcomponent)
+ {
+ 	u32 frac, lbcc;
+@@ -621,7 +658,7 @@ static u32 dw_mipi_dsi_get_hcomponent_lbcc(struct dw_mipi_dsi *dsi,
+ }
+ 
+ static void dw_mipi_dsi_line_timer_config(struct dw_mipi_dsi *dsi,
+-					  struct drm_display_mode *mode)
++					  const struct drm_display_mode *mode)
+ {
+ 	u32 htotal, hsa, hbp, lbcc;
+ 
+@@ -644,7 +681,7 @@ static void dw_mipi_dsi_line_timer_config(struct dw_mipi_dsi *dsi,
+ }
+ 
+ static void dw_mipi_dsi_vertical_timing_config(struct dw_mipi_dsi *dsi,
+-					       struct drm_display_mode *mode)
++					const struct drm_display_mode *mode)
+ {
+ 	u32 vactive, vsa, vfp, vbp;
+ 
+@@ -755,24 +792,43 @@ static void dw_mipi_dsi_bridge_post_disable(struct drm_bridge *bridge)
+ 	 */
+ 	dsi->panel_bridge->funcs->post_disable(dsi->panel_bridge);
+ 
++	if (dsi->slave) {
++		dw_mipi_dsi_disable(dsi->slave);
++		clk_disable_unprepare(dsi->slave->pclk);
++		pm_runtime_put(dsi->slave->dev);
++	}
+ 	dw_mipi_dsi_disable(dsi);
++
+ 	clk_disable_unprepare(dsi->pclk);
+ 	pm_runtime_put(dsi->dev);
+ }
+ 
+-static void dw_mipi_dsi_bridge_mode_set(struct drm_bridge *bridge,
+-					struct drm_display_mode *mode,
+-					struct drm_display_mode *adjusted_mode)
++static unsigned int dw_mipi_dsi_get_lanes(struct dw_mipi_dsi *dsi)
++{
++	/* this instance is the slave, so add the master's lanes */
++	if (dsi->master)
++		return dsi->master->lanes + dsi->lanes;
++
++	/* this instance is the master, so add the slave's lanes */
++	if (dsi->slave)
++		return dsi->lanes + dsi->slave->lanes;
++
++	/* single-dsi, so no other instance to consider */
++	return dsi->lanes;
++}
++
++static void dw_mipi_dsi_mode_set(struct dw_mipi_dsi *dsi,
++				 const struct drm_display_mode *adjusted_mode)
+ {
+-	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
+ 	const struct dw_mipi_dsi_phy_ops *phy_ops = dsi->plat_data->phy_ops;
+ 	void *priv_data = dsi->plat_data->priv_data;
+ 	int ret;
++	u32 lanes = dw_mipi_dsi_get_lanes(dsi);
+ 
+ 	clk_prepare_enable(dsi->pclk);
+ 
+ 	ret = phy_ops->get_lane_mbps(priv_data, adjusted_mode, dsi->mode_flags,
+-				     dsi->lanes, dsi->format, &dsi->lane_mbps);
++				     lanes, dsi->format, &dsi->lane_mbps);
+ 	if (ret)
+ 		DRM_DEBUG_DRIVER("Phy get_lane_mbps() failed\n");
+ 
+@@ -804,12 +860,25 @@ static void dw_mipi_dsi_bridge_mode_set(struct drm_bridge *bridge,
+ 	dw_mipi_dsi_set_mode(dsi, 0);
+ }
+ 
++static void dw_mipi_dsi_bridge_mode_set(struct drm_bridge *bridge,
++					const struct drm_display_mode *mode,
++					const struct drm_display_mode *adjusted_mode)
++{
++	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
++
++	dw_mipi_dsi_mode_set(dsi, adjusted_mode);
++	if (dsi->slave)
++		dw_mipi_dsi_mode_set(dsi->slave, adjusted_mode);
++}
++
+ static void dw_mipi_dsi_bridge_enable(struct drm_bridge *bridge)
+ {
+ 	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
+ 
+ 	/* Switch to video mode for panel-bridge enable & panel enable */
+ 	dw_mipi_dsi_set_mode(dsi, MIPI_DSI_MODE_VIDEO);
++	if (dsi->slave)
++		dw_mipi_dsi_set_mode(dsi->slave, MIPI_DSI_MODE_VIDEO);
+ }
+ 
+ static enum drm_mode_status
+@@ -941,9 +1010,25 @@ __dw_mipi_dsi_probe(struct platform_device *pdev,
+ 
+ static void __dw_mipi_dsi_remove(struct dw_mipi_dsi *dsi)
+ {
++	mipi_dsi_host_unregister(&dsi->dsi_host);
++
+ 	pm_runtime_disable(dsi->dev);
+ }
+ 
++void dw_mipi_dsi_set_slave(struct dw_mipi_dsi *dsi, struct dw_mipi_dsi *slave)
++{
++	/* introduce controllers to each other */
++	dsi->slave = slave;
++	dsi->slave->master = dsi;
++
++	/* migrate settings for already attached displays */
++	dsi->slave->lanes = dsi->lanes;
++	dsi->slave->channel = dsi->channel;
++	dsi->slave->format = dsi->format;
++	dsi->slave->mode_flags = dsi->mode_flags;
++}
++EXPORT_SYMBOL_GPL(dw_mipi_dsi_set_slave);
++
+ /*
+  * Probe/remove API, used from platforms based on the DRM bridge API.
+  */
+@@ -957,8 +1042,6 @@ EXPORT_SYMBOL_GPL(dw_mipi_dsi_probe);
+ 
+ void dw_mipi_dsi_remove(struct dw_mipi_dsi *dsi)
+ {
+-	mipi_dsi_host_unregister(&dsi->dsi_host);
+-
+ 	__dw_mipi_dsi_remove(dsi);
+ }
+ EXPORT_SYMBOL_GPL(dw_mipi_dsi_remove);
+@@ -966,31 +1049,22 @@ EXPORT_SYMBOL_GPL(dw_mipi_dsi_remove);
+ /*
+  * Bind/unbind API, used from platforms based on the component framework.
+  */
+-struct dw_mipi_dsi *
+-dw_mipi_dsi_bind(struct platform_device *pdev, struct drm_encoder *encoder,
+-		 const struct dw_mipi_dsi_plat_data *plat_data)
++int dw_mipi_dsi_bind(struct dw_mipi_dsi *dsi, struct drm_encoder *encoder)
+ {
+-	struct dw_mipi_dsi *dsi;
+ 	int ret;
+ 
+-	dsi = __dw_mipi_dsi_probe(pdev, plat_data);
+-	if (IS_ERR(dsi))
+-		return dsi;
+-
+ 	ret = drm_bridge_attach(encoder, &dsi->bridge, NULL);
+ 	if (ret) {
+-		dw_mipi_dsi_remove(dsi);
+ 		DRM_ERROR("Failed to initialize bridge with drm\n");
+-		return ERR_PTR(ret);
++		return ret;
+ 	}
+ 
+-	return dsi;
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(dw_mipi_dsi_bind);
+ 
+ void dw_mipi_dsi_unbind(struct dw_mipi_dsi *dsi)
+ {
+-	__dw_mipi_dsi_remove(dsi);
+ }
+ EXPORT_SYMBOL_GPL(dw_mipi_dsi_unbind);
+ 

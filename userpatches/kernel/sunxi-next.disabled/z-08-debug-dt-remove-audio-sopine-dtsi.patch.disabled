@@ -1,0 +1,16 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi
+index 5fe9e6113..c6027e250 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi
+@@ -47,9 +47,9 @@
+ 
+ #include <dt-bindings/gpio/gpio.h>
+ 
+-&codec_analog {
++/*&codec_analog {
+ 	hpvcc-supply = <&reg_eldo1>;
+-};
++};*/
+ 
+ &cpu0 {
+ 	cpu-supply = <&reg_dcdc2>;

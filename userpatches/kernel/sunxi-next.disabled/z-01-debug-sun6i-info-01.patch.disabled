@@ -1,0 +1,64 @@
+diff --git a/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c b/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
+index 56450baa3..006c04760 100644
+--- a/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
++++ b/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.c
+@@ -12,6 +12,7 @@
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
+ #include <linux/pm_runtime.h>
++#include <linux/printk.h>
+ #include <linux/regmap.h>
+ #include <linux/reset.h>
+ #include <linux/slab.h>
+@@ -314,6 +315,7 @@ static void sun6i_dsi_inst_setup(struct sun6i_dsi *dsi,
+ 				 enum sun6i_dsi_inst_packet packet,
+ 				 enum sun6i_dsi_inst_escape escape)
+ {
++	printk(KERN_DEBUG "Starting sun6i_dsi_inst_setup\n");
+ 	regmap_write(dsi->regs, SUN6I_DSI_INST_FUNC_REG(id),
+ 		     SUN6I_DSI_INST_FUNC_INST_MODE(mode) |
+ 		     SUN6I_DSI_INST_FUNC_ESCAPE_ENTRY(escape) |
+@@ -325,33 +327,43 @@ static void sun6i_dsi_inst_setup(struct sun6i_dsi *dsi,
+ static void sun6i_dsi_inst_init(struct sun6i_dsi *dsi,
+ 				struct mipi_dsi_device *device)
+ {
++	printk(KERN_DEBUG "starting sun6i_dsi_inst_init\n");
+ 	u8 lanes_mask = GENMASK(device->lanes - 1, 0);
+ 
++	printk(KERN_DEBUG "setup DSI_INST_ID_LP11\n");
+ 	sun6i_dsi_inst_setup(dsi, DSI_INST_ID_LP11, DSI_INST_MODE_STOP,
+ 			     true, lanes_mask, 0, 0);
+ 
++	printk(KERN_DEBUG "setup DSI_INST_ID_TBA\n");
+ 	sun6i_dsi_inst_setup(dsi, DSI_INST_ID_TBA, DSI_INST_MODE_TBA,
+ 			     false, 1, 0, 0);
+ 
++	printk(KERN_DEBUG "setup DSI_INST_ID_HSC\n");
+ 	sun6i_dsi_inst_setup(dsi, DSI_INST_ID_HSC, DSI_INST_MODE_HS,
+ 			     true, 0, DSI_INST_PACK_PIXEL, 0);
+ 
++	printk(KERN_DEBUG "setup DSI_INST_ID_HSD\n");
+ 	sun6i_dsi_inst_setup(dsi, DSI_INST_ID_HSD, DSI_INST_MODE_HS,
+ 			     false, lanes_mask, DSI_INST_PACK_PIXEL, 0);
+ 
++	printk(KERN_DEBUG "setup DSI_INST_ID_LPDT\n");
+ 	sun6i_dsi_inst_setup(dsi, DSI_INST_ID_LPDT, DSI_INST_MODE_ESCAPE,
+ 			     false, 1, DSI_INST_PACK_COMMAND,
+ 			     DSI_INST_ESCA_LPDT);
+ 
++	printk(KERN_DEBUG "setup DSI_INST_ID_HSCEXIT\n");
+ 	sun6i_dsi_inst_setup(dsi, DSI_INST_ID_HSCEXIT, DSI_INST_MODE_HSCEXIT,
+ 			     true, 0, 0, 0);
+ 
++	printk(KERN_DEBUG "setup DSI_INST_ID_NOP\n");
+ 	sun6i_dsi_inst_setup(dsi, DSI_INST_ID_NOP, DSI_INST_MODE_STOP,
+ 			     false, lanes_mask, 0, 0);
+ 
++	printk(KERN_DEBUG "setup DSI_INST_ID_DLY\n");
+ 	sun6i_dsi_inst_setup(dsi, DSI_INST_ID_DLY, DSI_INST_MODE_NOP,
+ 			     true, lanes_mask, 0, 0);
+ 
++	printk(KERN_DEBUG "regmap SUN6I_DSI_INST_JUMP_CFG_REG\n");
+ 	regmap_write(dsi->regs, SUN6I_DSI_INST_JUMP_CFG_REG(0),
+ 		     SUN6I_DSI_INST_JUMP_CFG_POINT(DSI_INST_ID_NOP) |
+ 		     SUN6I_DSI_INST_JUMP_CFG_TO(DSI_INST_ID_HSCEXIT) |

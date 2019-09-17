@@ -1,0 +1,4818 @@
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index f7a19c2a7..94aae87b1 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -57,8 +57,7 @@
+ #include <linux/workqueue.h>
+ #include <linux/dma-fence.h>
+ #include <linux/module.h>
+-
+-#include <asm/mman.h>
++#include <linux/mman.h>
+ #include <asm/pgalloc.h>
+ #include <linux/uaccess.h>
+ 
+@@ -68,7 +67,6 @@
+ #include <drm/drm_agpsupport.h>
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_fourcc.h>
+-#include <drm/drm_global.h>
+ #include <drm/drm_hashtab.h>
+ #include <drm/drm_mm.h>
+ #include <drm/drm_os_linux.h>
+@@ -95,22 +93,11 @@ struct dma_buf_attachment;
+ struct pci_dev;
+ struct pci_controller;
+ 
+-#define DRM_IF_VERSION(maj, min) (maj << 16 | min)
+-
+-#define DRM_SWITCH_POWER_ON 0
+-#define DRM_SWITCH_POWER_OFF 1
+-#define DRM_SWITCH_POWER_CHANGING 2
+-#define DRM_SWITCH_POWER_DYNAMIC_OFF 3
+-
+-/* returns true if currently okay to sleep */
+-static inline bool drm_can_sleep(void)
+-{
+-	if (in_atomic() || in_dbg_master() || irqs_disabled())
+-		return false;
+-	return true;
+-}
+-
+-/* helper for handling conditionals in various for_each macros */
+-#define for_each_if(condition) if (!(condition)) {} else
++/*
++ * NOTE: drmP.h is obsolete - do NOT add anything to this file
++ *
++ * Do not include drmP.h in new files.
++ * Work is ongoing to remove drmP.h includes from existing files
++ */
+ 
+ #endif
+diff --git a/include/drm/drm_atomic.h b/include/drm/drm_atomic.h
+index 1e713154f..824a5ed4e 100644
+--- a/include/drm/drm_atomic.h
++++ b/include/drm/drm_atomic.h
+@@ -29,6 +29,7 @@
+ #define DRM_ATOMIC_H_
+ 
+ #include <drm/drm_crtc.h>
++#include <drm/drm_util.h>
+ 
+ /**
+  * struct drm_crtc_commit - track modeset commits on a CRTC
+@@ -138,9 +139,9 @@ struct drm_crtc_commit {
+ 	/**
+ 	 * @abort_completion:
+ 	 *
+-	 * A flag that's set after drm_atomic_helper_setup_commit takes a second
+-	 * reference for the completion of $drm_crtc_state.event. It's used by
+-	 * the free code to remove the second reference if commit fails.
++	 * A flag that's set after drm_atomic_helper_setup_commit() takes a
++	 * second reference for the completion of $drm_crtc_state.event. It's
++	 * used by the free code to remove the second reference if commit fails.
+ 	 */
+ 	bool abort_completion;
+ };
+@@ -191,7 +192,7 @@ struct drm_private_state;
+  * private objects. The structure itself is used as a vtable to identify the
+  * associated private object type. Each private object type that needs to be
+  * added to the atomic states is expected to have an implementation of these
+- * hooks and pass a pointer to it's drm_private_state_funcs struct to
++ * hooks and pass a pointer to its drm_private_state_funcs struct to
+  * drm_atomic_get_private_obj_state().
+  */
+ struct drm_private_state_funcs {
+@@ -227,8 +228,30 @@ struct drm_private_state_funcs {
+  * Currently only tracks the state update functions and the opaque driver
+  * private state itself, but in the future might also track which
+  * &drm_modeset_lock is required to duplicate and update this object's state.
++ *
++ * All private objects must be initialized before the DRM device they are
++ * attached to is registered to the DRM subsystem (call to drm_dev_register())
++ * and should stay around until this DRM device is unregistered (call to
++ * drm_dev_unregister()). In other words, private objects lifetime is tied
++ * to the DRM device lifetime. This implies that:
++ *
++ * 1/ all calls to drm_atomic_private_obj_init() must be done before calling
++ *    drm_dev_register()
++ * 2/ all calls to drm_atomic_private_obj_fini() must be done after calling
++ *    drm_dev_unregister()
+  */
+ struct drm_private_obj {
++	/**
++	 * @head: List entry used to attach a private object to a &drm_device
++	 * (queued to &drm_mode_config.privobj_list).
++	 */
++	struct list_head head;
++
++	/**
++	 * @lock: Modeset lock to protect the state object.
++	 */
++	struct drm_modeset_lock lock;
++
+ 	/**
+ 	 * @state: Current atomic state for this driver private object.
+ 	 */
+@@ -243,6 +266,18 @@ struct drm_private_obj {
+ 	const struct drm_private_state_funcs *funcs;
+ };
+ 
++/**
++ * drm_for_each_privobj() - private object iterator
++ *
++ * @privobj: pointer to the current private object. Updated after each
++ *	     iteration
++ * @dev: the DRM device we want get private objects from
++ *
++ * Allows one to iterate over all private objects attached to @dev
++ */
++#define drm_for_each_privobj(privobj, dev) \
++	list_for_each_entry(privobj, &(dev)->mode_config.privobj_list, head)
++
+ /**
+  * struct drm_private_state - base struct for driver private object state
+  * @state: backpointer to global drm_atomic_state
+@@ -264,7 +299,6 @@ struct __drm_private_objs_state {
+  * struct drm_atomic_state - the global state object for atomic updates
+  * @ref: count of all references to this state (will not be freed until zero)
+  * @dev: parent DRM device
+- * @allow_modeset: allow full modeset
+  * @legacy_cursor_update: hint to enforce legacy cursor IOCTL semantics
+  * @async_update: hint for asynchronous plane update
+  * @planes: pointer to array of structures with per-plane data
+@@ -283,9 +317,27 @@ struct drm_atomic_state {
+ 	struct kref ref;
+ 
+ 	struct drm_device *dev;
++
++	/**
++	 * @allow_modeset:
++	 *
++	 * Allow full modeset. This is used by the ATOMIC IOCTL handler to
++	 * implement the DRM_MODE_ATOMIC_ALLOW_MODESET flag. Drivers should
++	 * never consult this flag, instead looking at the output of
++	 * drm_atomic_crtc_needs_modeset().
++	 */
+ 	bool allow_modeset : 1;
+ 	bool legacy_cursor_update : 1;
+ 	bool async_update : 1;
++	/**
++	 * @duplicated:
++	 *
++	 * Indicates whether or not this atomic state was duplicated using
++	 * drm_atomic_helper_duplicate_state(). Drivers and atomic helpers
++	 * should use this to fixup normal  inconsistencies in duplicated
++	 * states.
++	 */
++	bool duplicated : 1;
+ 	struct __drm_planes_state *planes;
+ 	struct __drm_crtcs_state *crtcs;
+ 	int num_connector;
+@@ -384,9 +436,6 @@ void drm_atomic_state_default_release(struct drm_atomic_state *state);
+ struct drm_crtc_state * __must_check
+ drm_atomic_get_crtc_state(struct drm_atomic_state *state,
+ 			  struct drm_crtc *crtc);
+-int drm_atomic_crtc_set_property(struct drm_crtc *crtc,
+-		struct drm_crtc_state *state, struct drm_property *property,
+-		uint64_t val);
+ struct drm_plane_state * __must_check
+ drm_atomic_get_plane_state(struct drm_atomic_state *state,
+ 			   struct drm_plane *plane);
+@@ -394,7 +443,8 @@ struct drm_connector_state * __must_check
+ drm_atomic_get_connector_state(struct drm_atomic_state *state,
+ 			       struct drm_connector *connector);
+ 
+-void drm_atomic_private_obj_init(struct drm_private_obj *obj,
++void drm_atomic_private_obj_init(struct drm_device *dev,
++				 struct drm_private_obj *obj,
+ 				 struct drm_private_state *state,
+ 				 const struct drm_private_state_funcs *funcs);
+ void drm_atomic_private_obj_fini(struct drm_private_obj *obj);
+@@ -597,25 +647,6 @@ __drm_atomic_get_current_plane_state(struct drm_atomic_state *state,
+ 	return plane->state;
+ }
+ 
+-int __must_check
+-drm_atomic_set_mode_for_crtc(struct drm_crtc_state *state,
+-			     const struct drm_display_mode *mode);
+-int __must_check
+-drm_atomic_set_mode_prop_for_crtc(struct drm_crtc_state *state,
+-				  struct drm_property_blob *blob);
+-int __must_check
+-drm_atomic_set_crtc_for_plane(struct drm_plane_state *plane_state,
+-			      struct drm_crtc *crtc);
+-void drm_atomic_set_fb_for_plane(struct drm_plane_state *plane_state,
+-				 struct drm_framebuffer *fb);
+-void drm_atomic_set_fence_for_plane(struct drm_plane_state *plane_state,
+-				    struct dma_fence *fence);
+-int __must_check
+-drm_atomic_set_crtc_for_connector(struct drm_connector_state *conn_state,
+-				  struct drm_crtc *crtc);
+-int drm_atomic_set_writeback_fb_for_connector(
+-		struct drm_connector_state *conn_state,
+-		struct drm_framebuffer *fb);
+ int __must_check
+ drm_atomic_add_affected_connectors(struct drm_atomic_state *state,
+ 				   struct drm_crtc *crtc);
+diff --git a/include/drm/drm_atomic_helper.h b/include/drm/drm_atomic_helper.h
+index 99e2a5297..58214be3b 100644
+--- a/include/drm/drm_atomic_helper.h
++++ b/include/drm/drm_atomic_helper.h
+@@ -31,6 +31,8 @@
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_modeset_helper_vtables.h>
+ #include <drm/drm_modeset_helper.h>
++#include <drm/drm_atomic_state_helper.h>
++#include <drm/drm_util.h>
+ 
+ struct drm_atomic_state;
+ struct drm_private_obj;
+@@ -125,6 +127,9 @@ int __drm_atomic_helper_set_config(struct drm_mode_set *set,
+ int drm_atomic_helper_disable_all(struct drm_device *dev,
+ 				  struct drm_modeset_acquire_ctx *ctx);
+ void drm_atomic_helper_shutdown(struct drm_device *dev);
++struct drm_atomic_state *
++drm_atomic_helper_duplicate_state(struct drm_device *dev,
++				  struct drm_modeset_acquire_ctx *ctx);
+ struct drm_atomic_state *drm_atomic_helper_suspend(struct drm_device *dev);
+ int drm_atomic_helper_commit_duplicated_state(struct drm_atomic_state *state,
+ 					      struct drm_modeset_acquire_ctx *ctx);
+@@ -143,49 +148,10 @@ int drm_atomic_helper_page_flip_target(
+ 				uint32_t flags,
+ 				uint32_t target,
+ 				struct drm_modeset_acquire_ctx *ctx);
+-struct drm_encoder *
+-drm_atomic_helper_best_encoder(struct drm_connector *connector);
+-
+-/* default implementations for state handling */
+-void drm_atomic_helper_crtc_reset(struct drm_crtc *crtc);
+-void __drm_atomic_helper_crtc_duplicate_state(struct drm_crtc *crtc,
+-					      struct drm_crtc_state *state);
+-struct drm_crtc_state *
+-drm_atomic_helper_crtc_duplicate_state(struct drm_crtc *crtc);
+-void __drm_atomic_helper_crtc_destroy_state(struct drm_crtc_state *state);
+-void drm_atomic_helper_crtc_destroy_state(struct drm_crtc *crtc,
+-					  struct drm_crtc_state *state);
+-
+-void drm_atomic_helper_plane_reset(struct drm_plane *plane);
+-void __drm_atomic_helper_plane_duplicate_state(struct drm_plane *plane,
+-					       struct drm_plane_state *state);
+-struct drm_plane_state *
+-drm_atomic_helper_plane_duplicate_state(struct drm_plane *plane);
+-void __drm_atomic_helper_plane_destroy_state(struct drm_plane_state *state);
+-void drm_atomic_helper_plane_destroy_state(struct drm_plane *plane,
+-					  struct drm_plane_state *state);
+-
+-void __drm_atomic_helper_connector_reset(struct drm_connector *connector,
+-					 struct drm_connector_state *conn_state);
+-void drm_atomic_helper_connector_reset(struct drm_connector *connector);
+-void
+-__drm_atomic_helper_connector_duplicate_state(struct drm_connector *connector,
+-					   struct drm_connector_state *state);
+-struct drm_connector_state *
+-drm_atomic_helper_connector_duplicate_state(struct drm_connector *connector);
+-struct drm_atomic_state *
+-drm_atomic_helper_duplicate_state(struct drm_device *dev,
+-				  struct drm_modeset_acquire_ctx *ctx);
+-void
+-__drm_atomic_helper_connector_destroy_state(struct drm_connector_state *state);
+-void drm_atomic_helper_connector_destroy_state(struct drm_connector *connector,
+-					  struct drm_connector_state *state);
+ int drm_atomic_helper_legacy_gamma_set(struct drm_crtc *crtc,
+ 				       u16 *red, u16 *green, u16 *blue,
+ 				       uint32_t size,
+ 				       struct drm_modeset_acquire_ctx *ctx);
+-void __drm_atomic_helper_private_obj_duplicate_state(struct drm_private_obj *obj,
+-						     struct drm_private_state *state);
+ 
+ /**
+  * drm_atomic_crtc_for_each_plane - iterate over planes currently attached to CRTC
+diff --git a/include/drm/drm_atomic_uapi.h b/include/drm/drm_atomic_uapi.h
+new file mode 100644
+index 000000000..8cec52ad1
+--- /dev/null
++++ b/include/drm/drm_atomic_uapi.h
+@@ -0,0 +1,58 @@
++/*
++ * Copyright (C) 2014 Red Hat
++ * Copyright (C) 2014 Intel Corp.
++ * Copyright (C) 2018 Intel Corp.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ *
++ * Authors:
++ * Rob Clark <robdclark@gmail.com>
++ * Daniel Vetter <daniel.vetter@ffwll.ch>
++ */
++
++#ifndef DRM_ATOMIC_UAPI_H_
++#define DRM_ATOMIC_UAPI_H_
++
++struct drm_crtc_state;
++struct drm_display_mode;
++struct drm_property_blob;
++struct drm_plane_state;
++struct drm_crtc;
++struct drm_connector_state;
++struct dma_fence;
++struct drm_framebuffer;
++
++int __must_check
++drm_atomic_set_mode_for_crtc(struct drm_crtc_state *state,
++			     const struct drm_display_mode *mode);
++int __must_check
++drm_atomic_set_mode_prop_for_crtc(struct drm_crtc_state *state,
++				  struct drm_property_blob *blob);
++int __must_check
++drm_atomic_set_crtc_for_plane(struct drm_plane_state *plane_state,
++			      struct drm_crtc *crtc);
++void drm_atomic_set_fb_for_plane(struct drm_plane_state *plane_state,
++				 struct drm_framebuffer *fb);
++void drm_atomic_set_fence_for_plane(struct drm_plane_state *plane_state,
++				    struct dma_fence *fence);
++int __must_check
++drm_atomic_set_crtc_for_connector(struct drm_connector_state *conn_state,
++				  struct drm_crtc *crtc);
++
++#endif
+diff --git a/include/drm/drm_audio_component.h b/include/drm/drm_audio_component.h
+index 4923b0032..93a386be3 100644
+--- a/include/drm/drm_audio_component.h
++++ b/include/drm/drm_audio_component.h
+@@ -5,6 +5,7 @@
+ #define _DRM_AUDIO_COMPONENT_H_
+ 
+ struct drm_audio_component;
++struct device;
+ 
+ /**
+  * struct drm_audio_component_ops - Ops implemented by DRM driver, called by hda driver
+diff --git a/include/drm/drm_blend.h b/include/drm/drm_blend.h
+index 330c561c4..88bdfec3b 100644
+--- a/include/drm/drm_blend.h
++++ b/include/drm/drm_blend.h
+@@ -27,6 +27,10 @@
+ #include <linux/ctype.h>
+ #include <drm/drm_mode.h>
+ 
++#define DRM_MODE_BLEND_PREMULTI		0
++#define DRM_MODE_BLEND_COVERAGE		1
++#define DRM_MODE_BLEND_PIXEL_NONE	2
++
+ struct drm_device;
+ struct drm_atomic_state;
+ struct drm_plane;
+@@ -52,4 +56,6 @@ int drm_plane_create_zpos_immutable_property(struct drm_plane *plane,
+ 					     unsigned int zpos);
+ int drm_atomic_normalize_zpos(struct drm_device *dev,
+ 			      struct drm_atomic_state *state);
++int drm_plane_create_blend_mode_property(struct drm_plane *plane,
++					 unsigned int supported_modes);
+ #endif
+diff --git a/include/drm/drm_bridge.h b/include/drm/drm_bridge.h
+index bd850747c..9da8c93f7 100644
+--- a/include/drm/drm_bridge.h
++++ b/include/drm/drm_bridge.h
+@@ -196,8 +196,8 @@ struct drm_bridge_funcs {
+ 	 * the DRM framework will have to be extended with DRM bridge states.
+ 	 */
+ 	void (*mode_set)(struct drm_bridge *bridge,
+-			 struct drm_display_mode *mode,
+-			 struct drm_display_mode *adjusted_mode);
++			 const struct drm_display_mode *mode,
++			 const struct drm_display_mode *adjusted_mode);
+ 	/**
+ 	 * @pre_enable:
+ 	 *
+@@ -310,8 +310,8 @@ enum drm_mode_status drm_bridge_mode_valid(struct drm_bridge *bridge,
+ void drm_bridge_disable(struct drm_bridge *bridge);
+ void drm_bridge_post_disable(struct drm_bridge *bridge);
+ void drm_bridge_mode_set(struct drm_bridge *bridge,
+-			 struct drm_display_mode *mode,
+-			 struct drm_display_mode *adjusted_mode);
++			 const struct drm_display_mode *mode,
++			 const struct drm_display_mode *adjusted_mode);
+ void drm_bridge_pre_enable(struct drm_bridge *bridge);
+ void drm_bridge_enable(struct drm_bridge *bridge);
+ 
+diff --git a/include/drm/drm_client.h b/include/drm/drm_client.h
+index 971bb7853..8b552b1a6 100644
+--- a/include/drm/drm_client.h
++++ b/include/drm/drm_client.h
+@@ -26,7 +26,7 @@ struct drm_client_funcs {
+ 	 * @unregister:
+ 	 *
+ 	 * Called when &drm_device is unregistered. The client should respond by
+-	 * releasing it's resources using drm_client_release().
++	 * releasing its resources using drm_client_release().
+ 	 *
+ 	 * This callback is optional.
+ 	 */
+diff --git a/include/drm/drm_color_mgmt.h b/include/drm/drm_color_mgmt.h
+index 44f04233e..d1c662d92 100644
+--- a/include/drm/drm_color_mgmt.h
++++ b/include/drm/drm_color_mgmt.h
+@@ -24,6 +24,7 @@
+ #define __DRM_COLOR_MGMT_H__
+ 
+ #include <linux/ctype.h>
++#include <drm/drm_property.h>
+ 
+ struct drm_crtc;
+ struct drm_plane;
+@@ -68,4 +69,32 @@ int drm_plane_create_color_properties(struct drm_plane *plane,
+ 				      u32 supported_ranges,
+ 				      enum drm_color_encoding default_encoding,
+ 				      enum drm_color_range default_range);
++
++/**
++ * enum drm_color_lut_tests - hw-specific LUT tests to perform
++ *
++ * The drm_color_lut_check() function takes a bitmask of the values here to
++ * determine which tests to apply to a userspace-provided LUT.
++ */
++enum drm_color_lut_tests {
++	/**
++	 * @DRM_COLOR_LUT_EQUAL_CHANNELS:
++	 *
++	 * Checks whether the entries of a LUT all have equal values for the
++	 * red, green, and blue channels.  Intended for hardware that only
++	 * accepts a single value per LUT entry and assumes that value applies
++	 * to all three color components.
++	 */
++	DRM_COLOR_LUT_EQUAL_CHANNELS = BIT(0),
++
++	/**
++	 * @DRM_COLOR_LUT_NON_DECREASING:
++	 *
++	 * Checks whether the entries of a LUT are always flat or increasing
++	 * (never decreasing).
++	 */
++	DRM_COLOR_LUT_NON_DECREASING = BIT(1),
++};
++
++int drm_color_lut_check(const struct drm_property_blob *lut, u32 tests);
+ #endif
+diff --git a/include/drm/drm_connector.h b/include/drm/drm_connector.h
+index 97ea41dc6..8fe22abb1 100644
+--- a/include/drm/drm_connector.h
++++ b/include/drm/drm_connector.h
+@@ -28,6 +28,7 @@
+ #include <linux/ctype.h>
+ #include <linux/hdmi.h>
+ #include <drm/drm_mode_object.h>
++#include <drm/drm_util.h>
+ 
+ #include <uapi/drm/drm_mode.h>
+ 
+@@ -81,6 +82,53 @@ enum drm_connector_status {
+ 	connector_status_unknown = 3,
+ };
+ 
++/**
++ * enum drm_connector_registration_status - userspace registration status for
++ * a &drm_connector
++ *
++ * This enum is used to track the status of initializing a connector and
++ * registering it with userspace, so that DRM can prevent bogus modesets on
++ * connectors that no longer exist.
++ */
++enum drm_connector_registration_state {
++	/**
++	 * @DRM_CONNECTOR_INITIALIZING: The connector has just been created,
++	 * but has yet to be exposed to userspace. There should be no
++	 * additional restrictions to how the state of this connector may be
++	 * modified.
++	 */
++	DRM_CONNECTOR_INITIALIZING = 0,
++
++	/**
++	 * @DRM_CONNECTOR_REGISTERED: The connector has been fully initialized
++	 * and registered with sysfs, as such it has been exposed to
++	 * userspace. There should be no additional restrictions to how the
++	 * state of this connector may be modified.
++	 */
++	DRM_CONNECTOR_REGISTERED = 1,
++
++	/**
++	 * @DRM_CONNECTOR_UNREGISTERED: The connector has either been exposed
++	 * to userspace and has since been unregistered and removed from
++	 * userspace, or the connector was unregistered before it had a chance
++	 * to be exposed to userspace (e.g. still in the
++	 * @DRM_CONNECTOR_INITIALIZING state). When a connector is
++	 * unregistered, there are additional restrictions to how its state
++	 * may be modified:
++	 *
++	 * - An unregistered connector may only have its DPMS changed from
++	 *   On->Off. Once DPMS is changed to Off, it may not be switched back
++	 *   to On.
++	 * - Modesets are not allowed on unregistered connectors, unless they
++	 *   would result in disabling its assigned CRTCs. This means
++	 *   disabling a CRTC on an unregistered connector is OK, but enabling
++	 *   one is not.
++	 * - Removing a CRTC from an unregistered connector is OK, but new
++	 *   CRTCs may never be assigned to an unregistered connector.
++	 */
++	DRM_CONNECTOR_UNREGISTERED = 2,
++};
++
+ enum subpixel_order {
+ 	SubPixelUnknown = 0,
+ 	SubPixelHorizontalRGB,
+@@ -317,6 +365,12 @@ struct drm_display_info {
+ 	 */
+ 	bool has_hdmi_infoframe;
+ 
++	/**
++	 * @rgb_quant_range_selectable: Does the sink support selecting
++	 * the RGB quantization range?
++	 */
++	bool rgb_quant_range_selectable;
++
+ 	/**
+ 	 * @edid_hdmi_dc_modes: Mask of supported hdmi deep color modes. Even
+ 	 * more stuff redundant with @bus_formats.
+@@ -346,7 +400,7 @@ int drm_display_info_set_bus_formats(struct drm_display_info *info,
+ /**
+  * struct drm_tv_connector_state - TV connector related states
+  * @subconnector: selected subconnector
+- * @margins: margins
++ * @margins: margins (all margins are expressed in pixels)
+  * @margins.left: left margin
+  * @margins.right: right margin
+  * @margins.top: top margin
+@@ -460,6 +514,18 @@ struct drm_connector_state {
+ 	 * drm_writeback_signal_completion()
+ 	 */
+ 	struct drm_writeback_job *writeback_job;
++
++	/**
++	 * @max_requested_bpc: Connector property to limit the maximum bit
++	 * depth of the pixels.
++	 */
++	u8 max_requested_bpc;
++
++	/**
++	 * @max_bpc: Connector max_bpc based on the requested max_bpc property
++	 * and the connector bpc limitations obtained from edid.
++	 */
++	u8 max_bpc;
+ };
+ 
+ /**
+@@ -846,16 +912,18 @@ struct drm_connector {
+ 	/**
+ 	 * @ycbcr_420_allowed : This bool indicates if this connector is
+ 	 * capable of handling YCBCR 420 output. While parsing the EDID
+-	 * blocks, its very helpful to know, if the source is capable of
++	 * blocks it's very helpful to know if the source is capable of
+ 	 * handling YCBCR 420 outputs.
+ 	 */
+ 	bool ycbcr_420_allowed;
+ 
+ 	/**
+-	 * @registered: Is this connector exposed (registered) with userspace?
++	 * @registration_state: Is this connector initializing, exposed
++	 * (registered) with userspace, or unregistered?
++	 *
+ 	 * Protected by @mutex.
+ 	 */
+-	bool registered;
++	enum drm_connector_registration_state registration_state;
+ 
+ 	/**
+ 	 * @modes:
+@@ -909,6 +977,17 @@ struct drm_connector {
+ 	 */
+ 	struct drm_property *scaling_mode_property;
+ 
++	/**
++	 * @vrr_capable_property: Optional property to help userspace
++	 * query hardware support for variable refresh rate on a connector.
++	 * connector. Drivers can add the property to a connector by
++	 * calling drm_connector_attach_vrr_capable_property().
++	 *
++	 * This should be updated only by calling
++	 * drm_connector_set_vrr_capable_property().
++	 */
++	struct drm_property *vrr_capable_property;
++
+ 	/**
+ 	 * @content_protection_property: DRM ENUM property for content
+ 	 * protection. See drm_connector_attach_content_protection_property().
+@@ -923,6 +1002,12 @@ struct drm_connector {
+ 	 */
+ 	struct drm_property_blob *path_blob_ptr;
+ 
++	/**
++	 * @max_bpc_property: Default connector property for the max bpc to be
++	 * driven out of the connector.
++	 */
++	struct drm_property *max_bpc_property;
++
+ #define DRM_CONNECTOR_POLL_HPD (1 << 0)
+ #define DRM_CONNECTOR_POLL_CONNECT (1 << 1)
+ #define DRM_CONNECTOR_POLL_DISCONNECT (1 << 2)
+@@ -1083,6 +1168,7 @@ int drm_connector_init(struct drm_device *dev,
+ 		       struct drm_connector *connector,
+ 		       const struct drm_connector_funcs *funcs,
+ 		       int connector_type);
++void drm_connector_attach_edid_property(struct drm_connector *connector);
+ int drm_connector_register(struct drm_connector *connector);
+ void drm_connector_unregister(struct drm_connector *connector);
+ int drm_connector_attach_encoder(struct drm_connector *connector,
+@@ -1142,27 +1228,21 @@ static inline void drm_connector_put(struct drm_connector *connector)
+ }
+ 
+ /**
+- * drm_connector_reference - acquire a connector reference
++ * drm_connector_is_unregistered - has the connector been unregistered from
++ * userspace?
+  * @connector: DRM connector
+  *
+- * This is a compatibility alias for drm_connector_get() and should not be
+- * used by new code.
+- */
+-static inline void drm_connector_reference(struct drm_connector *connector)
+-{
+-	drm_connector_get(connector);
+-}
+-
+-/**
+- * drm_connector_unreference - release a connector reference
+- * @connector: DRM connector
++ * Checks whether or not @connector has been unregistered from userspace.
+  *
+- * This is a compatibility alias for drm_connector_put() and should not be
+- * used by new code.
++ * Returns:
++ * True if the connector was unregistered, false if the connector is
++ * registered or has not yet been registered with userspace.
+  */
+-static inline void drm_connector_unreference(struct drm_connector *connector)
++static inline bool
++drm_connector_is_unregistered(struct drm_connector *connector)
+ {
+-	drm_connector_put(connector);
++	return READ_ONCE(connector->registration_state) ==
++		DRM_CONNECTOR_UNREGISTERED;
+ }
+ 
+ const char *drm_get_connector_status_name(enum drm_connector_status status);
+@@ -1175,13 +1255,17 @@ const char *drm_get_tv_select_name(int val);
+ const char *drm_get_content_protection_name(int val);
+ 
+ int drm_mode_create_dvi_i_properties(struct drm_device *dev);
++int drm_mode_create_tv_margin_properties(struct drm_device *dev);
+ int drm_mode_create_tv_properties(struct drm_device *dev,
+ 				  unsigned int num_modes,
+ 				  const char * const modes[]);
++void drm_connector_attach_tv_margin_properties(struct drm_connector *conn);
+ int drm_mode_create_scaling_mode_property(struct drm_device *dev);
+ int drm_connector_attach_content_type_property(struct drm_connector *dev);
+ int drm_connector_attach_scaling_mode_property(struct drm_connector *connector,
+ 					       u32 scaling_mode_mask);
++int drm_connector_attach_vrr_capable_property(
++		struct drm_connector *connector);
+ int drm_connector_attach_content_protection_property(
+ 		struct drm_connector *connector);
+ int drm_mode_create_aspect_ratio_property(struct drm_device *dev);
+@@ -1198,8 +1282,12 @@ int drm_connector_update_edid_property(struct drm_connector *connector,
+ 				       const struct edid *edid);
+ void drm_connector_set_link_status_property(struct drm_connector *connector,
+ 					    uint64_t link_status);
++void drm_connector_set_vrr_capable_property(
++		struct drm_connector *connector, bool capable);
+ int drm_connector_init_panel_orientation_property(
+ 	struct drm_connector *connector, int width, int height);
++int drm_connector_attach_max_bpc_property(struct drm_connector *connector,
++					  int min, int max);
+ 
+ /**
+  * struct drm_tile_group - Tile group metadata
+diff --git a/include/drm/drm_crtc.h b/include/drm/drm_crtc.h
+index 92e7fc7f0..85abd3fe9 100644
+--- a/include/drm/drm_crtc.h
++++ b/include/drm/drm_crtc.h
+@@ -290,6 +290,15 @@ struct drm_crtc_state {
+ 	 */
+ 	u32 pageflip_flags;
+ 
++	/**
++	 * @vrr_enabled:
++	 *
++	 * Indicates if variable refresh rate should be enabled for the CRTC.
++	 * Support for the requested vrr state will depend on driver and
++	 * hardware capabiltiy - lacking support is not treated as failure.
++	 */
++	bool vrr_enabled;
++
+ 	/**
+ 	 * @event:
+ 	 *
+@@ -744,8 +753,45 @@ struct drm_crtc_funcs {
+ 	 *
+ 	 * 0 on success or a negative error code on failure.
+ 	 */
+-	int (*set_crc_source)(struct drm_crtc *crtc, const char *source,
+-			      size_t *values_cnt);
++	int (*set_crc_source)(struct drm_crtc *crtc, const char *source);
++	/**
++	 * @verify_crc_source:
++	 *
++	 * verifies the source of CRC checksums of frames before setting the
++	 * source for CRC and during crc open. Source parameter can be NULL
++	 * while disabling crc source.
++	 *
++	 * This callback is optional if the driver does not support any CRC
++	 * generation functionality.
++	 *
++	 * RETURNS:
++	 *
++	 * 0 on success or a negative error code on failure.
++	 */
++	int (*verify_crc_source)(struct drm_crtc *crtc, const char *source,
++				 size_t *values_cnt);
++	/**
++	 * @get_crc_sources:
++	 *
++	 * Driver callback for getting a list of all the available sources for
++	 * CRC generation. This callback depends upon verify_crc_source, So
++	 * verify_crc_source callback should be implemented before implementing
++	 * this. Driver can pass full list of available crc sources, this
++	 * callback does the verification on each crc-source before passing it
++	 * to userspace.
++	 *
++	 * This callback is optional if the driver does not support exporting of
++	 * possible CRC sources list.
++	 *
++	 * RETURNS:
++	 *
++	 * a constant character pointer to the list of all the available CRC
++	 * sources. On failure driver should return NULL. count should be
++	 * updated with number of sources in list. if zero we don't process any
++	 * source from the list.
++	 */
++	const char *const *(*get_crc_sources)(struct drm_crtc *crtc,
++					      size_t *count);
+ 
+ 	/**
+ 	 * @atomic_print_state:
+@@ -1103,9 +1149,6 @@ static inline uint32_t drm_crtc_mask(const struct drm_crtc *crtc)
+ 	return 1 << drm_crtc_index(crtc);
+ }
+ 
+-int drm_crtc_force_disable(struct drm_crtc *crtc);
+-int drm_crtc_force_disable_all(struct drm_device *dev);
+-
+ int drm_mode_set_config_internal(struct drm_mode_set *set);
+ struct drm_crtc *drm_crtc_from_index(struct drm_device *dev, int idx);
+ 
+diff --git a/include/drm/drm_crtc_helper.h b/include/drm/drm_crtc_helper.h
+index 691463303..a6d520d5b 100644
+--- a/include/drm/drm_crtc_helper.h
++++ b/include/drm/drm_crtc_helper.h
+@@ -56,27 +56,6 @@ bool drm_helper_encoder_in_use(struct drm_encoder *encoder);
+ int drm_helper_connector_dpms(struct drm_connector *connector, int mode);
+ 
+ void drm_helper_resume_force_mode(struct drm_device *dev);
+-
+-int drm_helper_crtc_mode_set(struct drm_crtc *crtc, struct drm_display_mode *mode,
+-			     struct drm_display_mode *adjusted_mode, int x, int y,
+-			     struct drm_framebuffer *old_fb);
+-int drm_helper_crtc_mode_set_base(struct drm_crtc *crtc, int x, int y,
+-				  struct drm_framebuffer *old_fb);
+-
+-/* drm_probe_helper.c */
+-int drm_helper_probe_single_connector_modes(struct drm_connector
+-					    *connector, uint32_t maxX,
+-					    uint32_t maxY);
+-int drm_helper_probe_detect(struct drm_connector *connector,
+-			    struct drm_modeset_acquire_ctx *ctx,
+-			    bool force);
+-void drm_kms_helper_poll_init(struct drm_device *dev);
+-void drm_kms_helper_poll_fini(struct drm_device *dev);
+-bool drm_helper_hpd_irq_event(struct drm_device *dev);
+-void drm_kms_helper_hotplug_event(struct drm_device *dev);
+-
+-void drm_kms_helper_poll_disable(struct drm_device *dev);
+-void drm_kms_helper_poll_enable(struct drm_device *dev);
+-bool drm_kms_helper_is_poll_worker(void);
++int drm_helper_force_disable_all(struct drm_device *dev);
+ 
+ #endif
+diff --git a/include/drm/drm_damage_helper.h b/include/drm/drm_damage_helper.h
+new file mode 100644
+index 000000000..40c34a5bf
+--- /dev/null
++++ b/include/drm/drm_damage_helper.h
+@@ -0,0 +1,102 @@
++/* SPDX-License-Identifier: GPL-2.0 OR MIT */
++/**************************************************************************
++ *
++ * Copyright (c) 2018 VMware, Inc., Palo Alto, CA., USA
++ * All Rights Reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sub license, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the
++ * next paragraph) shall be included in all copies or substantial portions
++ * of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
++ * THE COPYRIGHT HOLDERS, AUTHORS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM,
++ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
++ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
++ * USE OR OTHER DEALINGS IN THE SOFTWARE.
++ *
++ * Authors:
++ * Deepak Rawat <drawat@vmware.com>
++ *
++ **************************************************************************/
++
++#ifndef DRM_DAMAGE_HELPER_H_
++#define DRM_DAMAGE_HELPER_H_
++
++#include <drm/drm_atomic_helper.h>
++
++/**
++ * drm_atomic_for_each_plane_damage - Iterator macro for plane damage.
++ * @iter: The iterator to advance.
++ * @rect: Return a rectangle in fb coordinate clipped to plane src.
++ *
++ * Note that if the first call to iterator macro return false then no need to do
++ * plane update. Iterator will return full plane src when damage is not passed
++ * by user-space.
++ */
++#define drm_atomic_for_each_plane_damage(iter, rect) \
++	while (drm_atomic_helper_damage_iter_next(iter, rect))
++
++/**
++ * struct drm_atomic_helper_damage_iter - Closure structure for damage iterator.
++ *
++ * This structure tracks state needed to walk the list of plane damage clips.
++ */
++struct drm_atomic_helper_damage_iter {
++	/* private: Plane src in whole number. */
++	struct drm_rect plane_src;
++	/* private: Rectangles in plane damage blob. */
++	const struct drm_rect *clips;
++	/* private: Number of rectangles in plane damage blob. */
++	uint32_t num_clips;
++	/* private: Current clip iterator is advancing on. */
++	uint32_t curr_clip;
++	/* private: Whether need full plane update. */
++	bool full_update;
++};
++
++void drm_plane_enable_fb_damage_clips(struct drm_plane *plane);
++void drm_atomic_helper_check_plane_damage(struct drm_atomic_state *state,
++					  struct drm_plane_state *plane_state);
++int drm_atomic_helper_dirtyfb(struct drm_framebuffer *fb,
++			      struct drm_file *file_priv, unsigned int flags,
++			      unsigned int color, struct drm_clip_rect *clips,
++			      unsigned int num_clips);
++void
++drm_atomic_helper_damage_iter_init(struct drm_atomic_helper_damage_iter *iter,
++				   const struct drm_plane_state *old_state,
++				   const struct drm_plane_state *new_state);
++bool
++drm_atomic_helper_damage_iter_next(struct drm_atomic_helper_damage_iter *iter,
++				   struct drm_rect *rect);
++bool drm_atomic_helper_damage_merged(const struct drm_plane_state *old_state,
++				     struct drm_plane_state *state,
++				     struct drm_rect *rect);
++
++/**
++ * drm_helper_get_plane_damage_clips - Returns damage clips in &drm_rect.
++ * @state: Plane state.
++ *
++ * Returns plane damage rectangles in internal &drm_rect. Currently &drm_rect
++ * can be obtained by simply typecasting &drm_mode_rect. This is because both
++ * are signed 32 and during drm_atomic_check_only() it is verified that damage
++ * clips are inside fb.
++ *
++ * Return: Clips in plane fb_damage_clips blob property.
++ */
++static inline struct drm_rect *
++drm_helper_get_plane_damage_clips(const struct drm_plane_state *state)
++{
++	return (struct drm_rect *)drm_plane_get_damage_clips(state);
++}
++
++#endif
+diff --git a/include/drm/drm_device.h b/include/drm/drm_device.h
+index f9c6e0e3a..d5e092dcc 100644
+--- a/include/drm/drm_device.h
++++ b/include/drm/drm_device.h
+@@ -24,27 +24,91 @@ struct inode;
+ struct pci_dev;
+ struct pci_controller;
+ 
++
++/**
++ * enum drm_switch_power - power state of drm device
++ */
++
++enum switch_power_state {
++	/** @DRM_SWITCH_POWER_ON: Power state is ON */
++	DRM_SWITCH_POWER_ON = 0,
++
++	/** @DRM_SWITCH_POWER_OFF: Power state is OFF */
++	DRM_SWITCH_POWER_OFF = 1,
++
++	/** @DRM_SWITCH_POWER_CHANGING: Power state is changing */
++	DRM_SWITCH_POWER_CHANGING = 2,
++
++	/** @DRM_SWITCH_POWER_DYNAMIC_OFF: Suspended */
++	DRM_SWITCH_POWER_DYNAMIC_OFF = 3,
++};
++
+ /**
+- * DRM device structure. This structure represent a complete card that
++ * struct drm_device - DRM device structure
++ *
++ * This structure represent a complete card that
+  * may contain multiple heads.
+  */
+ struct drm_device {
+-	struct list_head legacy_dev_list;/**< list of devices per driver for stealth attach cleanup */
+-	int if_version;			/**< Highest interface version set */
+-
+-	/** \name Lifetime Management */
+-	/*@{ */
+-	struct kref ref;		/**< Object ref-count */
+-	struct device *dev;		/**< Device structure of bus-device */
+-	struct drm_driver *driver;	/**< DRM driver managing the device */
+-	void *dev_private;		/**< DRM driver private data */
+-	struct drm_minor *primary;		/**< Primary node */
+-	struct drm_minor *render;		/**< Render node */
++	/**
++	 * @legacy_dev_list:
++	 *
++	 * List of devices per driver for stealth attach cleanup
++	 */
++	struct list_head legacy_dev_list;
++
++	/** @if_version: Highest interface version set */
++	int if_version;
++
++	/** @ref: Object ref-count */
++	struct kref ref;
++
++	/** @dev: Device structure of bus-device */
++	struct device *dev;
++
++	/** @driver: DRM driver managing the device */
++	struct drm_driver *driver;
++
++	/**
++	 * @dev_private:
++	 *
++	 * DRM driver private data. Instead of using this pointer it is
++	 * recommended that drivers use drm_dev_init() and embed struct
++	 * &drm_device in their larger per-device structure.
++	 */
++	void *dev_private;
++
++	/** @primary: Primary node */
++	struct drm_minor *primary;
++
++	/** @render: Render node */
++	struct drm_minor *render;
++
++	/**
++	 * @registered:
++	 *
++	 * Internally used by drm_dev_register() and drm_connector_register().
++	 */
+ 	bool registered;
+ 
+-	/* currently active master for this device. Protected by master_mutex */
++	/**
++	 * @master:
++	 *
++	 * Currently active master for this device.
++	 * Protected by &master_mutex
++	 */
+ 	struct drm_master *master;
+ 
++	/**
++	 * @driver_features: per-device driver features
++	 *
++	 * Drivers can clear specific flags here to disallow
++	 * certain features on a per-device basis while still
++	 * sharing a single &struct drm_driver instance across
++	 * all devices.
++	 */
++	u32 driver_features;
++
+ 	/**
+ 	 * @unplugged:
+ 	 *
+@@ -53,76 +117,65 @@ struct drm_device {
+ 	 */
+ 	bool unplugged;
+ 
+-	struct inode *anon_inode;		/**< inode for private address-space */
+-	char *unique;				/**< unique name of the device */
+-	/*@} */
++	/** @anon_inode: inode for private address-space */
++	struct inode *anon_inode;
++
++	/** @unique: Unique name of the device */
++	char *unique;
+ 
+-	/** \name Locks */
+-	/*@{ */
+-	struct mutex struct_mutex;	/**< For others */
+-	struct mutex master_mutex;      /**< For drm_minor::master and drm_file::is_master */
+-	/*@} */
++	/**
++	 * @struct_mutex:
++	 *
++	 * Lock for others (not &drm_minor.master and &drm_file.is_master)
++	 */
++	struct mutex struct_mutex;
+ 
+-	/** \name Usage Counters */
+-	/*@{ */
+-	int open_count;			/**< Outstanding files open, protected by drm_global_mutex. */
+-	spinlock_t buf_lock;		/**< For drm_device::buf_use and a few other things. */
+-	int buf_use;			/**< Buffers in use -- cannot alloc */
+-	atomic_t buf_alloc;		/**< Buffer allocation in progress */
+-	/*@} */
++	/**
++	 * @master_mutex:
++	 *
++	 * Lock for &drm_minor.master and &drm_file.is_master
++	 */
++	struct mutex master_mutex;
+ 
++	/**
++	 * @open_count:
++	 *
++	 * Usage counter for outstanding files open,
++	 * protected by drm_global_mutex
++	 */
++	int open_count;
++
++	/** @filelist_mutex: Protects @filelist. */
+ 	struct mutex filelist_mutex;
++	/**
++	 * @filelist:
++	 *
++	 * List of userspace clients, linked through &drm_file.lhead.
++	 */
+ 	struct list_head filelist;
+ 
+ 	/**
+ 	 * @filelist_internal:
+ 	 *
+-	 * List of open DRM files for in-kernel clients. Protected by @filelist_mutex.
++	 * List of open DRM files for in-kernel clients.
++	 * Protected by &filelist_mutex.
+ 	 */
+ 	struct list_head filelist_internal;
+ 
+ 	/**
+ 	 * @clientlist_mutex:
+ 	 *
+-	 * Protects @clientlist access.
++	 * Protects &clientlist access.
+ 	 */
+ 	struct mutex clientlist_mutex;
+ 
+ 	/**
+ 	 * @clientlist:
+ 	 *
+-	 * List of in-kernel clients. Protected by @clientlist_mutex.
++	 * List of in-kernel clients. Protected by &clientlist_mutex.
+ 	 */
+ 	struct list_head clientlist;
+ 
+-	/** \name Memory management */
+-	/*@{ */
+-	struct list_head maplist;	/**< Linked list of regions */
+-	struct drm_open_hash map_hash;	/**< User token hash table for maps */
+-
+-	/** \name Context handle management */
+-	/*@{ */
+-	struct list_head ctxlist;	/**< Linked list of context handles */
+-	struct mutex ctxlist_mutex;	/**< For ctxlist */
+-
+-	struct idr ctx_idr;
+-
+-	struct list_head vmalist;	/**< List of vmas (for debugging) */
+-
+-	/*@} */
+-
+-	/** \name DMA support */
+-	/*@{ */
+-	struct drm_device_dma *dma;		/**< Optional pointer for DMA support */
+-	/*@} */
+-
+-	/** \name Context support */
+-	/*@{ */
+-
+-	__volatile__ long context_flag;	/**< Context swapping flag */
+-	int last_context;		/**< Last current context */
+-	/*@} */
+-
+ 	/**
+ 	 * @irq_enabled:
+ 	 *
+@@ -131,6 +184,10 @@ struct drm_device {
+ 	 * to true manually.
+ 	 */
+ 	bool irq_enabled;
++
++	/**
++	 * @irq: Used by the drm_irq_install() and drm_irq_unistall() helpers.
++	 */
+ 	int irq;
+ 
+ 	/**
+@@ -158,7 +215,16 @@ struct drm_device {
+ 	 */
+ 	struct drm_vblank_crtc *vblank;
+ 
+-	spinlock_t vblank_time_lock;    /**< Protects vblank count and time updates during vblank enable/disable */
++	/**
++	 * @vblank_time_lock:
++	 *
++	 *  Protects vblank count and time updates during vblank enable/disable
++	 */
++	spinlock_t vblank_time_lock;
++	/**
++	 * @vbl_lock: Top-level vblank references lock, wraps the low-level
++	 * @vblank_time_lock.
++	 */
+ 	spinlock_t vbl_lock;
+ 
+ 	/**
+@@ -174,45 +240,61 @@ struct drm_device {
+ 	 * races and imprecision over longer time periods, hence exposing a
+ 	 * hardware vblank counter is always recommended.
+ 	 *
+-	 * If non-zeor, &drm_crtc_funcs.get_vblank_counter must be set.
++	 * This is the statically configured device wide maximum. The driver
++	 * can instead choose to use a runtime configurable per-crtc value
++	 * &drm_vblank_crtc.max_vblank_count, in which case @max_vblank_count
++	 * must be left at zero. See drm_crtc_set_max_vblank_count() on how
++	 * to use the per-crtc value.
++	 *
++	 * If non-zero, &drm_crtc_funcs.get_vblank_counter must be set.
+ 	 */
+-	u32 max_vblank_count;           /**< size of vblank counter register */
++	u32 max_vblank_count;
++
++	/** @vblank_event_list: List of vblank events */
++	struct list_head vblank_event_list;
+ 
+ 	/**
+-	 * List of events
++	 * @event_lock:
++	 *
++	 * Protects @vblank_event_list and event delivery in
++	 * general. See drm_send_event() and drm_send_event_locked().
+ 	 */
+-	struct list_head vblank_event_list;
+ 	spinlock_t event_lock;
+ 
+-	/*@} */
++	/** @agp: AGP data */
++	struct drm_agp_head *agp;
+ 
+-	struct drm_agp_head *agp;	/**< AGP data */
++	/** @pdev: PCI device structure */
++	struct pci_dev *pdev;
+ 
+-	struct pci_dev *pdev;		/**< PCI device structure */
+ #ifdef __alpha__
++	/** @hose: PCI hose, only used on ALPHA platforms. */
+ 	struct pci_controller *hose;
+ #endif
++	/** @num_crtcs: Number of CRTCs on this device */
++	unsigned int num_crtcs;
+ 
+-	struct drm_sg_mem *sg;	/**< Scatter gather memory */
+-	unsigned int num_crtcs;                  /**< Number of CRTCs on this device */
++	/** @mode_config: Current mode config */
++	struct drm_mode_config mode_config;
+ 
+-	struct {
+-		int context;
+-		struct drm_hw_lock *lock;
+-	} sigdata;
+-
+-	struct drm_local_map *agp_buffer_map;
+-	unsigned int agp_buffer_token;
+-
+-	struct drm_mode_config mode_config;	/**< Current mode config */
+-
+-	/** \name GEM information */
+-	/*@{ */
++	/** @object_name_lock: GEM information */
+ 	struct mutex object_name_lock;
++
++	/** @object_name_idr: GEM information */
+ 	struct idr object_name_idr;
++
++	/** @vma_offset_manager: GEM information */
+ 	struct drm_vma_offset_manager *vma_offset_manager;
+-	/*@} */
+-	int switch_power_state;
++
++	/**
++	 * @switch_power_state:
++	 *
++	 * Power state of the client.
++	 * Used by drivers supporting the switcheroo driver.
++	 * The state is maintained in the
++	 * &vga_switcheroo_client_ops.set_gpu_state callback
++	 */
++	enum switch_power_state switch_power_state;
+ 
+ 	/**
+ 	 * @fb_helper:
+@@ -221,6 +303,56 @@ struct drm_device {
+ 	 * Set by drm_fb_helper_init() and cleared by drm_fb_helper_fini().
+ 	 */
+ 	struct drm_fb_helper *fb_helper;
++
++	/* Everything below here is for legacy driver, never use! */
++	/* private: */
++
++	/* Context handle management - linked list of context handles */
++	struct list_head ctxlist;
++
++	/* Context handle management - mutex for &ctxlist */
++	struct mutex ctxlist_mutex;
++
++	/* Context handle management */
++	struct idr ctx_idr;
++
++	/* Memory management - linked list of regions */
++	struct list_head maplist;
++
++	/* Memory management - user token hash table for maps */
++	struct drm_open_hash map_hash;
++
++	/* Context handle management - list of vmas (for debugging) */
++	struct list_head vmalist;
++
++	/* Optional pointer for DMA support */
++	struct drm_device_dma *dma;
++
++	/* Context swapping flag */
++	__volatile__ long context_flag;
++
++	/* Last current context */
++	int last_context;
++
++	/* Lock for &buf_use and a few other things. */
++	spinlock_t buf_lock;
++
++	/* Usage counter for buffers in use -- cannot alloc */
++	int buf_use;
++
++	/* Buffer allocation in progress */
++	atomic_t buf_alloc;
++
++	struct {
++		int context;
++		struct drm_hw_lock *lock;
++	} sigdata;
++
++	struct drm_local_map *agp_buffer_map;
++	unsigned int agp_buffer_token;
++
++	/* Scatter gather memory */
++	struct drm_sg_mem *sg;
+ };
+ 
+ #endif
+diff --git a/include/drm/drm_displayid.h b/include/drm/drm_displayid.h
+index 9d3b745c3..c0d4df6a6 100644
+--- a/include/drm/drm_displayid.h
++++ b/include/drm/drm_displayid.h
+@@ -40,7 +40,6 @@
+ #define DATA_BLOCK_DISPLAY_INTERFACE 0x0f
+ #define DATA_BLOCK_STEREO_DISPLAY_INTERFACE 0x10
+ #define DATA_BLOCK_TILED_DISPLAY 0x12
+-#define DATA_BLOCK_CTA 0x81
+ 
+ #define DATA_BLOCK_VENDOR_SPECIFIC 0x7f
+ 
+@@ -91,13 +90,4 @@ struct displayid_detailed_timing_block {
+ 	struct displayid_block base;
+ 	struct displayid_detailed_timings_1 timings[0];
+ };
+-
+-#define for_each_displayid_db(displayid, block, idx, length) \
+-	for ((block) = (struct displayid_block *)&(displayid)[idx]; \
+-	     (idx) + sizeof(struct displayid_block) <= (length) && \
+-	     (idx) + sizeof(struct displayid_block) + (block)->num_bytes <= (length) && \
+-	     (block)->num_bytes > 0; \
+-	     (idx) += (block)->num_bytes + sizeof(struct displayid_block), \
+-	     (block) = (struct displayid_block *)&(displayid)[idx])
+-
+ #endif
+diff --git a/include/drm/drm_dp_helper.h b/include/drm/drm_dp_helper.h
+index 05cc31b5d..97ce790a5 100644
+--- a/include/drm/drm_dp_helper.h
++++ b/include/drm/drm_dp_helper.h
+@@ -123,8 +123,9 @@
+ # define DP_FRAMING_CHANGE_CAP		    (1 << 1)
+ # define DP_DPCD_DISPLAY_CONTROL_CAPABLE     (1 << 3) /* edp v1.2 or higher */
+ 
+-#define DP_TRAINING_AUX_RD_INTERVAL         0x00e   /* XXX 1.2? */
+-# define DP_TRAINING_AUX_RD_MASK            0x7F    /* XXX 1.2? */
++#define DP_TRAINING_AUX_RD_INTERVAL             0x00e   /* XXX 1.2? */
++# define DP_TRAINING_AUX_RD_MASK                0x7F    /* DP 1.3 */
++# define DP_EXTENDED_RECEIVER_CAP_FIELD_PRESENT	(1 << 7) /* DP 1.3 */
+ 
+ #define DP_ADAPTER_CAP			    0x00f   /* 1.2 */
+ # define DP_FORCE_LOAD_SENSE_CAP	    (1 << 0)
+@@ -230,6 +231,8 @@
+ #define DP_DSC_MAX_BITS_PER_PIXEL_LOW       0x067   /* eDP 1.4 */
+ 
+ #define DP_DSC_MAX_BITS_PER_PIXEL_HI        0x068   /* eDP 1.4 */
++# define DP_DSC_MAX_BITS_PER_PIXEL_HI_MASK  (0x3 << 0)
++# define DP_DSC_MAX_BITS_PER_PIXEL_HI_SHIFT 8
+ 
+ #define DP_DSC_DEC_COLOR_FORMAT_CAP         0x069
+ # define DP_DSC_RGB                         (1 << 0)
+@@ -278,6 +281,8 @@
+ # define DP_DSC_THROUGHPUT_MODE_1_1000      (14 << 4)
+ 
+ #define DP_DSC_MAX_SLICE_WIDTH              0x06C
++#define DP_DSC_MIN_SLICE_WIDTH_VALUE        2560
++#define DP_DSC_SLICE_WIDTH_MULTIPLIER       320
+ 
+ #define DP_DSC_SLICE_CAP_2                  0x06D
+ # define DP_DSC_16_PER_DP_DSC_SINK          (1 << 0)
+@@ -309,6 +314,10 @@
+ # define DP_PSR_SETUP_TIME_SHIFT            1
+ # define DP_PSR2_SU_Y_COORDINATE_REQUIRED   (1 << 4)  /* eDP 1.4a */
+ # define DP_PSR2_SU_GRANULARITY_REQUIRED    (1 << 5)  /* eDP 1.4b */
++
++#define DP_PSR2_SU_X_GRANULARITY	    0x072 /* eDP 1.4b */
++#define DP_PSR2_SU_Y_GRANULARITY	    0x074 /* eDP 1.4b */
++
+ /*
+  * 0x80-0x8f describe downstream port capabilities, but there are two layouts
+  * based on whether DP_DETAILED_CAP_INFO_AVAILABLE was set.  If it was not,
+@@ -476,6 +485,7 @@
+ # define DP_AUX_FRAME_SYNC_VALID	    (1 << 0)
+ 
+ #define DP_DSC_ENABLE                       0x160   /* DP 1.4 */
++# define DP_DECOMPRESSION_EN                (1 << 0)
+ 
+ #define DP_PSR_EN_CFG			    0x170   /* XXX 1.2? */
+ # define DP_PSR_ENABLE			    (1 << 0)
+@@ -550,6 +560,8 @@
+ # define DP_TEST_LINK_EDID_READ		    (1 << 2)
+ # define DP_TEST_LINK_PHY_TEST_PATTERN	    (1 << 3) /* DPCD >= 1.1 */
+ # define DP_TEST_LINK_FAUX_PATTERN	    (1 << 4) /* DPCD >= 1.2 */
++# define DP_TEST_LINK_AUDIO_PATTERN         (1 << 5) /* DPCD >= 1.2 */
++# define DP_TEST_LINK_AUDIO_DISABLED_VIDEO  (1 << 6) /* DPCD >= 1.2 */
+ 
+ #define DP_TEST_LINK_RATE		    0x219
+ # define DP_LINK_RATE_162		    (0x6)
+@@ -598,6 +610,7 @@
+ # define DP_COLOR_FORMAT_RGB                (0 << 1)
+ # define DP_COLOR_FORMAT_YCbCr422           (1 << 1)
+ # define DP_COLOR_FORMAT_YCbCr444           (2 << 1)
++# define DP_TEST_DYNAMIC_RANGE_VESA         (0 << 3)
+ # define DP_TEST_DYNAMIC_RANGE_CEA          (1 << 3)
+ # define DP_TEST_YCBCR_COEFFICIENTS         (1 << 4)
+ # define DP_YCBCR_COEFFICIENTS_ITU601       (0 << 4)
+@@ -647,6 +660,16 @@
+ 
+ #define DP_TEST_SINK			    0x270
+ # define DP_TEST_SINK_START		    (1 << 0)
++#define DP_TEST_AUDIO_MODE		    0x271
++#define DP_TEST_AUDIO_PATTERN_TYPE	    0x272
++#define DP_TEST_AUDIO_PERIOD_CH1	    0x273
++#define DP_TEST_AUDIO_PERIOD_CH2	    0x274
++#define DP_TEST_AUDIO_PERIOD_CH3	    0x275
++#define DP_TEST_AUDIO_PERIOD_CH4	    0x276
++#define DP_TEST_AUDIO_PERIOD_CH5	    0x277
++#define DP_TEST_AUDIO_PERIOD_CH6	    0x278
++#define DP_TEST_AUDIO_PERIOD_CH7	    0x279
++#define DP_TEST_AUDIO_PERIOD_CH8	    0x27A
+ 
+ #define DP_FEC_STATUS			    0x280    /* 1.4 */
+ # define DP_FEC_DECODE_EN_DETECTED	    (1 << 0)
+@@ -684,6 +707,8 @@
+ # define DP_EDP_12			    0x01
+ # define DP_EDP_13			    0x02
+ # define DP_EDP_14			    0x03
++# define DP_EDP_14a                         0x04    /* eDP 1.4a */
++# define DP_EDP_14b                         0x05    /* eDP 1.4b */
+ 
+ #define DP_EDP_GENERAL_CAP_1		    0x701
+ # define DP_EDP_TCON_BACKLIGHT_ADJUSTMENT_CAP		(1 << 0)
+@@ -904,6 +929,57 @@
+ #define DP_AUX_HDCP_KSV_FIFO		0x6802C
+ #define DP_AUX_HDCP_AINFO		0x6803B
+ 
++/* DP HDCP2.2 parameter offsets in DPCD address space */
++#define DP_HDCP_2_2_REG_RTX_OFFSET		0x69000
++#define DP_HDCP_2_2_REG_TXCAPS_OFFSET		0x69008
++#define DP_HDCP_2_2_REG_CERT_RX_OFFSET		0x6900B
++#define DP_HDCP_2_2_REG_RRX_OFFSET		0x69215
++#define DP_HDCP_2_2_REG_RX_CAPS_OFFSET		0x6921D
++#define DP_HDCP_2_2_REG_EKPUB_KM_OFFSET		0x69220
++#define DP_HDCP_2_2_REG_EKH_KM_WR_OFFSET	0x692A0
++#define DP_HDCP_2_2_REG_M_OFFSET		0x692B0
++#define DP_HDCP_2_2_REG_HPRIME_OFFSET		0x692C0
++#define DP_HDCP_2_2_REG_EKH_KM_RD_OFFSET	0x692E0
++#define DP_HDCP_2_2_REG_RN_OFFSET		0x692F0
++#define DP_HDCP_2_2_REG_LPRIME_OFFSET		0x692F8
++#define DP_HDCP_2_2_REG_EDKEY_KS_OFFSET		0x69318
++#define	DP_HDCP_2_2_REG_RIV_OFFSET		0x69328
++#define DP_HDCP_2_2_REG_RXINFO_OFFSET		0x69330
++#define DP_HDCP_2_2_REG_SEQ_NUM_V_OFFSET	0x69332
++#define DP_HDCP_2_2_REG_VPRIME_OFFSET		0x69335
++#define DP_HDCP_2_2_REG_RECV_ID_LIST_OFFSET	0x69345
++#define DP_HDCP_2_2_REG_V_OFFSET		0x693E0
++#define DP_HDCP_2_2_REG_SEQ_NUM_M_OFFSET	0x693F0
++#define DP_HDCP_2_2_REG_K_OFFSET		0x693F3
++#define DP_HDCP_2_2_REG_STREAM_ID_TYPE_OFFSET	0x693F5
++#define DP_HDCP_2_2_REG_MPRIME_OFFSET		0x69473
++#define DP_HDCP_2_2_REG_RXSTATUS_OFFSET		0x69493
++#define DP_HDCP_2_2_REG_STREAM_TYPE_OFFSET	0x69494
++#define DP_HDCP_2_2_REG_DBG_OFFSET		0x69518
++
++/* DP HDCP message start offsets in DPCD address space */
++#define DP_HDCP_2_2_AKE_INIT_OFFSET		DP_HDCP_2_2_REG_RTX_OFFSET
++#define DP_HDCP_2_2_AKE_SEND_CERT_OFFSET	DP_HDCP_2_2_REG_CERT_RX_OFFSET
++#define DP_HDCP_2_2_AKE_NO_STORED_KM_OFFSET	DP_HDCP_2_2_REG_EKPUB_KM_OFFSET
++#define DP_HDCP_2_2_AKE_STORED_KM_OFFSET	DP_HDCP_2_2_REG_EKH_KM_WR_OFFSET
++#define DP_HDCP_2_2_AKE_SEND_HPRIME_OFFSET	DP_HDCP_2_2_REG_HPRIME_OFFSET
++#define DP_HDCP_2_2_AKE_SEND_PAIRING_INFO_OFFSET \
++						DP_HDCP_2_2_REG_EKH_KM_RD_OFFSET
++#define DP_HDCP_2_2_LC_INIT_OFFSET		DP_HDCP_2_2_REG_RN_OFFSET
++#define DP_HDCP_2_2_LC_SEND_LPRIME_OFFSET	DP_HDCP_2_2_REG_LPRIME_OFFSET
++#define DP_HDCP_2_2_SKE_SEND_EKS_OFFSET		DP_HDCP_2_2_REG_EDKEY_KS_OFFSET
++#define DP_HDCP_2_2_REP_SEND_RECVID_LIST_OFFSET	DP_HDCP_2_2_REG_RXINFO_OFFSET
++#define DP_HDCP_2_2_REP_SEND_ACK_OFFSET		DP_HDCP_2_2_REG_V_OFFSET
++#define DP_HDCP_2_2_REP_STREAM_MANAGE_OFFSET	DP_HDCP_2_2_REG_SEQ_NUM_M_OFFSET
++#define DP_HDCP_2_2_REP_STREAM_READY_OFFSET	DP_HDCP_2_2_REG_MPRIME_OFFSET
++
++#define HDCP_2_2_DP_RXSTATUS_LEN		1
++#define HDCP_2_2_DP_RXSTATUS_READY(x)		((x) & BIT(0))
++#define HDCP_2_2_DP_RXSTATUS_H_PRIME(x)		((x) & BIT(1))
++#define HDCP_2_2_DP_RXSTATUS_PAIRING(x)		((x) & BIT(2))
++#define HDCP_2_2_DP_RXSTATUS_REAUTH_REQ(x)	((x) & BIT(3))
++#define HDCP_2_2_DP_RXSTATUS_LINK_FAILED(x)	((x) & BIT(4))
++
+ /* DP 1.2 Sideband message defines */
+ /* peer device type - DP 1.2a Table 2-92 */
+ #define DP_PEER_DEVICE_NONE		0x0
+@@ -913,6 +989,7 @@
+ #define DP_PEER_DEVICE_DP_LEGACY_CONV	0x4
+ 
+ /* DP 1.2 MST sideband request names DP 1.2a Table 2-80 */
++#define DP_GET_MSG_TRANSACTION_VERSION	0x00 /* DP 1.3 */
+ #define DP_LINK_ADDRESS			0x01
+ #define DP_CONNECTION_STATUS_NOTIFY	0x02
+ #define DP_ENUM_PATH_RESOURCES		0x10
+@@ -929,6 +1006,10 @@
+ #define DP_SINK_EVENT_NOTIFY		0x30
+ #define DP_QUERY_STREAM_ENC_STATUS	0x38
+ 
++/* DP 1.2 MST sideband reply types */
++#define DP_SIDEBAND_REPLY_ACK		0x00
++#define DP_SIDEBAND_REPLY_NAK		0x01
++
+ /* DP 1.2 MST sideband nak reasons - table 2.84 */
+ #define DP_NAK_WRITE_FAILURE		0x01
+ #define DP_NAK_INVALID_READ		0x02
+@@ -962,6 +1043,7 @@ u8 drm_dp_get_adjust_request_pre_emphasis(const u8 link_status[DP_LINK_STATUS_SI
+ 
+ #define DP_BRANCH_OUI_HEADER_SIZE	0xc
+ #define DP_RECEIVER_CAP_SIZE		0xf
++#define DP_DSC_RECEIVER_CAP_SIZE        0xf
+ #define EDP_PSR_RECEIVER_CAP_SIZE	2
+ #define EDP_DISPLAY_CTL_CAP_SIZE	3
+ 
+@@ -983,15 +1065,23 @@ int drm_dp_bw_code_to_link_rate(u8 link_bw);
+ #define DP_SDP_VSC_EXT_CEA		0x21 /* DP 1.4 */
+ /* 0x80+ CEA-861 infoframe types */
+ 
++/**
++ * struct dp_sdp_header - DP secondary data packet header
++ * @HB0: Secondary Data Packet ID
++ * @HB1: Secondary Data Packet Type
++ * @HB2: Secondary Data Packet Specific header, Byte 0
++ * @HB3: Secondary Data packet Specific header, Byte 1
++ */
+ struct dp_sdp_header {
+-	u8 HB0; /* Secondary Data Packet ID */
+-	u8 HB1; /* Secondary Data Packet Type */
+-	u8 HB2; /* Secondary Data Packet Specific header, Byte 0 */
+-	u8 HB3; /* Secondary Data packet Specific header, Byte 1 */
++	u8 HB0;
++	u8 HB1;
++	u8 HB2;
++	u8 HB3;
+ } __packed;
+ 
+ #define EDP_SDP_HEADER_REVISION_MASK		0x1F
+ #define EDP_SDP_HEADER_VALID_PAYLOAD_BYTES	0x1F
++#define DP_SDP_PPS_HEADER_PAYLOAD_BYTES_MINUS_1 0x7F
+ 
+ struct edp_vsc_psr {
+ 	struct dp_sdp_header sdp_header;
+@@ -1058,6 +1148,44 @@ drm_dp_is_branch(const u8 dpcd[DP_RECEIVER_CAP_SIZE])
+ 	return dpcd[DP_DOWNSTREAMPORT_PRESENT] & DP_DWN_STRM_PORT_PRESENT;
+ }
+ 
++/* DP/eDP DSC support */
++u8 drm_dp_dsc_sink_max_slice_count(const u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE],
++				   bool is_edp);
++u8 drm_dp_dsc_sink_line_buf_depth(const u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE]);
++int drm_dp_dsc_sink_supported_input_bpcs(const u8 dsc_dpc[DP_DSC_RECEIVER_CAP_SIZE],
++					 u8 dsc_bpc[3]);
++
++static inline bool
++drm_dp_sink_supports_dsc(const u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE])
++{
++	return dsc_dpcd[DP_DSC_SUPPORT - DP_DSC_SUPPORT] &
++		DP_DSC_DECOMPRESSION_IS_SUPPORTED;
++}
++
++static inline u16
++drm_edp_dsc_sink_output_bpp(const u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE])
++{
++	return dsc_dpcd[DP_DSC_MAX_BITS_PER_PIXEL_LOW - DP_DSC_SUPPORT] |
++		(dsc_dpcd[DP_DSC_MAX_BITS_PER_PIXEL_HI - DP_DSC_SUPPORT] &
++		 DP_DSC_MAX_BITS_PER_PIXEL_HI_MASK <<
++		 DP_DSC_MAX_BITS_PER_PIXEL_HI_SHIFT);
++}
++
++static inline u32
++drm_dp_dsc_sink_max_slice_width(const u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE])
++{
++	/* Max Slicewidth = Number of Pixels * 320 */
++	return dsc_dpcd[DP_DSC_MAX_SLICE_WIDTH - DP_DSC_SUPPORT] *
++		DP_DSC_SLICE_WIDTH_MULTIPLIER;
++}
++
++/* Forward Error Correction Support on DP 1.4 */
++static inline bool
++drm_dp_sink_supports_fec(const u8 fec_capable)
++{
++	return fec_capable & DP_FEC_CAPABLE;
++}
++
+ /*
+  * DisplayPort AUX channel
+  */
+@@ -1260,12 +1388,19 @@ int drm_dp_read_desc(struct drm_dp_aux *aux, struct drm_dp_desc *desc,
+  */
+ enum drm_dp_quirk {
+ 	/**
+-	 * @DP_DPCD_QUIRK_LIMITED_M_N:
++	 * @DP_DPCD_QUIRK_CONSTANT_N:
+ 	 *
+ 	 * The device requires main link attributes Mvid and Nvid to be limited
+-	 * to 16 bits.
++	 * to 16 bits. So will give a constant value (0x8000) for compatability.
++	 */
++	DP_DPCD_QUIRK_CONSTANT_N,
++	/**
++	 * @DP_DPCD_QUIRK_NO_PSR:
++	 *
++	 * The device does not support PSR even if reports that it supports or
++	 * driver still need to implement proper handling for such device.
+ 	 */
+-	DP_DPCD_QUIRK_LIMITED_M_N,
++	DP_DPCD_QUIRK_NO_PSR,
+ };
+ 
+ /**
+diff --git a/include/drm/drm_dp_mst_helper.h b/include/drm/drm_dp_mst_helper.h
+index 7f78d26a0..8c97a5f92 100644
+--- a/include/drm/drm_dp_mst_helper.h
++++ b/include/drm/drm_dp_mst_helper.h
+@@ -44,7 +44,6 @@ struct drm_dp_vcpi {
+ 
+ /**
+  * struct drm_dp_mst_port - MST port
+- * @kref: reference count for this port.
+  * @port_num: port number
+  * @input: if this port is an input port.
+  * @mcs: message capability status - DP 1.2 spec.
+@@ -67,7 +66,18 @@ struct drm_dp_vcpi {
+  * in the MST topology.
+  */
+ struct drm_dp_mst_port {
+-	struct kref kref;
++	/**
++	 * @topology_kref: refcount for this port's lifetime in the topology,
++	 * only the DP MST helpers should need to touch this
++	 */
++	struct kref topology_kref;
++
++	/**
++	 * @malloc_kref: refcount for the memory allocation containing this
++	 * structure. See drm_dp_mst_get_port_malloc() and
++	 * drm_dp_mst_put_port_malloc().
++	 */
++	struct kref malloc_kref;
+ 
+ 	u8 port_num;
+ 	bool input;
+@@ -102,7 +112,6 @@ struct drm_dp_mst_port {
+ 
+ /**
+  * struct drm_dp_mst_branch - MST branch device.
+- * @kref: reference count for this port.
+  * @rad: Relative Address to talk to this branch device.
+  * @lct: Link count total to talk to this branch device.
+  * @num_ports: number of ports on the branch.
+@@ -121,7 +130,19 @@ struct drm_dp_mst_port {
+  * to downstream port of parent branches.
+  */
+ struct drm_dp_mst_branch {
+-	struct kref kref;
++	/**
++	 * @topology_kref: refcount for this branch device's lifetime in the
++	 * topology, only the DP MST helpers should need to touch this
++	 */
++	struct kref topology_kref;
++
++	/**
++	 * @malloc_kref: refcount for the memory allocation containing this
++	 * structure. See drm_dp_mst_get_mstb_malloc() and
++	 * drm_dp_mst_put_mstb_malloc().
++	 */
++	struct kref malloc_kref;
++
+ 	u8 rad[8];
+ 	u8 lct;
+ 	int num_ports;
+@@ -387,8 +408,6 @@ struct drm_dp_mst_topology_cbs {
+ 	void (*register_connector)(struct drm_connector *connector);
+ 	void (*destroy_connector)(struct drm_dp_mst_topology_mgr *mgr,
+ 				  struct drm_connector *connector);
+-	void (*hotplug)(struct drm_dp_mst_topology_mgr *mgr);
+-
+ };
+ 
+ #define DP_MAX_PAYLOAD (sizeof(unsigned long) * 8)
+@@ -406,10 +425,15 @@ struct drm_dp_payload {
+ 
+ #define to_dp_mst_topology_state(x) container_of(x, struct drm_dp_mst_topology_state, base)
+ 
++struct drm_dp_vcpi_allocation {
++	struct drm_dp_mst_port *port;
++	int vcpi;
++	struct list_head next;
++};
++
+ struct drm_dp_mst_topology_state {
+ 	struct drm_private_state base;
+-	int avail_slots;
+-	struct drm_atomic_state *state;
++	struct list_head vcpis;
+ 	struct drm_dp_mst_topology_mgr *mgr;
+ };
+ 
+@@ -497,11 +521,6 @@ struct drm_dp_mst_topology_mgr {
+ 	 */
+ 	int pbn_div;
+ 
+-	/**
+-	 * @state: State information for topology manager
+-	 */
+-	struct drm_dp_mst_topology_state *state;
+-
+ 	/**
+ 	 * @funcs: Atomic helper callbacks
+ 	 */
+@@ -622,16 +641,119 @@ void drm_dp_mst_dump_topology(struct seq_file *m,
+ 			      struct drm_dp_mst_topology_mgr *mgr);
+ 
+ void drm_dp_mst_topology_mgr_suspend(struct drm_dp_mst_topology_mgr *mgr);
+-int drm_dp_mst_topology_mgr_resume(struct drm_dp_mst_topology_mgr *mgr);
++int __must_check
++drm_dp_mst_topology_mgr_resume(struct drm_dp_mst_topology_mgr *mgr);
+ struct drm_dp_mst_topology_state *drm_atomic_get_mst_topology_state(struct drm_atomic_state *state,
+ 								    struct drm_dp_mst_topology_mgr *mgr);
+-int drm_dp_atomic_find_vcpi_slots(struct drm_atomic_state *state,
+-				  struct drm_dp_mst_topology_mgr *mgr,
+-				  struct drm_dp_mst_port *port, int pbn);
+-int drm_dp_atomic_release_vcpi_slots(struct drm_atomic_state *state,
+-				     struct drm_dp_mst_topology_mgr *mgr,
+-				     int slots);
++int __must_check
++drm_dp_atomic_find_vcpi_slots(struct drm_atomic_state *state,
++			      struct drm_dp_mst_topology_mgr *mgr,
++			      struct drm_dp_mst_port *port, int pbn);
++int __must_check
++drm_dp_atomic_release_vcpi_slots(struct drm_atomic_state *state,
++				 struct drm_dp_mst_topology_mgr *mgr,
++				 struct drm_dp_mst_port *port);
+ int drm_dp_send_power_updown_phy(struct drm_dp_mst_topology_mgr *mgr,
+ 				 struct drm_dp_mst_port *port, bool power_up);
++int __must_check drm_dp_mst_atomic_check(struct drm_atomic_state *state);
++
++void drm_dp_mst_get_port_malloc(struct drm_dp_mst_port *port);
++void drm_dp_mst_put_port_malloc(struct drm_dp_mst_port *port);
++
++extern const struct drm_private_state_funcs drm_dp_mst_topology_state_funcs;
++
++/**
++ * __drm_dp_mst_state_iter_get - private atomic state iterator function for
++ * macro-internal use
++ * @state: &struct drm_atomic_state pointer
++ * @mgr: pointer to the &struct drm_dp_mst_topology_mgr iteration cursor
++ * @old_state: optional pointer to the old &struct drm_dp_mst_topology_state
++ * iteration cursor
++ * @new_state: optional pointer to the new &struct drm_dp_mst_topology_state
++ * iteration cursor
++ * @i: int iteration cursor, for macro-internal use
++ *
++ * Used by for_each_oldnew_mst_mgr_in_state(),
++ * for_each_old_mst_mgr_in_state(), and for_each_new_mst_mgr_in_state(). Don't
++ * call this directly.
++ *
++ * Returns:
++ * True if the current &struct drm_private_obj is a &struct
++ * drm_dp_mst_topology_mgr, false otherwise.
++ */
++static inline bool
++__drm_dp_mst_state_iter_get(struct drm_atomic_state *state,
++			    struct drm_dp_mst_topology_mgr **mgr,
++			    struct drm_dp_mst_topology_state **old_state,
++			    struct drm_dp_mst_topology_state **new_state,
++			    int i)
++{
++	struct __drm_private_objs_state *objs_state = &state->private_objs[i];
++
++	if (objs_state->ptr->funcs != &drm_dp_mst_topology_state_funcs)
++		return false;
++
++	*mgr = to_dp_mst_topology_mgr(objs_state->ptr);
++	if (old_state)
++		*old_state = to_dp_mst_topology_state(objs_state->old_state);
++	if (new_state)
++		*new_state = to_dp_mst_topology_state(objs_state->new_state);
++
++	return true;
++}
++
++/**
++ * for_each_oldnew_mst_mgr_in_state - iterate over all DP MST topology
++ * managers in an atomic update
++ * @__state: &struct drm_atomic_state pointer
++ * @mgr: &struct drm_dp_mst_topology_mgr iteration cursor
++ * @old_state: &struct drm_dp_mst_topology_state iteration cursor for the old
++ * state
++ * @new_state: &struct drm_dp_mst_topology_state iteration cursor for the new
++ * state
++ * @__i: int iteration cursor, for macro-internal use
++ *
++ * This iterates over all DRM DP MST topology managers in an atomic update,
++ * tracking both old and new state. This is useful in places where the state
++ * delta needs to be considered, for example in atomic check functions.
++ */
++#define for_each_oldnew_mst_mgr_in_state(__state, mgr, old_state, new_state, __i) \
++	for ((__i) = 0; (__i) < (__state)->num_private_objs; (__i)++) \
++		for_each_if(__drm_dp_mst_state_iter_get((__state), &(mgr), &(old_state), &(new_state), (__i)))
++
++/**
++ * for_each_old_mst_mgr_in_state - iterate over all DP MST topology managers
++ * in an atomic update
++ * @__state: &struct drm_atomic_state pointer
++ * @mgr: &struct drm_dp_mst_topology_mgr iteration cursor
++ * @old_state: &struct drm_dp_mst_topology_state iteration cursor for the old
++ * state
++ * @__i: int iteration cursor, for macro-internal use
++ *
++ * This iterates over all DRM DP MST topology managers in an atomic update,
++ * tracking only the old state. This is useful in disable functions, where we
++ * need the old state the hardware is still in.
++ */
++#define for_each_old_mst_mgr_in_state(__state, mgr, old_state, __i) \
++	for ((__i) = 0; (__i) < (__state)->num_private_objs; (__i)++) \
++		for_each_if(__drm_dp_mst_state_iter_get((__state), &(mgr), &(old_state), NULL, (__i)))
++
++/**
++ * for_each_new_mst_mgr_in_state - iterate over all DP MST topology managers
++ * in an atomic update
++ * @__state: &struct drm_atomic_state pointer
++ * @mgr: &struct drm_dp_mst_topology_mgr iteration cursor
++ * @new_state: &struct drm_dp_mst_topology_state iteration cursor for the new
++ * state
++ * @__i: int iteration cursor, for macro-internal use
++ *
++ * This iterates over all DRM DP MST topology managers in an atomic update,
++ * tracking only the new state. This is useful in enable functions, where we
++ * need the new state the hardware should be in when the atomic commit
++ * operation has completed.
++ */
++#define for_each_new_mst_mgr_in_state(__state, mgr, new_state, __i) \
++	for ((__i) = 0; (__i) < (__state)->num_private_objs; (__i)++) \
++		for_each_if(__drm_dp_mst_state_iter_get((__state), &(mgr), NULL, &(new_state), (__i)))
+ 
+ #endif
+diff --git a/include/drm/drm_drv.h b/include/drm/drm_drv.h
+index 152b3055e..570f9d03b 100644
+--- a/include/drm/drm_drv.h
++++ b/include/drm/drm_drv.h
+@@ -41,22 +41,113 @@ struct drm_display_mode;
+ struct drm_mode_create_dumb;
+ struct drm_printer;
+ 
+-/* driver capabilities and requirements mask */
+-#define DRIVER_USE_AGP			0x1
+-#define DRIVER_LEGACY			0x2
+-#define DRIVER_PCI_DMA			0x8
+-#define DRIVER_SG			0x10
+-#define DRIVER_HAVE_DMA			0x20
+-#define DRIVER_HAVE_IRQ			0x40
+-#define DRIVER_IRQ_SHARED		0x80
+-#define DRIVER_GEM			0x1000
+-#define DRIVER_MODESET			0x2000
+-#define DRIVER_PRIME			0x4000
+-#define DRIVER_RENDER			0x8000
+-#define DRIVER_ATOMIC			0x10000
+-#define DRIVER_KMS_LEGACY_CONTEXT	0x20000
+-#define DRIVER_SYNCOBJ                  0x40000
+-#define DRIVER_PREFER_XBGR_30BPP        0x80000
++/**
++ * enum drm_driver_feature - feature flags
++ *
++ * See &drm_driver.driver_features, drm_device.driver_features and
++ * drm_core_check_feature().
++ */
++enum drm_driver_feature {
++	/**
++	 * @DRIVER_GEM:
++	 *
++	 * Driver use the GEM memory manager. This should be set for all modern
++	 * drivers.
++	 */
++	DRIVER_GEM			= BIT(0),
++	/**
++	 * @DRIVER_MODESET:
++	 *
++	 * Driver supports mode setting interfaces (KMS).
++	 */
++	DRIVER_MODESET			= BIT(1),
++	/**
++	 * @DRIVER_PRIME:
++	 *
++	 * Driver implements DRM PRIME buffer sharing.
++	 */
++	DRIVER_PRIME			= BIT(2),
++	/**
++	 * @DRIVER_RENDER:
++	 *
++	 * Driver supports dedicated render nodes. See also the :ref:`section on
++	 * render nodes <drm_render_node>` for details.
++	 */
++	DRIVER_RENDER			= BIT(3),
++	/**
++	 * @DRIVER_ATOMIC:
++	 *
++	 * Driver supports the full atomic modesetting userspace API. Drivers
++	 * which only use atomic internally, but do not the support the full
++	 * userspace API (e.g. not all properties converted to atomic, or
++	 * multi-plane updates are not guaranteed to be tear-free) should not
++	 * set this flag.
++	 */
++	DRIVER_ATOMIC			= BIT(4),
++	/**
++	 * @DRIVER_SYNCOBJ:
++	 *
++	 * Driver supports &drm_syncobj for explicit synchronization of command
++	 * submission.
++	 */
++	DRIVER_SYNCOBJ                  = BIT(5),
++
++	/* IMPORTANT: Below are all the legacy flags, add new ones above. */
++
++	/**
++	 * @DRIVER_USE_AGP:
++	 *
++	 * Set up DRM AGP support, see drm_agp_init(), the DRM core will manage
++	 * AGP resources. New drivers don't need this.
++	 */
++	DRIVER_USE_AGP			= BIT(25),
++	/**
++	 * @DRIVER_LEGACY:
++	 *
++	 * Denote a legacy driver using shadow attach. Do not use.
++	 */
++	DRIVER_LEGACY			= BIT(26),
++	/**
++	 * @DRIVER_PCI_DMA:
++	 *
++	 * Driver is capable of PCI DMA, mapping of PCI DMA buffers to userspace
++	 * will be enabled. Only for legacy drivers. Do not use.
++	 */
++	DRIVER_PCI_DMA			= BIT(27),
++	/**
++	 * @DRIVER_SG:
++	 *
++	 * Driver can perform scatter/gather DMA, allocation and mapping of
++	 * scatter/gather buffers will be enabled. Only for legacy drivers. Do
++	 * not use.
++	 */
++	DRIVER_SG			= BIT(28),
++
++	/**
++	 * @DRIVER_HAVE_DMA:
++	 *
++	 * Driver supports DMA, the userspace DMA API will be supported. Only
++	 * for legacy drivers. Do not use.
++	 */
++	DRIVER_HAVE_DMA			= BIT(29),
++	/**
++	 * @DRIVER_HAVE_IRQ:
++	 *
++	 * Legacy irq support. Only for legacy drivers. Do not use.
++	 *
++	 * New drivers can either use the drm_irq_install() and
++	 * drm_irq_uninstall() helper functions, or roll their own irq support
++	 * code by calling request_irq() directly.
++	 */
++	DRIVER_HAVE_IRQ			= BIT(30),
++	/**
++	 * @DRIVER_KMS_LEGACY_CONTEXT:
++	 *
++	 * Used only by nouveau for backwards compatibility with existing
++	 * userspace.  Do not use.
++	 */
++	DRIVER_KMS_LEGACY_CONTEXT	= BIT(31),
++};
+ 
+ /**
+  * struct drm_driver - DRM driver structure
+@@ -472,6 +563,8 @@ struct drm_driver {
+ 	 * @gem_prime_export:
+ 	 *
+ 	 * export GEM -> dmabuf
++	 *
++	 * This defaults to drm_gem_prime_export() if not set.
+ 	 */
+ 	struct dma_buf * (*gem_prime_export)(struct drm_device *dev,
+ 				struct drm_gem_object *obj, int flags);
+@@ -479,6 +572,8 @@ struct drm_driver {
+ 	 * @gem_prime_import:
+ 	 *
+ 	 * import dmabuf -> GEM
++	 *
++	 * This defaults to drm_gem_prime_import() if not set.
+ 	 */
+ 	struct drm_gem_object * (*gem_prime_import)(struct drm_device *dev,
+ 				struct dma_buf *dma_buf);
+@@ -524,8 +619,10 @@ struct drm_driver {
+ 	 * @dumb_map_offset:
+ 	 *
+ 	 * Allocate an offset in the drm device node's address space to be able to
+-	 * memory map a dumb buffer. GEM-based drivers must use
+-	 * drm_gem_create_mmap_offset() to implement this.
++	 * memory map a dumb buffer.
++	 *
++	 * The default implementation is drm_gem_create_mmap_offset(). GEM based
++	 * drivers must not overwrite this.
+ 	 *
+ 	 * Called by the user via ioctl.
+ 	 *
+@@ -545,6 +642,9 @@ struct drm_driver {
+ 	 *
+ 	 * Called by the user via ioctl.
+ 	 *
++	 * The default implementation is drm_gem_dumb_destroy(). GEM based drivers
++	 * must not overwrite this.
++	 *
+ 	 * Returns:
+ 	 *
+ 	 * Zero on success, negative errno on failure.
+@@ -571,7 +671,12 @@ struct drm_driver {
+ 	/** @date: driver date */
+ 	char *date;
+ 
+-	/** @driver_features: driver features */
++	/**
++	 * @driver_features:
++	 * Driver features, see &enum drm_driver_feature. Drivers can disable
++	 * some features on a per-instance basis using
++	 * &drm_device.driver_features.
++	 */
+ 	u32 driver_features;
+ 
+ 	/**
+@@ -622,7 +727,6 @@ void drm_dev_unregister(struct drm_device *dev);
+ 
+ void drm_dev_get(struct drm_device *dev);
+ void drm_dev_put(struct drm_device *dev);
+-void drm_dev_unref(struct drm_device *dev);
+ void drm_put_dev(struct drm_device *dev);
+ bool drm_dev_enter(struct drm_device *dev, int *idx);
+ void drm_dev_exit(int idx);
+@@ -636,6 +740,10 @@ void drm_dev_unplug(struct drm_device *dev);
+  * Unplugging itself is singalled through drm_dev_unplug(). If a device is
+  * unplugged, these two functions guarantee that any store before calling
+  * drm_dev_unplug() is visible to callers of this function after it completes
++ *
++ * WARNING: This function fundamentally races against drm_dev_unplug(). It is
++ * recommended that drivers instead use the underlying drm_dev_enter() and
++ * drm_dev_exit() function pairs.
+  */
+ static inline bool drm_dev_is_unplugged(struct drm_device *dev)
+ {
+@@ -654,14 +762,14 @@ static inline bool drm_dev_is_unplugged(struct drm_device *dev)
+  * @dev: DRM device to check
+  * @feature: feature flag
+  *
+- * This checks @dev for driver features, see &drm_driver.driver_features and the
+- * various DRIVER_\* flags.
++ * This checks @dev for driver features, see &drm_driver.driver_features,
++ * &drm_device.driver_features, and the various &enum drm_driver_feature flags.
+  *
+  * Returns true if the @feature is supported, false otherwise.
+  */
+-static inline bool drm_core_check_feature(struct drm_device *dev, int feature)
++static inline bool drm_core_check_feature(const struct drm_device *dev, u32 feature)
+ {
+-	return dev->driver->driver_features & feature;
++	return dev->driver->driver_features & dev->driver_features & feature;
+ }
+ 
+ /**
+diff --git a/include/drm/drm_dsc.h b/include/drm/drm_dsc.h
+new file mode 100644
+index 000000000..9c26f083c
+--- /dev/null
++++ b/include/drm/drm_dsc.h
+@@ -0,0 +1,608 @@
++/* SPDX-License-Identifier: MIT
++ * Copyright (C) 2018 Intel Corp.
++ *
++ * Authors:
++ * Manasi Navare <manasi.d.navare@intel.com>
++ */
++
++#ifndef DRM_DSC_H_
++#define DRM_DSC_H_
++
++#include <drm/drm_dp_helper.h>
++
++/* VESA Display Stream Compression DSC 1.2 constants */
++#define DSC_NUM_BUF_RANGES			15
++#define DSC_MUX_WORD_SIZE_8_10_BPC		48
++#define DSC_MUX_WORD_SIZE_12_BPC		64
++#define DSC_RC_PIXELS_PER_GROUP			3
++#define DSC_SCALE_DECREMENT_INTERVAL_MAX	4095
++#define DSC_RANGE_BPG_OFFSET_MASK		0x3f
++
++/* DSC Rate Control Constants */
++#define DSC_RC_MODEL_SIZE_CONST		    8192
++#define DSC_RC_EDGE_FACTOR_CONST	    6
++#define DSC_RC_TGT_OFFSET_HI_CONST	    3
++#define DSC_RC_TGT_OFFSET_LO_CONST	    3
++
++/* DSC PPS constants and macros */
++#define DSC_PPS_VERSION_MAJOR_SHIFT		4
++#define DSC_PPS_BPC_SHIFT			4
++#define DSC_PPS_MSB_SHIFT			8
++#define DSC_PPS_LSB_MASK			(0xFF << 0)
++#define DSC_PPS_BPP_HIGH_MASK			(0x3 << 8)
++#define DSC_PPS_VBR_EN_SHIFT			2
++#define DSC_PPS_SIMPLE422_SHIFT			3
++#define DSC_PPS_CONVERT_RGB_SHIFT		4
++#define DSC_PPS_BLOCK_PRED_EN_SHIFT		5
++#define DSC_PPS_INIT_XMIT_DELAY_HIGH_MASK	(0x3 << 8)
++#define DSC_PPS_SCALE_DEC_INT_HIGH_MASK		(0xF << 8)
++#define DSC_PPS_RC_TGT_OFFSET_HI_SHIFT		4
++#define DSC_PPS_RC_RANGE_MINQP_SHIFT		11
++#define DSC_PPS_RC_RANGE_MAXQP_SHIFT		6
++#define DSC_PPS_NATIVE_420_SHIFT		1
++#define DSC_1_2_MAX_LINEBUF_DEPTH_BITS		16
++#define DSC_1_2_MAX_LINEBUF_DEPTH_VAL		0
++#define DSC_1_1_MAX_LINEBUF_DEPTH_BITS		13
++
++/**
++ * struct drm_dsc_rc_range_parameters - DSC Rate Control range parameters
++ *
++ * This defines different rate control parameters used by the DSC engine
++ * to compress the frame.
++ */
++struct drm_dsc_rc_range_parameters {
++	/**
++	 * @range_min_qp: Min Quantization Parameters allowed for this range
++	 */
++	u8 range_min_qp;
++	/**
++	 * @range_max_qp: Max Quantization Parameters allowed for this range
++	 */
++	u8 range_max_qp;
++	/**
++	 * @range_bpg_offset:
++	 * Bits/group offset to apply to target for this group
++	 */
++	u8 range_bpg_offset;
++};
++
++/**
++ * struct drm_dsc_config - Parameters required to configure DSC
++ *
++ * Driver populates this structure with all the parameters required
++ * to configure the display stream compression on the source.
++ */
++struct drm_dsc_config {
++	/**
++	 * @line_buf_depth:
++	 * Bits per component for previous reconstructed line buffer
++	 */
++	u8 line_buf_depth;
++	/**
++	 * @bits_per_component: Bits per component to code (8/10/12)
++	 */
++	u8 bits_per_component;
++	/**
++	 * @convert_rgb:
++	 * Flag to indicate if RGB - YCoCg conversion is needed
++	 * True if RGB input, False if YCoCg input
++	 */
++	bool convert_rgb;
++	/**
++	 * @slice_count: Number fo slices per line used by the DSC encoder
++	 */
++	u8 slice_count;
++	/**
++	 *  @slice_width: Width of each slice in pixels
++	 */
++	u16 slice_width;
++	/**
++	 * @slice_height: Slice height in pixels
++	 */
++	u16 slice_height;
++	/**
++	 * @enable422: True for 4_2_2 sampling, false for 4_4_4 sampling
++	 */
++	bool enable422;
++	/**
++	 * @pic_width: Width of the input display frame in pixels
++	 */
++	u16 pic_width;
++	/**
++	 * @pic_height: Vertical height of the input display frame
++	 */
++	u16 pic_height;
++	/**
++	 * @rc_tgt_offset_high:
++	 * Offset to bits/group used by RC to determine QP adjustment
++	 */
++	u8 rc_tgt_offset_high;
++	/**
++	 * @rc_tgt_offset_low:
++	 * Offset to bits/group used by RC to determine QP adjustment
++	 */
++	u8 rc_tgt_offset_low;
++	/**
++	 * @bits_per_pixel:
++	 * Target bits per pixel with 4 fractional bits, bits_per_pixel << 4
++	 */
++	u16 bits_per_pixel;
++	/**
++	 * @rc_edge_factor:
++	 * Factor to determine if an edge is present based on the bits produced
++	 */
++	u8 rc_edge_factor;
++	/**
++	 * @rc_quant_incr_limit1:
++	 * Slow down incrementing once the range reaches this value
++	 */
++	u8 rc_quant_incr_limit1;
++	/**
++	 * @rc_quant_incr_limit0:
++	 * Slow down incrementing once the range reaches this value
++	 */
++	u8 rc_quant_incr_limit0;
++	/**
++	 * @initial_xmit_delay:
++	 * Number of pixels to delay the initial transmission
++	 */
++	u16 initial_xmit_delay;
++	/**
++	 * @initial_dec_delay:
++	 * Initial decoder delay, number of pixel times that the decoder
++	 * accumulates data in its rate buffer before starting to decode
++	 * and output pixels.
++	 */
++	u16  initial_dec_delay;
++	/**
++	 * @block_pred_enable:
++	 * True if block prediction is used to code any groups within the
++	 * picture. False if BP not used
++	 */
++	bool block_pred_enable;
++	/**
++	 * @first_line_bpg_offset:
++	 * Number of additional bits allocated for each group on the first
++	 * line of slice.
++	 */
++	u8 first_line_bpg_offset;
++	/**
++	 * @initial_offset: Value to use for RC model offset at slice start
++	 */
++	u16 initial_offset;
++	/**
++	 * @rc_buf_thresh: Thresholds defining each of the buffer ranges
++	 */
++	u16 rc_buf_thresh[DSC_NUM_BUF_RANGES - 1];
++	/**
++	 * @rc_range_params:
++	 * Parameters for each of the RC ranges defined in
++	 * &struct drm_dsc_rc_range_parameters
++	 */
++	struct drm_dsc_rc_range_parameters rc_range_params[DSC_NUM_BUF_RANGES];
++	/**
++	 * @rc_model_size: Total size of RC model
++	 */
++	u16 rc_model_size;
++	/**
++	 * @flatness_min_qp: Minimum QP where flatness information is sent
++	 */
++	u8 flatness_min_qp;
++	/**
++	 * @flatness_max_qp: Maximum QP where flatness information is sent
++	 */
++	u8 flatness_max_qp;
++	/**
++	 * @initial_scale_value: Initial value for the scale factor
++	 */
++	u8 initial_scale_value;
++	/**
++	 * @scale_decrement_interval:
++	 * Specifies number of group times between decrementing the scale factor
++	 * at beginning of a slice.
++	 */
++	u16 scale_decrement_interval;
++	/**
++	 * @scale_increment_interval:
++	 * Number of group times between incrementing the scale factor value
++	 * used at the beginning of a slice.
++	 */
++	u16 scale_increment_interval;
++	/**
++	 * @nfl_bpg_offset: Non first line BPG offset to be used
++	 */
++	u16 nfl_bpg_offset;
++	/**
++	 * @slice_bpg_offset: BPG offset used to enforce slice bit
++	 */
++	u16 slice_bpg_offset;
++	/**
++	 * @final_offset: Final RC linear transformation offset value
++	 */
++	u16 final_offset;
++	/**
++	 * @vbr_enable: True if VBR mode is enabled, false if disabled
++	 */
++	bool vbr_enable;
++	/**
++	 * @mux_word_size: Mux word size (in bits) for SSM mode
++	 */
++	u8 mux_word_size;
++	/**
++	 * @slice_chunk_size:
++	 * The (max) size in bytes of the "chunks" that are used in slice
++	 * multiplexing.
++	 */
++	u16 slice_chunk_size;
++	/**
++	 * @rc_bits: Rate control buffer size in bits
++	 */
++	u16 rc_bits;
++	/**
++	 * @dsc_version_minor: DSC minor version
++	 */
++	u8 dsc_version_minor;
++	/**
++	 * @dsc_version_major: DSC major version
++	 */
++	u8 dsc_version_major;
++	/**
++	 * @native_422: True if Native 4:2:2 supported, else false
++	 */
++	bool native_422;
++	/**
++	 * @native_420: True if Native 4:2:0 supported else false.
++	 */
++	bool native_420;
++	/**
++	 * @second_line_bpg_offset:
++	 * Additional bits/grp for seconnd line of slice for native 4:2:0
++	 */
++	u8 second_line_bpg_offset;
++	/**
++	 * @nsl_bpg_offset:
++	 * Num of bits deallocated for each grp that is not in second line of
++	 * slice
++	 */
++	u16 nsl_bpg_offset;
++	/**
++	 * @second_line_offset_adj:
++	 * Offset adjustment for second line in Native 4:2:0 mode
++	 */
++	u16 second_line_offset_adj;
++};
++
++/**
++ * struct picture_parameter_set - Represents 128 bytes of Picture Parameter Set
++ *
++ * The VESA DSC standard defines picture parameter set (PPS) which display
++ * stream compression encoders must communicate to decoders.
++ * The PPS is encapsulated in 128 bytes (PPS 0 through PPS 127). The fields in
++ * this structure are as per Table 4.1 in Vesa DSC specification v1.1/v1.2.
++ * The PPS fields that span over more than a byte should be stored in Big Endian
++ * format.
++ */
++struct drm_dsc_picture_parameter_set {
++	/**
++	 * @dsc_version:
++	 * PPS0[3:0] - dsc_version_minor: Contains Minor version of DSC
++	 * PPS0[7:4] - dsc_version_major: Contains major version of DSC
++	 */
++	u8 dsc_version;
++	/**
++	 * @pps_identifier:
++	 * PPS1[7:0] - Application specific identifier that can be
++	 * used to differentiate between different PPS tables.
++	 */
++	u8 pps_identifier;
++	/**
++	 * @pps_reserved:
++	 * PPS2[7:0]- RESERVED Byte
++	 */
++	u8 pps_reserved;
++	/**
++	 * @pps_3:
++	 * PPS3[3:0] - linebuf_depth: Contains linebuffer bit depth used to
++	 * generate the bitstream. (0x0 - 16 bits for DSC 1.2, 0x8 - 8 bits,
++	 * 0xA - 10 bits, 0xB - 11 bits, 0xC - 12 bits, 0xD - 13 bits,
++	 * 0xE - 14 bits for DSC1.2, 0xF - 14 bits for DSC 1.2.
++	 * PPS3[7:4] - bits_per_component: Bits per component for the original
++	 * pixels of the encoded picture.
++	 * 0x0 = 16bpc (allowed only when dsc_version_minor = 0x2)
++	 * 0x8 = 8bpc, 0xA = 10bpc, 0xC = 12bpc, 0xE = 14bpc (also
++	 * allowed only when dsc_minor_version = 0x2)
++	 */
++	u8 pps_3;
++	/**
++	 * @pps_4:
++	 * PPS4[1:0] -These are the most significant 2 bits of
++	 * compressed BPP bits_per_pixel[9:0] syntax element.
++	 * PPS4[2] - vbr_enable: 0 = VBR disabled, 1 = VBR enabled
++	 * PPS4[3] - simple_422: Indicates if decoder drops samples to
++	 * reconstruct the 4:2:2 picture.
++	 * PPS4[4] - Convert_rgb: Indicates if DSC color space conversion is
++	 * active.
++	 * PPS4[5] - blobk_pred_enable: Indicates if BP is used to code any
++	 * groups in picture
++	 * PPS4[7:6] - Reseved bits
++	 */
++	u8 pps_4;
++	/**
++	 * @bits_per_pixel_low:
++	 * PPS5[7:0] - This indicates the lower significant 8 bits of
++	 * the compressed BPP bits_per_pixel[9:0] element.
++	 */
++	u8 bits_per_pixel_low;
++	/**
++	 * @pic_height:
++	 * PPS6[7:0], PPS7[7:0] -pic_height: Specifies the number of pixel rows
++	 * within the raster.
++	 */
++	__be16 pic_height;
++	/**
++	 * @pic_width:
++	 * PPS8[7:0], PPS9[7:0] - pic_width: Number of pixel columns within
++	 * the raster.
++	 */
++	__be16 pic_width;
++	/**
++	 * @slice_height:
++	 * PPS10[7:0], PPS11[7:0] - Slice height in units of pixels.
++	 */
++	__be16 slice_height;
++	/**
++	 * @slice_width:
++	 * PPS12[7:0], PPS13[7:0] - Slice width in terms of pixels.
++	 */
++	__be16 slice_width;
++	/**
++	 * @chunk_size:
++	 * PPS14[7:0], PPS15[7:0] - Size in units of bytes of the chunks
++	 * that are used for slice multiplexing.
++	 */
++	__be16 chunk_size;
++	/**
++	 * @initial_xmit_delay_high:
++	 * PPS16[1:0] - Most Significant two bits of initial transmission delay.
++	 * It specifies the number of pixel times that the encoder waits before
++	 * transmitting data from its rate buffer.
++	 * PPS16[7:2] - Reserved
++	 */
++	u8 initial_xmit_delay_high;
++	/**
++	 * @initial_xmit_delay_low:
++	 * PPS17[7:0] - Least significant 8 bits of initial transmission delay.
++	 */
++	u8 initial_xmit_delay_low;
++	/**
++	 * @initial_dec_delay:
++	 *
++	 * PPS18[7:0], PPS19[7:0] - Initial decoding delay which is the number
++	 * of pixel times that the decoder accumulates data in its rate buffer
++	 * before starting to decode and output pixels.
++	 */
++	__be16 initial_dec_delay;
++	/**
++	 * @pps20_reserved:
++	 *
++	 * PPS20[7:0] - Reserved
++	 */
++	u8 pps20_reserved;
++	/**
++	 * @initial_scale_value:
++	 * PPS21[5:0] - Initial rcXformScale factor used at beginning
++	 * of a slice.
++	 * PPS21[7:6] - Reserved
++	 */
++	u8 initial_scale_value;
++	/**
++	 * @scale_increment_interval:
++	 * PPS22[7:0], PPS23[7:0] - Number of group times between incrementing
++	 * the rcXformScale factor at end of a slice.
++	 */
++	__be16 scale_increment_interval;
++	/**
++	 * @scale_decrement_interval_high:
++	 * PPS24[3:0] - Higher 4 bits indicating number of group times between
++	 * decrementing the rcXformScale factor at beginning of a slice.
++	 * PPS24[7:4] - Reserved
++	 */
++	u8 scale_decrement_interval_high;
++	/**
++	 * @scale_decrement_interval_low:
++	 * PPS25[7:0] - Lower 8 bits of scale decrement interval
++	 */
++	u8 scale_decrement_interval_low;
++	/**
++	 * @pps26_reserved:
++	 * PPS26[7:0]
++	 */
++	u8 pps26_reserved;
++	/**
++	 * @first_line_bpg_offset:
++	 * PPS27[4:0] - Number of additional bits that are allocated
++	 * for each group on first line of a slice.
++	 * PPS27[7:5] - Reserved
++	 */
++	u8 first_line_bpg_offset;
++	/**
++	 * @nfl_bpg_offset:
++	 * PPS28[7:0], PPS29[7:0] - Number of bits including frac bits
++	 * deallocated for each group for groups after the first line of slice.
++	 */
++	__be16 nfl_bpg_offset;
++	/**
++	 * @slice_bpg_offset:
++	 * PPS30, PPS31[7:0] - Number of bits that are deallocated for each
++	 * group to enforce the slice constraint.
++	 */
++	__be16 slice_bpg_offset;
++	/**
++	 * @initial_offset:
++	 * PPS32,33[7:0] - Initial value for rcXformOffset
++	 */
++	__be16 initial_offset;
++	/**
++	 * @final_offset:
++	 * PPS34,35[7:0] - Maximum end-of-slice value for rcXformOffset
++	 */
++	__be16 final_offset;
++	/**
++	 * @flatness_min_qp:
++	 * PPS36[4:0] - Minimum QP at which flatness is signaled and
++	 * flatness QP adjustment is made.
++	 * PPS36[7:5] - Reserved
++	 */
++	u8 flatness_min_qp;
++	/**
++	 * @flatness_max_qp:
++	 * PPS37[4:0] - Max QP at which flatness is signalled and
++	 * the flatness adjustment is made.
++	 * PPS37[7:5] - Reserved
++	 */
++	u8 flatness_max_qp;
++	/**
++	 * @rc_model_size:
++	 * PPS38,39[7:0] - Number of bits within RC Model.
++	 */
++	__be16 rc_model_size;
++	/**
++	 * @rc_edge_factor:
++	 * PPS40[3:0] - Ratio of current activity vs, previous
++	 * activity to determine presence of edge.
++	 * PPS40[7:4] - Reserved
++	 */
++	u8 rc_edge_factor;
++	/**
++	 * @rc_quant_incr_limit0:
++	 * PPS41[4:0] - QP threshold used in short term RC
++	 * PPS41[7:5] - Reserved
++	 */
++	u8 rc_quant_incr_limit0;
++	/**
++	 * @rc_quant_incr_limit1:
++	 * PPS42[4:0] - QP threshold used in short term RC
++	 * PPS42[7:5] - Reserved
++	 */
++	u8 rc_quant_incr_limit1;
++	/**
++	 * @rc_tgt_offset:
++	 * PPS43[3:0] - Lower end of the variability range around the target
++	 * bits per group that is allowed by short term RC.
++	 * PPS43[7:4]- Upper end of the variability range around the target
++	 * bits per group that i allowed by short term rc.
++	 */
++	u8 rc_tgt_offset;
++	/**
++	 * @rc_buf_thresh:
++	 * PPS44[7:0] - PPS57[7:0] - Specifies the thresholds in RC model for
++	 * the 15 ranges defined by 14 thresholds.
++	 */
++	u8 rc_buf_thresh[DSC_NUM_BUF_RANGES - 1];
++	/**
++	 * @rc_range_parameters:
++	 * PPS58[7:0] - PPS87[7:0]
++	 * Parameters that correspond to each of the 15 ranges.
++	 */
++	__be16 rc_range_parameters[DSC_NUM_BUF_RANGES];
++	/**
++	 * @native_422_420:
++	 * PPS88[0] - 0 = Native 4:2:2 not used
++	 * 1 = Native 4:2:2 used
++	 * PPS88[1] - 0 = Native 4:2:0 not use
++	 * 1 = Native 4:2:0 used
++	 * PPS88[7:2] - Reserved 6 bits
++	 */
++	u8 native_422_420;
++	/**
++	 * @second_line_bpg_offset:
++	 * PPS89[4:0] - Additional bits/group budget for the
++	 * second line of a slice in Native 4:2:0 mode.
++	 * Set to 0 if DSC minor version is 1 or native420 is 0.
++	 * PPS89[7:5] - Reserved
++	 */
++	u8 second_line_bpg_offset;
++	/**
++	 * @nsl_bpg_offset:
++	 * PPS90[7:0], PPS91[7:0] - Number of bits that are deallocated
++	 * for each group that is not in the second line of a slice.
++	 */
++	__be16 nsl_bpg_offset;
++	/**
++	 * @second_line_offset_adj:
++	 * PPS92[7:0], PPS93[7:0] - Used as offset adjustment for the second
++	 * line in Native 4:2:0 mode.
++	 */
++	__be16 second_line_offset_adj;
++	/**
++	 * @pps_long_94_reserved:
++	 * PPS 94, 95, 96, 97 - Reserved
++	 */
++	u32 pps_long_94_reserved;
++	/**
++	 * @pps_long_98_reserved:
++	 * PPS 98, 99, 100, 101 - Reserved
++	 */
++	u32 pps_long_98_reserved;
++	/**
++	 * @pps_long_102_reserved:
++	 * PPS 102, 103, 104, 105 - Reserved
++	 */
++	u32 pps_long_102_reserved;
++	/**
++	 * @pps_long_106_reserved:
++	 * PPS 106, 107, 108, 109 - reserved
++	 */
++	u32 pps_long_106_reserved;
++	/**
++	 * @pps_long_110_reserved:
++	 * PPS 110, 111, 112, 113 - reserved
++	 */
++	u32 pps_long_110_reserved;
++	/**
++	 * @pps_long_114_reserved:
++	 * PPS 114 - 117 - reserved
++	 */
++	u32 pps_long_114_reserved;
++	/**
++	 * @pps_long_118_reserved:
++	 * PPS 118 - 121 - reserved
++	 */
++	u32 pps_long_118_reserved;
++	/**
++	 * @pps_long_122_reserved:
++	 * PPS 122- 125 - reserved
++	 */
++	u32 pps_long_122_reserved;
++	/**
++	 * @pps_short_126_reserved:
++	 * PPS 126, 127 - reserved
++	 */
++	__be16 pps_short_126_reserved;
++} __packed;
++
++/**
++ * struct drm_dsc_pps_infoframe - DSC infoframe carrying the Picture Parameter
++ * Set Metadata
++ *
++ * This structure represents the DSC PPS infoframe required to send the Picture
++ * Parameter Set metadata required before enabling VESA Display Stream
++ * Compression. This is based on the DP Secondary Data Packet structure and
++ * comprises of SDP Header as defined &struct struct dp_sdp_header in drm_dp_helper.h
++ * and PPS payload defined in &struct drm_dsc_picture_parameter_set.
++ *
++ * @pps_header: Header for PPS as per DP SDP header format of type
++ *              &struct dp_sdp_header
++ * @pps_payload: PPS payload fields as per DSC specification Table 4-1
++ *               as represented in &struct drm_dsc_picture_parameter_set
++ */
++struct drm_dsc_pps_infoframe {
++	struct dp_sdp_header pps_header;
++	struct drm_dsc_picture_parameter_set pps_payload;
++} __packed;
++
++void drm_dsc_dp_pps_header_init(struct drm_dsc_pps_infoframe *pps_sdp);
++void drm_dsc_pps_infoframe_pack(struct drm_dsc_pps_infoframe *pps_sdp,
++				const struct drm_dsc_config *dsc_cfg);
++
++#endif /* _DRM_DSC_H_ */
+diff --git a/include/drm/drm_edid.h b/include/drm/drm_edid.h
+index 53be104aa..8dc1a081f 100644
+--- a/include/drm/drm_edid.h
++++ b/include/drm/drm_edid.h
+@@ -352,18 +352,17 @@ drm_load_edid_firmware(struct drm_connector *connector)
+ 
+ int
+ drm_hdmi_avi_infoframe_from_display_mode(struct hdmi_avi_infoframe *frame,
+-					 const struct drm_display_mode *mode,
+-					 bool is_hdmi2_sink);
++					 struct drm_connector *connector,
++					 const struct drm_display_mode *mode);
+ int
+ drm_hdmi_vendor_infoframe_from_display_mode(struct hdmi_vendor_infoframe *frame,
+ 					    struct drm_connector *connector,
+ 					    const struct drm_display_mode *mode);
+ void
+ drm_hdmi_avi_infoframe_quant_range(struct hdmi_avi_infoframe *frame,
++				   struct drm_connector *connector,
+ 				   const struct drm_display_mode *mode,
+-				   enum hdmi_quantization_range rgb_quant_range,
+-				   bool rgb_quant_range_selectable,
+-				   bool is_hdmi2_sink);
++				   enum hdmi_quantization_range rgb_quant_range);
+ 
+ /**
+  * drm_eld_mnl - Get ELD monitor name length in bytes.
+@@ -466,13 +465,11 @@ struct edid *drm_get_edid_switcheroo(struct drm_connector *connector,
+ 				     struct i2c_adapter *adapter);
+ struct edid *drm_edid_duplicate(const struct edid *edid);
+ int drm_add_edid_modes(struct drm_connector *connector, struct edid *edid);
+-int drm_add_override_edid_modes(struct drm_connector *connector);
+ 
+ u8 drm_match_cea_mode(const struct drm_display_mode *to_match);
+ enum hdmi_picture_aspect drm_get_cea_aspect_ratio(const u8 video_code);
+ bool drm_detect_hdmi_monitor(struct edid *edid);
+ bool drm_detect_monitor_audio(struct edid *edid);
+-bool drm_rgb_quant_range_selectable(struct edid *edid);
+ enum hdmi_quantization_range
+ drm_default_rgb_quant_range(const struct drm_display_mode *mode);
+ int drm_add_modes_noedid(struct drm_connector *connector,
+diff --git a/include/drm/drm_encoder.h b/include/drm/drm_encoder.h
+index 4f597c073..70cfca03d 100644
+--- a/include/drm/drm_encoder.h
++++ b/include/drm/drm_encoder.h
+@@ -28,6 +28,7 @@
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_mode.h>
+ #include <drm/drm_mode_object.h>
++#include <drm/drm_util.h>
+ 
+ struct drm_encoder;
+ 
+diff --git a/include/drm/drm_encoder_slave.h b/include/drm/drm_encoder_slave.h
+index 1107b4b1c..a09864f6d 100644
+--- a/include/drm/drm_encoder_slave.h
++++ b/include/drm/drm_encoder_slave.h
+@@ -27,7 +27,6 @@
+ #ifndef __DRM_ENCODER_SLAVE_H__
+ #define __DRM_ENCODER_SLAVE_H__
+ 
+-#include <drm/drmP.h>
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_encoder.h>
+ 
+diff --git a/include/drm/drm_fb_cma_helper.h b/include/drm/drm_fb_cma_helper.h
+index 96e26e3b9..4becb0997 100644
+--- a/include/drm/drm_fb_cma_helper.h
++++ b/include/drm/drm_fb_cma_helper.h
+@@ -2,34 +2,9 @@
+ #ifndef __DRM_FB_CMA_HELPER_H__
+ #define __DRM_FB_CMA_HELPER_H__
+ 
+-struct drm_fbdev_cma;
+-struct drm_gem_cma_object;
+-
+-struct drm_fb_helper_surface_size;
+-struct drm_framebuffer_funcs;
+-struct drm_fb_helper_funcs;
+ struct drm_framebuffer;
+-struct drm_fb_helper;
+-struct drm_device;
+-struct drm_file;
+-struct drm_mode_fb_cmd2;
+-struct drm_plane;
+ struct drm_plane_state;
+ 
+-int drm_fb_cma_fbdev_init(struct drm_device *dev, unsigned int preferred_bpp,
+-			  unsigned int max_conn_count);
+-void drm_fb_cma_fbdev_fini(struct drm_device *dev);
+-
+-struct drm_fbdev_cma *drm_fbdev_cma_init(struct drm_device *dev,
+-	unsigned int preferred_bpp, unsigned int max_conn_count);
+-void drm_fbdev_cma_fini(struct drm_fbdev_cma *fbdev_cma);
+-
+-void drm_fbdev_cma_restore_mode(struct drm_fbdev_cma *fbdev_cma);
+-void drm_fbdev_cma_hotplug_event(struct drm_fbdev_cma *fbdev_cma);
+-void drm_fbdev_cma_set_suspend(struct drm_fbdev_cma *fbdev_cma, bool state);
+-void drm_fbdev_cma_set_suspend_unlocked(struct drm_fbdev_cma *fbdev_cma,
+-					bool state);
+-
+ struct drm_gem_cma_object *drm_fb_cma_get_gem_obj(struct drm_framebuffer *fb,
+ 	unsigned int plane);
+ 
+diff --git a/include/drm/drm_fb_helper.h b/include/drm/drm_fb_helper.h
+index 5db08c8f1..286d58efe 100644
+--- a/include/drm/drm_fb_helper.h
++++ b/include/drm/drm_fb_helper.h
+@@ -36,6 +36,7 @@ struct drm_fb_helper;
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_device.h>
+ #include <linux/kgdb.h>
++#include <linux/vgaarb.h>
+ 
+ enum mode_set_atomic {
+ 	LEAVE_ATOMIC_MODE_SET,
+@@ -604,6 +605,16 @@ drm_fbdev_generic_setup(struct drm_device *dev, unsigned int preferred_bpp)
+ 
+ #endif
+ 
++/**
++ * drm_fb_helper_remove_conflicting_framebuffers - remove firmware-configured framebuffers
++ * @a: memory range, users of which are to be removed
++ * @name: requesting driver name
++ * @primary: also kick vga16fb if present
++ *
++ * This function removes framebuffer devices (initialized by firmware/bootloader)
++ * which use memory range described by @a. If @a is NULL all such devices are
++ * removed.
++ */
+ static inline int
+ drm_fb_helper_remove_conflicting_framebuffers(struct apertures_struct *a,
+ 					      const char *name, bool primary)
+@@ -615,4 +626,35 @@ drm_fb_helper_remove_conflicting_framebuffers(struct apertures_struct *a,
+ #endif
+ }
+ 
++/**
++ * drm_fb_helper_remove_conflicting_pci_framebuffers - remove firmware-configured framebuffers for PCI devices
++ * @pdev: PCI device
++ * @resource_id: index of PCI BAR configuring framebuffer memory
++ * @name: requesting driver name
++ *
++ * This function removes framebuffer devices (eg. initialized by firmware)
++ * using memory range configured for @pdev's BAR @resource_id.
++ *
++ * The function assumes that PCI device with shadowed ROM drives a primary
++ * display and so kicks out vga16fb.
++ */
++static inline int
++drm_fb_helper_remove_conflicting_pci_framebuffers(struct pci_dev *pdev,
++						  int resource_id,
++						  const char *name)
++{
++	int ret = 0;
++
++	/*
++	 * WARNING: Apparently we must kick fbdev drivers before vgacon,
++	 * otherwise the vga fbdev driver falls over.
++	 */
++#if IS_REACHABLE(CONFIG_FB)
++	ret = remove_conflicting_pci_framebuffers(pdev, resource_id, name);
++#endif
++	if (ret == 0)
++		ret = vga_remove_vgacon(pdev);
++	return ret;
++}
++
+ #endif
+diff --git a/include/drm/drm_file.h b/include/drm/drm_file.h
+index 26485acc5..6710b612e 100644
+--- a/include/drm/drm_file.h
++++ b/include/drm/drm_file.h
+@@ -32,6 +32,7 @@
+ 
+ #include <linux/types.h>
+ #include <linux/completion.h>
++#include <linux/idr.h>
+ 
+ #include <uapi/drm/drm.h>
+ 
+@@ -164,14 +165,14 @@ struct drm_file {
+ 	 * See also the :ref:`section on primary nodes and authentication
+ 	 * <drm_primary_node>`.
+ 	 */
+-	unsigned authenticated :1;
++	bool authenticated;
+ 
+ 	/**
+ 	 * @stereo_allowed:
+ 	 *
+ 	 * True when the client has asked us to expose stereo 3D mode flags.
+ 	 */
+-	unsigned stereo_allowed :1;
++	bool stereo_allowed;
+ 
+ 	/**
+ 	 * @universal_planes:
+@@ -179,10 +180,10 @@ struct drm_file {
+ 	 * True if client understands CRTC primary planes and cursor planes
+ 	 * in the plane list. Automatically set when @atomic is set.
+ 	 */
+-	unsigned universal_planes:1;
++	bool universal_planes;
+ 
+ 	/** @atomic: True if client understands atomic properties. */
+-	unsigned atomic:1;
++	bool atomic;
+ 
+ 	/**
+ 	 * @aspect_ratio_allowed:
+@@ -190,14 +191,14 @@ struct drm_file {
+ 	 * True, if client can handle picture aspect ratios, and has requested
+ 	 * to pass this information along with the mode.
+ 	 */
+-	unsigned aspect_ratio_allowed:1;
++	bool aspect_ratio_allowed;
+ 
+ 	/**
+ 	 * @writeback_connectors:
+ 	 *
+ 	 * True if client understands writeback connectors
+ 	 */
+-	unsigned writeback_connectors:1;
++	bool writeback_connectors;
+ 
+ 	/**
+ 	 * @is_master:
+@@ -208,7 +209,7 @@ struct drm_file {
+ 	 * See also the :ref:`section on primary nodes and authentication
+ 	 * <drm_primary_node>`.
+ 	 */
+-	unsigned is_master:1;
++	bool is_master;
+ 
+ 	/**
+ 	 * @master:
+diff --git a/include/drm/drm_framebuffer.h b/include/drm/drm_framebuffer.h
+index c50502c65..f0b34c977 100644
+--- a/include/drm/drm_framebuffer.h
++++ b/include/drm/drm_framebuffer.h
+@@ -23,13 +23,17 @@
+ #ifndef __DRM_FRAMEBUFFER_H__
+ #define __DRM_FRAMEBUFFER_H__
+ 
+-#include <linux/list.h>
+ #include <linux/ctype.h>
++#include <linux/list.h>
++#include <linux/sched.h>
++
+ #include <drm/drm_mode_object.h>
+ 
+-struct drm_framebuffer;
+-struct drm_file;
++struct drm_clip_rect;
+ struct drm_device;
++struct drm_file;
++struct drm_framebuffer;
++struct drm_gem_object;
+ 
+ /**
+  * struct drm_framebuffer_funcs - framebuffer hooks
+@@ -240,30 +244,6 @@ static inline void drm_framebuffer_put(struct drm_framebuffer *fb)
+ 	drm_mode_object_put(&fb->base);
+ }
+ 
+-/**
+- * drm_framebuffer_reference - acquire a framebuffer reference
+- * @fb: DRM framebuffer
+- *
+- * This is a compatibility alias for drm_framebuffer_get() and should not be
+- * used by new code.
+- */
+-static inline void drm_framebuffer_reference(struct drm_framebuffer *fb)
+-{
+-	drm_framebuffer_get(fb);
+-}
+-
+-/**
+- * drm_framebuffer_unreference - release a framebuffer reference
+- * @fb: DRM framebuffer
+- *
+- * This is a compatibility alias for drm_framebuffer_put() and should not be
+- * used by new code.
+- */
+-static inline void drm_framebuffer_unreference(struct drm_framebuffer *fb)
+-{
+-	drm_framebuffer_put(fb);
+-}
+-
+ /**
+  * drm_framebuffer_read_refcount - read the framebuffer reference count.
+  * @fb: framebuffer
+diff --git a/include/drm/drm_gem.h b/include/drm/drm_gem.h
+index 8ca5df179..25f1ff2df 100644
+--- a/include/drm/drm_gem.h
++++ b/include/drm/drm_gem.h
+@@ -39,6 +39,121 @@
+ 
+ #include <drm/drm_vma_manager.h>
+ 
++struct drm_gem_object;
++
++/**
++ * struct drm_gem_object_funcs - GEM object functions
++ */
++struct drm_gem_object_funcs {
++	/**
++	 * @free:
++	 *
++	 * Deconstructor for drm_gem_objects.
++	 *
++	 * This callback is mandatory.
++	 */
++	void (*free)(struct drm_gem_object *obj);
++
++	/**
++	 * @open:
++	 *
++	 * Called upon GEM handle creation.
++	 *
++	 * This callback is optional.
++	 */
++	int (*open)(struct drm_gem_object *obj, struct drm_file *file);
++
++	/**
++	 * @close:
++	 *
++	 * Called upon GEM handle release.
++	 *
++	 * This callback is optional.
++	 */
++	void (*close)(struct drm_gem_object *obj, struct drm_file *file);
++
++	/**
++	 * @print_info:
++	 *
++	 * If driver subclasses struct &drm_gem_object, it can implement this
++	 * optional hook for printing additional driver specific info.
++	 *
++	 * drm_printf_indent() should be used in the callback passing it the
++	 * indent argument.
++	 *
++	 * This callback is called from drm_gem_print_info().
++	 *
++	 * This callback is optional.
++	 */
++	void (*print_info)(struct drm_printer *p, unsigned int indent,
++			   const struct drm_gem_object *obj);
++
++	/**
++	 * @export:
++	 *
++	 * Export backing buffer as a &dma_buf.
++	 * If this is not set drm_gem_prime_export() is used.
++	 *
++	 * This callback is optional.
++	 */
++	struct dma_buf *(*export)(struct drm_gem_object *obj, int flags);
++
++	/**
++	 * @pin:
++	 *
++	 * Pin backing buffer in memory.
++	 *
++	 * This callback is optional.
++	 */
++	int (*pin)(struct drm_gem_object *obj);
++
++	/**
++	 * @unpin:
++	 *
++	 * Unpin backing buffer.
++	 *
++	 * This callback is optional.
++	 */
++	void (*unpin)(struct drm_gem_object *obj);
++
++	/**
++	 * @get_sg_table:
++	 *
++	 * Returns a Scatter-Gather table representation of the buffer.
++	 * Used when exporting a buffer.
++	 *
++	 * This callback is mandatory if buffer export is supported.
++	 */
++	struct sg_table *(*get_sg_table)(struct drm_gem_object *obj);
++
++	/**
++	 * @vmap:
++	 *
++	 * Returns a virtual address for the buffer.
++	 *
++	 * This callback is optional.
++	 */
++	void *(*vmap)(struct drm_gem_object *obj);
++
++	/**
++	 * @vunmap:
++	 *
++	 * Releases the the address previously returned by @vmap.
++	 *
++	 * This callback is optional.
++	 */
++	void (*vunmap)(struct drm_gem_object *obj, void *vaddr);
++
++	/**
++	 * @vm_ops:
++	 *
++	 * Virtual memory operations used with mmap.
++	 *
++	 * This is optional but necessary for mmap support.
++	 */
++	const struct vm_operations_struct *vm_ops;
++};
++
+ /**
+  * struct drm_gem_object - GEM buffer object
+  *
+@@ -166,6 +281,16 @@ struct drm_gem_object {
+ 	 */
+ 	struct reservation_object _resv;
+ 
++	/**
++	 * @funcs:
++	 *
++	 * Optional GEM object functions. If this is set, it will be used instead of the
++	 * corresponding &drm_driver GEM callbacks.
++	 *
++	 * New drivers should use this.
++	 *
++	 */
++	const struct drm_gem_object_funcs *funcs;
+ };
+ 
+ /**
+@@ -242,56 +367,6 @@ __drm_gem_object_put(struct drm_gem_object *obj)
+ void drm_gem_object_put_unlocked(struct drm_gem_object *obj);
+ void drm_gem_object_put(struct drm_gem_object *obj);
+ 
+-/**
+- * drm_gem_object_reference - acquire a GEM buffer object reference
+- * @obj: GEM buffer object
+- *
+- * This is a compatibility alias for drm_gem_object_get() and should not be
+- * used by new code.
+- */
+-static inline void drm_gem_object_reference(struct drm_gem_object *obj)
+-{
+-	drm_gem_object_get(obj);
+-}
+-
+-/**
+- * __drm_gem_object_unreference - raw function to release a GEM buffer object
+- *                                reference
+- * @obj: GEM buffer object
+- *
+- * This is a compatibility alias for __drm_gem_object_put() and should not be
+- * used by new code.
+- */
+-static inline void __drm_gem_object_unreference(struct drm_gem_object *obj)
+-{
+-	__drm_gem_object_put(obj);
+-}
+-
+-/**
+- * drm_gem_object_unreference_unlocked - release a GEM buffer object reference
+- * @obj: GEM buffer object
+- *
+- * This is a compatibility alias for drm_gem_object_put_unlocked() and should
+- * not be used by new code.
+- */
+-static inline void
+-drm_gem_object_unreference_unlocked(struct drm_gem_object *obj)
+-{
+-	drm_gem_object_put_unlocked(obj);
+-}
+-
+-/**
+- * drm_gem_object_unreference - release a GEM buffer object reference
+- * @obj: GEM buffer object
+- *
+- * This is a compatibility alias for drm_gem_object_put() and should not be
+- * used by new code.
+- */
+-static inline void drm_gem_object_unreference(struct drm_gem_object *obj)
+-{
+-	drm_gem_object_put(obj);
+-}
+-
+ int drm_gem_handle_create(struct drm_file *file_priv,
+ 			  struct drm_gem_object *obj,
+ 			  u32 *handlep);
+@@ -315,4 +390,9 @@ int drm_gem_dumb_destroy(struct drm_file *file,
+ 			 struct drm_device *dev,
+ 			 uint32_t handle);
+ 
++int drm_gem_pin(struct drm_gem_object *obj);
++void drm_gem_unpin(struct drm_gem_object *obj);
++void *drm_gem_vmap(struct drm_gem_object *obj);
++void drm_gem_vunmap(struct drm_gem_object *obj, void *vaddr);
++
+ #endif /* __DRM_GEM_H__ */
+diff --git a/include/drm/drm_gem_cma_helper.h b/include/drm/drm_gem_cma_helper.h
+index 79f397c91..2f71bce0b 100644
+--- a/include/drm/drm_gem_cma_helper.h
++++ b/include/drm/drm_gem_cma_helper.h
+@@ -2,9 +2,12 @@
+ #ifndef __DRM_GEM_CMA_HELPER_H__
+ #define __DRM_GEM_CMA_HELPER_H__
+ 
+-#include <drm/drmP.h>
++#include <drm/drm_file.h>
++#include <drm/drm_ioctl.h>
+ #include <drm/drm_gem.h>
+ 
++struct drm_mode_create_dumb;
++
+ /**
+  * struct drm_gem_cma_object - GEM object backed by CMA memory allocations
+  * @base: base GEM object
+@@ -107,4 +110,28 @@ int drm_gem_cma_prime_mmap(struct drm_gem_object *obj,
+ void *drm_gem_cma_prime_vmap(struct drm_gem_object *obj);
+ void drm_gem_cma_prime_vunmap(struct drm_gem_object *obj, void *vaddr);
+ 
++struct drm_gem_object *
++drm_cma_gem_create_object_default_funcs(struct drm_device *dev, size_t size);
++
++/**
++ * DRM_GEM_CMA_VMAP_DRIVER_OPS - CMA GEM driver operations ensuring a virtual
++ *                               address on the buffer
++ *
++ * This macro provides a shortcut for setting the default GEM operations in the
++ * &drm_driver structure for drivers that need the virtual address also on
++ * imported buffers.
++ */
++#define DRM_GEM_CMA_VMAP_DRIVER_OPS \
++	.gem_create_object	= drm_cma_gem_create_object_default_funcs, \
++	.dumb_create		= drm_gem_cma_dumb_create, \
++	.prime_handle_to_fd	= drm_gem_prime_handle_to_fd, \
++	.prime_fd_to_handle	= drm_gem_prime_fd_to_handle, \
++	.gem_prime_import_sg_table = drm_gem_cma_prime_import_sg_table_vmap, \
++	.gem_prime_mmap		= drm_gem_prime_mmap
++
++struct drm_gem_object *
++drm_gem_cma_prime_import_sg_table_vmap(struct drm_device *drm,
++				       struct dma_buf_attachment *attach,
++				       struct sg_table *sgt);
++
+ #endif /* __DRM_GEM_CMA_HELPER_H__ */
+diff --git a/include/drm/drm_gem_framebuffer_helper.h b/include/drm/drm_gem_framebuffer_helper.h
+index a38de7eb5..7f307e834 100644
+--- a/include/drm/drm_gem_framebuffer_helper.h
++++ b/include/drm/drm_gem_framebuffer_helper.h
+@@ -25,6 +25,9 @@ drm_gem_fb_create_with_funcs(struct drm_device *dev, struct drm_file *file,
+ struct drm_framebuffer *
+ drm_gem_fb_create(struct drm_device *dev, struct drm_file *file,
+ 		  const struct drm_mode_fb_cmd2 *mode_cmd);
++struct drm_framebuffer *
++drm_gem_fb_create_with_dirty(struct drm_device *dev, struct drm_file *file,
++			     const struct drm_mode_fb_cmd2 *mode_cmd);
+ 
+ int drm_gem_fb_prepare_fb(struct drm_plane *plane,
+ 			  struct drm_plane_state *state);
+diff --git a/include/drm/drm_hdcp.h b/include/drm/drm_hdcp.h
+index 98e63d870..7260b31af 100644
+--- a/include/drm/drm_hdcp.h
++++ b/include/drm/drm_hdcp.h
+@@ -9,6 +9,8 @@
+ #ifndef _DRM_HDCP_H_INCLUDED_
+ #define _DRM_HDCP_H_INCLUDED_
+ 
++#include <linux/types.h>
++
+ /* Period of hdcp checks (to ensure we're still authenticated) */
+ #define DRM_HDCP_CHECK_PERIOD_MS		(128 * 16)
+ 
+@@ -38,4 +40,234 @@
+ #define DRM_HDCP_DDC_BSTATUS			0x41
+ #define DRM_HDCP_DDC_KSV_FIFO			0x43
+ 
++#define DRM_HDCP_1_4_SRM_ID			0x8
++#define DRM_HDCP_1_4_VRL_LENGTH_SIZE		3
++#define DRM_HDCP_1_4_DCP_SIG_SIZE		40
++
++/* Protocol message definition for HDCP2.2 specification */
++/*
++ * Protected content streams are classified into 2 types:
++ * - Type0: Can be transmitted with HDCP 1.4+
++ * - Type1: Can be transmitted with HDCP 2.2+
++ */
++#define HDCP_STREAM_TYPE0			0x00
++#define HDCP_STREAM_TYPE1			0x01
++
++/* HDCP2.2 Msg IDs */
++#define HDCP_2_2_NULL_MSG			1
++#define HDCP_2_2_AKE_INIT			2
++#define HDCP_2_2_AKE_SEND_CERT			3
++#define HDCP_2_2_AKE_NO_STORED_KM		4
++#define HDCP_2_2_AKE_STORED_KM			5
++#define HDCP_2_2_AKE_SEND_HPRIME		7
++#define HDCP_2_2_AKE_SEND_PAIRING_INFO		8
++#define HDCP_2_2_LC_INIT			9
++#define HDCP_2_2_LC_SEND_LPRIME			10
++#define HDCP_2_2_SKE_SEND_EKS			11
++#define HDCP_2_2_REP_SEND_RECVID_LIST		12
++#define HDCP_2_2_REP_SEND_ACK			15
++#define HDCP_2_2_REP_STREAM_MANAGE		16
++#define HDCP_2_2_REP_STREAM_READY		17
++#define HDCP_2_2_ERRATA_DP_STREAM_TYPE		50
++
++#define HDCP_2_2_RTX_LEN			8
++#define HDCP_2_2_RRX_LEN			8
++
++#define HDCP_2_2_K_PUB_RX_MOD_N_LEN		128
++#define HDCP_2_2_K_PUB_RX_EXP_E_LEN		3
++#define HDCP_2_2_K_PUB_RX_LEN			(HDCP_2_2_K_PUB_RX_MOD_N_LEN + \
++						 HDCP_2_2_K_PUB_RX_EXP_E_LEN)
++
++#define HDCP_2_2_DCP_LLC_SIG_LEN		384
++
++#define HDCP_2_2_E_KPUB_KM_LEN			128
++#define HDCP_2_2_E_KH_KM_M_LEN			(16 + 16)
++#define HDCP_2_2_H_PRIME_LEN			32
++#define HDCP_2_2_E_KH_KM_LEN			16
++#define HDCP_2_2_RN_LEN				8
++#define HDCP_2_2_L_PRIME_LEN			32
++#define HDCP_2_2_E_DKEY_KS_LEN			16
++#define HDCP_2_2_RIV_LEN			8
++#define HDCP_2_2_SEQ_NUM_LEN			3
++#define HDCP_2_2_V_PRIME_HALF_LEN		(HDCP_2_2_L_PRIME_LEN / 2)
++#define HDCP_2_2_RECEIVER_ID_LEN		DRM_HDCP_KSV_LEN
++#define HDCP_2_2_MAX_DEVICE_COUNT		31
++#define HDCP_2_2_RECEIVER_IDS_MAX_LEN		(HDCP_2_2_RECEIVER_ID_LEN * \
++						 HDCP_2_2_MAX_DEVICE_COUNT)
++#define HDCP_2_2_MPRIME_LEN			32
++
++/* Following Macros take a byte at a time for bit(s) masking */
++/*
++ * TODO: This has to be changed for DP MST, as multiple stream on
++ * same port is possible.
++ * For HDCP2.2 on HDMI and DP SST this value is always 1.
++ */
++#define HDCP_2_2_MAX_CONTENT_STREAMS_CNT	1
++#define HDCP_2_2_TXCAP_MASK_LEN			2
++#define HDCP_2_2_RXCAPS_LEN			3
++#define HDCP_2_2_RX_REPEATER(x)			((x) & BIT(0))
++#define HDCP_2_2_DP_HDCP_CAPABLE(x)		((x) & BIT(1))
++#define HDCP_2_2_RXINFO_LEN			2
++
++/* HDCP1.x compliant device in downstream */
++#define HDCP_2_2_HDCP1_DEVICE_CONNECTED(x)	((x) & BIT(0))
++
++/* HDCP2.0 Compliant repeater in downstream */
++#define HDCP_2_2_HDCP_2_0_REP_CONNECTED(x)	((x) & BIT(1))
++#define HDCP_2_2_MAX_CASCADE_EXCEEDED(x)	((x) & BIT(2))
++#define HDCP_2_2_MAX_DEVS_EXCEEDED(x)		((x) & BIT(3))
++#define HDCP_2_2_DEV_COUNT_LO(x)		(((x) & (0xF << 4)) >> 4)
++#define HDCP_2_2_DEV_COUNT_HI(x)		((x) & BIT(0))
++#define HDCP_2_2_DEPTH(x)			(((x) & (0x7 << 1)) >> 1)
++
++struct hdcp2_cert_rx {
++	u8	receiver_id[HDCP_2_2_RECEIVER_ID_LEN];
++	u8	kpub_rx[HDCP_2_2_K_PUB_RX_LEN];
++	u8	reserved[2];
++	u8	dcp_signature[HDCP_2_2_DCP_LLC_SIG_LEN];
++} __packed;
++
++struct hdcp2_streamid_type {
++	u8	stream_id;
++	u8	stream_type;
++} __packed;
++
++/*
++ * The TxCaps field specified in the HDCP HDMI, DP specs
++ * This field is big endian as specified in the errata.
++ */
++struct hdcp2_tx_caps {
++	/* Transmitter must set this to 0x2 */
++	u8	version;
++
++	/* Reserved for HDCP and DP Spec. Read as Zero */
++	u8	tx_cap_mask[HDCP_2_2_TXCAP_MASK_LEN];
++} __packed;
++
++/* Main structures for HDCP2.2 protocol communication */
++struct hdcp2_ake_init {
++	u8			msg_id;
++	u8			r_tx[HDCP_2_2_RTX_LEN];
++	struct hdcp2_tx_caps	tx_caps;
++} __packed;
++
++struct hdcp2_ake_send_cert {
++	u8			msg_id;
++	struct hdcp2_cert_rx	cert_rx;
++	u8			r_rx[HDCP_2_2_RRX_LEN];
++	u8			rx_caps[HDCP_2_2_RXCAPS_LEN];
++} __packed;
++
++struct hdcp2_ake_no_stored_km {
++	u8	msg_id;
++	u8	e_kpub_km[HDCP_2_2_E_KPUB_KM_LEN];
++} __packed;
++
++struct hdcp2_ake_stored_km {
++	u8	msg_id;
++	u8	e_kh_km_m[HDCP_2_2_E_KH_KM_M_LEN];
++} __packed;
++
++struct hdcp2_ake_send_hprime {
++	u8	msg_id;
++	u8	h_prime[HDCP_2_2_H_PRIME_LEN];
++} __packed;
++
++struct hdcp2_ake_send_pairing_info {
++	u8	msg_id;
++	u8	e_kh_km[HDCP_2_2_E_KH_KM_LEN];
++} __packed;
++
++struct hdcp2_lc_init {
++	u8	msg_id;
++	u8	r_n[HDCP_2_2_RN_LEN];
++} __packed;
++
++struct hdcp2_lc_send_lprime {
++	u8	msg_id;
++	u8	l_prime[HDCP_2_2_L_PRIME_LEN];
++} __packed;
++
++struct hdcp2_ske_send_eks {
++	u8	msg_id;
++	u8	e_dkey_ks[HDCP_2_2_E_DKEY_KS_LEN];
++	u8	riv[HDCP_2_2_RIV_LEN];
++} __packed;
++
++struct hdcp2_rep_send_receiverid_list {
++	u8	msg_id;
++	u8	rx_info[HDCP_2_2_RXINFO_LEN];
++	u8	seq_num_v[HDCP_2_2_SEQ_NUM_LEN];
++	u8	v_prime[HDCP_2_2_V_PRIME_HALF_LEN];
++	u8	receiver_ids[HDCP_2_2_RECEIVER_IDS_MAX_LEN];
++} __packed;
++
++struct hdcp2_rep_send_ack {
++	u8	msg_id;
++	u8	v[HDCP_2_2_V_PRIME_HALF_LEN];
++} __packed;
++
++struct hdcp2_rep_stream_manage {
++	u8			msg_id;
++	u8			seq_num_m[HDCP_2_2_SEQ_NUM_LEN];
++	__be16			k;
++	struct hdcp2_streamid_type streams[HDCP_2_2_MAX_CONTENT_STREAMS_CNT];
++} __packed;
++
++struct hdcp2_rep_stream_ready {
++	u8	msg_id;
++	u8	m_prime[HDCP_2_2_MPRIME_LEN];
++} __packed;
++
++struct hdcp2_dp_errata_stream_type {
++	u8	msg_id;
++	u8	stream_type;
++} __packed;
++
++/* HDCP2.2 TIMEOUTs in mSec */
++#define HDCP_2_2_CERT_TIMEOUT_MS		100
++#define HDCP_2_2_HPRIME_NO_PAIRED_TIMEOUT_MS	1000
++#define HDCP_2_2_HPRIME_PAIRED_TIMEOUT_MS	200
++#define HDCP_2_2_PAIRING_TIMEOUT_MS		200
++#define	HDCP_2_2_HDMI_LPRIME_TIMEOUT_MS		20
++#define HDCP_2_2_DP_LPRIME_TIMEOUT_MS		7
++#define HDCP_2_2_RECVID_LIST_TIMEOUT_MS		3000
++#define HDCP_2_2_STREAM_READY_TIMEOUT_MS	100
++
++/* HDMI HDCP2.2 Register Offsets */
++#define HDCP_2_2_HDMI_REG_VER_OFFSET		0x50
++#define HDCP_2_2_HDMI_REG_WR_MSG_OFFSET		0x60
++#define HDCP_2_2_HDMI_REG_RXSTATUS_OFFSET	0x70
++#define HDCP_2_2_HDMI_REG_RD_MSG_OFFSET		0x80
++#define HDCP_2_2_HDMI_REG_DBG_OFFSET		0xC0
++
++#define HDCP_2_2_HDMI_SUPPORT_MASK		BIT(2)
++#define HDCP_2_2_RX_CAPS_VERSION_VAL		0x02
++#define HDCP_2_2_SEQ_NUM_MAX			0xFFFFFF
++#define	HDCP_2_2_DELAY_BEFORE_ENCRYPTION_EN	200
++
++/* Below macros take a byte at a time and mask the bit(s) */
++#define HDCP_2_2_HDMI_RXSTATUS_LEN		2
++#define HDCP_2_2_HDMI_RXSTATUS_MSG_SZ_HI(x)	((x) & 0x3)
++#define HDCP_2_2_HDMI_RXSTATUS_READY(x)		((x) & BIT(2))
++#define HDCP_2_2_HDMI_RXSTATUS_REAUTH_REQ(x)	((x) & BIT(3))
++
++/*
++ * Helper functions to convert 24bit big endian hdcp sequence number to
++ * host format and back
++ */
++static inline
++u32 drm_hdcp2_seq_num_to_u32(u8 seq_num[HDCP_2_2_SEQ_NUM_LEN])
++{
++	return (u32)(seq_num[2] | seq_num[1] << 8 | seq_num[0] << 16);
++}
++
++static inline
++void drm_hdcp2_u32_to_seq_num(u8 seq_num[HDCP_2_2_SEQ_NUM_LEN], u32 val)
++{
++	seq_num[0] = val >> 16;
++	seq_num[1] = val >> 8;
++	seq_num[2] = val;
++}
++
+ #endif
+diff --git a/include/drm/drm_legacy.h b/include/drm/drm_legacy.h
+index 8fad66f88..3e99ab69c 100644
+--- a/include/drm/drm_legacy.h
++++ b/include/drm/drm_legacy.h
+@@ -2,6 +2,9 @@
+ #define __DRM_DRM_LEGACY_H__
+ 
+ #include <drm/drm_auth.h>
++#include <drm/drm_hashtab.h>
++
++struct drm_device;
+ 
+ /*
+  * Legacy driver interfaces for the Direct Rendering Manager
+@@ -156,6 +159,7 @@ struct drm_map_list {
+ int drm_legacy_addmap(struct drm_device *d, resource_size_t offset,
+ 		      unsigned int size, enum drm_map_type type,
+ 		      enum drm_map_flags flags, struct drm_local_map **map_p);
++struct drm_local_map *drm_legacy_findmap(struct drm_device *dev, unsigned int token);
+ void drm_legacy_rmmap(struct drm_device *d, struct drm_local_map *map);
+ int drm_legacy_rmmap_locked(struct drm_device *d, struct drm_local_map *map);
+ void drm_legacy_master_rmmaps(struct drm_device *dev,
+@@ -194,14 +198,4 @@ void drm_legacy_ioremap(struct drm_local_map *map, struct drm_device *dev);
+ void drm_legacy_ioremap_wc(struct drm_local_map *map, struct drm_device *dev);
+ void drm_legacy_ioremapfree(struct drm_local_map *map, struct drm_device *dev);
+ 
+-static inline struct drm_local_map *drm_legacy_findmap(struct drm_device *dev,
+-						       unsigned int token)
+-{
+-	struct drm_map_list *_entry;
+-	list_for_each_entry(_entry, &dev->maplist, head)
+-	    if (_entry->user_token == token)
+-		return _entry->map;
+-	return NULL;
+-}
+-
+ #endif /* __DRM_DRM_LEGACY_H__ */
+diff --git a/include/drm/drm_mipi_dsi.h b/include/drm/drm_mipi_dsi.h
+index 4fef19064..491528f48 100644
+--- a/include/drm/drm_mipi_dsi.h
++++ b/include/drm/drm_mipi_dsi.h
+@@ -168,6 +168,12 @@ struct mipi_dsi_device_info {
+  * @format: pixel format for video mode
+  * @lanes: number of active data lanes
+  * @mode_flags: DSI operation mode related flags
++ * @hs_rate: maximum lane frequency for high speed mode in hertz, this should
++ * be set to the real limits of the hardware, zero is only accepted for
++ * legacy drivers
++ * @lp_rate: maximum lane frequency for low power mode in hertz, this should
++ * be set to the real limits of the hardware, zero is only accepted for
++ * legacy drivers
+  */
+ struct mipi_dsi_device {
+ 	struct mipi_dsi_host *host;
+@@ -178,6 +184,8 @@ struct mipi_dsi_device {
+ 	unsigned int lanes;
+ 	enum mipi_dsi_pixel_format format;
+ 	unsigned long mode_flags;
++	unsigned long hs_rate;
++	unsigned long lp_rate;
+ };
+ 
+ #define MIPI_DSI_MODULE_PREFIX "mipi-dsi:"
+diff --git a/include/drm/drm_mode_config.h b/include/drm/drm_mode_config.h
+index a0b202e1d..7f60e8eb2 100644
+--- a/include/drm/drm_mode_config.h
++++ b/include/drm/drm_mode_config.h
+@@ -52,6 +52,12 @@ struct drm_mode_config_funcs {
+ 	 * requested metadata, but most of that is left to the driver. See
+ 	 * &struct drm_mode_fb_cmd2 for details.
+ 	 *
++	 * To validate the pixel format and modifier drivers can use
++	 * drm_any_plane_has_format() to make sure at least one plane supports
++	 * the requested values. Note that the driver must first determine the
++	 * actual modifier used if the request doesn't have it specified,
++	 * ie. when (@mode_cmd->flags & DRM_MODE_FB_MODIFIERS) == 0.
++	 *
+ 	 * If the parameters are deemed valid and the backing storage objects in
+ 	 * the underlying memory manager all exist, then the driver allocates
+ 	 * a new &drm_framebuffer structure, subclassed to contain
+@@ -355,7 +361,7 @@ struct drm_mode_config {
+ 	 *
+ 	 * This is the big scary modeset BKL which protects everything that
+ 	 * isn't protect otherwise. Scope is unclear and fuzzy, try to remove
+-	 * anything from under it's protection and move it into more well-scoped
++	 * anything from under its protection and move it into more well-scoped
+ 	 * locks.
+ 	 *
+ 	 * The one important thing this protects is the use of @acquire_ctx.
+@@ -385,18 +391,18 @@ struct drm_mode_config {
+ 	/**
+ 	 * @idr_mutex:
+ 	 *
+-	 * Mutex for KMS ID allocation and management. Protects both @crtc_idr
++	 * Mutex for KMS ID allocation and management. Protects both @object_idr
+ 	 * and @tile_idr.
+ 	 */
+ 	struct mutex idr_mutex;
+ 
+ 	/**
+-	 * @crtc_idr:
++	 * @object_idr:
+ 	 *
+ 	 * Main KMS ID tracking object. Use this idr for all IDs, fb, crtc,
+ 	 * connector, modes - just makes life easier to have only one.
+ 	 */
+-	struct idr crtc_idr;
++	struct idr object_idr;
+ 
+ 	/**
+ 	 * @tile_idr:
+@@ -506,6 +512,15 @@ struct drm_mode_config {
+ 	 */
+ 	struct list_head property_list;
+ 
++	/**
++	 * @privobj_list:
++	 *
++	 * List of private objects linked with &drm_private_obj.head. This is
++	 * invariant over the lifetime of a device and hence doesn't need any
++	 * locks.
++	 */
++	struct list_head privobj_list;
++
+ 	int min_width, min_height;
+ 	int max_width, max_height;
+ 	const struct drm_mode_config_funcs *funcs;
+@@ -627,6 +642,15 @@ struct drm_mode_config {
+ 	 * &drm_crtc.
+ 	 */
+ 	struct drm_property *prop_crtc_id;
++	/**
++	 * @prop_fb_damage_clips: Optional plane property to mark damaged
++	 * regions on the plane in framebuffer coordinates of the framebuffer
++	 * attached to the plane.
++	 *
++	 * The layout of blob data is simply an array of &drm_mode_rect. Unlike
++	 * plane src coordinates, damage clips are not in 16.16 fixed point.
++	 */
++	struct drm_property *prop_fb_damage_clips;
+ 	/**
+ 	 * @prop_active: Default atomic CRTC property to control the active
+ 	 * state, which is the simplified implementation for DPMS in atomic
+@@ -639,6 +663,11 @@ struct drm_mode_config {
+ 	 * connectors must be of and active must be set to disabled, too.
+ 	 */
+ 	struct drm_property *prop_mode_id;
++	/**
++	 * @prop_vrr_enabled: Default atomic CRTC property to indicate
++	 * whether variable refresh rate should be enabled on the CRTC.
++	 */
++	struct drm_property *prop_vrr_enabled;
+ 
+ 	/**
+ 	 * @dvi_i_subconnector_property: Optional DVI-I property to
+@@ -668,22 +697,22 @@ struct drm_mode_config {
+ 	struct drm_property *tv_mode_property;
+ 	/**
+ 	 * @tv_left_margin_property: Optional TV property to set the left
+-	 * margin.
++	 * margin (expressed in pixels).
+ 	 */
+ 	struct drm_property *tv_left_margin_property;
+ 	/**
+ 	 * @tv_right_margin_property: Optional TV property to set the right
+-	 * margin.
++	 * margin (expressed in pixels).
+ 	 */
+ 	struct drm_property *tv_right_margin_property;
+ 	/**
+ 	 * @tv_top_margin_property: Optional TV property to set the right
+-	 * margin.
++	 * margin (expressed in pixels).
+ 	 */
+ 	struct drm_property *tv_top_margin_property;
+ 	/**
+ 	 * @tv_bottom_margin_property: Optional TV property to set the right
+-	 * margin.
++	 * margin (expressed in pixels).
+ 	 */
+ 	struct drm_property *tv_bottom_margin_property;
+ 	/**
+@@ -810,6 +839,28 @@ struct drm_mode_config {
+ 	/* dumb ioctl parameters */
+ 	uint32_t preferred_depth, prefer_shadow;
+ 
++	/**
++	 * @quirk_addfb_prefer_xbgr_30bpp:
++	 *
++	 * Special hack for legacy ADDFB to keep nouveau userspace happy. Should
++	 * only ever be set by the nouveau kernel driver.
++	 */
++	bool quirk_addfb_prefer_xbgr_30bpp;
++
++	/**
++	 * @quirk_addfb_prefer_host_byte_order:
++	 *
++	 * When set to true drm_mode_addfb() will pick host byte order
++	 * pixel_format when calling drm_mode_addfb2().  This is how
++	 * drm_mode_addfb() should have worked from day one.  It
++	 * didn't though, so we ended up with quirks in both kernel
++	 * and userspace drivers to deal with the broken behavior.
++	 * Simply fixing drm_mode_addfb() unconditionally would break
++	 * these drivers, so add a quirk bit here to allow drivers
++	 * opt-in.
++	 */
++	bool quirk_addfb_prefer_host_byte_order;
++
+ 	/**
+ 	 * @async_page_flip: Does this device support async flips on the primary
+ 	 * plane?
+diff --git a/include/drm/drm_modes.h b/include/drm/drm_modes.h
+index baded6514..be4fed97e 100644
+--- a/include/drm/drm_modes.h
++++ b/include/drm/drm_modes.h
+@@ -136,8 +136,7 @@ enum drm_mode_status {
+ 	.hdisplay = (hd), .hsync_start = (hss), .hsync_end = (hse), \
+ 	.htotal = (ht), .hskew = (hsk), .vdisplay = (vd), \
+ 	.vsync_start = (vss), .vsync_end = (vse), .vtotal = (vt), \
+-	.vscan = (vs), .flags = (f), \
+-	.base.type = DRM_MODE_OBJECT_MODE
++	.vscan = (vs), .flags = (f)
+ 
+ #define CRTC_INTERLACE_HALVE_V	(1 << 0) /* halve V values for interlacing */
+ #define CRTC_STEREO_DOUBLE	(1 << 1) /* adjust timings for stereo modes */
+@@ -213,20 +212,6 @@ struct drm_display_mode {
+ 	 */
+ 	struct list_head head;
+ 
+-	/**
+-	 * @base:
+-	 *
+-	 * A display mode is a normal modeset object, possibly including public
+-	 * userspace id.
+-	 *
+-	 * FIXME:
+-	 *
+-	 * This can probably be removed since the entire concept of userspace
+-	 * managing modes explicitly has never landed in upstream kernel mode
+-	 * setting support.
+-	 */
+-	struct drm_mode_object base;
+-
+ 	/**
+ 	 * @name:
+ 	 *
+@@ -429,14 +414,14 @@ struct drm_display_mode {
+ /**
+  * DRM_MODE_FMT - printf string for &struct drm_display_mode
+  */
+-#define DRM_MODE_FMT    "%d:\"%s\" %d %d %d %d %d %d %d %d %d %d 0x%x 0x%x"
++#define DRM_MODE_FMT    "\"%s\": %d %d %d %d %d %d %d %d %d %d 0x%x 0x%x"
+ 
+ /**
+  * DRM_MODE_ARG - printf arguments for &struct drm_display_mode
+  * @m: display mode
+  */
+ #define DRM_MODE_ARG(m) \
+-	(m)->base.id, (m)->name, (m)->vrefresh, (m)->clock, \
++	(m)->name, (m)->vrefresh, (m)->clock, \
+ 	(m)->hdisplay, (m)->hsync_start, (m)->hsync_end, (m)->htotal, \
+ 	(m)->vdisplay, (m)->vsync_start, (m)->vsync_end, (m)->vtotal, \
+ 	(m)->type, (m)->flags
+diff --git a/include/drm/drm_modeset_helper.h b/include/drm/drm_modeset_helper.h
+index efa337f03..995fd981c 100644
+--- a/include/drm/drm_modeset_helper.h
++++ b/include/drm/drm_modeset_helper.h
+@@ -23,7 +23,11 @@
+ #ifndef __DRM_KMS_HELPER_H__
+ #define __DRM_KMS_HELPER_H__
+ 
+-#include <drm/drmP.h>
++struct drm_crtc;
++struct drm_crtc_funcs;
++struct drm_device;
++struct drm_framebuffer;
++struct drm_mode_fb_cmd2;
+ 
+ void drm_helper_move_panel_connectors_to_head(struct drm_device *);
+ 
+diff --git a/include/drm/drm_modeset_helper_vtables.h b/include/drm/drm_modeset_helper_vtables.h
+index 0eb3372d0..cfb7be40b 100644
+--- a/include/drm/drm_modeset_helper_vtables.h
++++ b/include/drm/drm_modeset_helper_vtables.h
+@@ -1013,7 +1013,7 @@ struct drm_plane_helper_funcs {
+ 	 * @prepare_fb:
+ 	 *
+ 	 * This hook is to prepare a framebuffer for scanout by e.g. pinning
+-	 * it's backing storage or relocating it into a contiguous block of
++	 * its backing storage or relocating it into a contiguous block of
+ 	 * VRAM. Other possible preparatory work includes flushing caches.
+ 	 *
+ 	 * This function must not block for outstanding rendering, since it is
+@@ -1174,14 +1174,6 @@ struct drm_plane_helper_funcs {
+ 	 * current one with the new plane configurations in the new
+ 	 * plane_state.
+ 	 *
+-	 * Drivers should also swap the framebuffers between current plane
+-	 * state (&drm_plane.state) and new_state.
+-	 * This is required since cleanup for async commits is performed on
+-	 * the new state, rather than old state like for traditional commits.
+-	 * Since we want to give up the reference on the current (old) fb
+-	 * instead of our brand new one, swap them in the driver during the
+-	 * async commit.
+-	 *
+ 	 * FIXME:
+ 	 *  - It only works for single plane updates
+ 	 *  - Async Pageflips are not supported yet
+diff --git a/include/drm/drm_modeset_lock.h b/include/drm/drm_modeset_lock.h
+index a685d1bb2..7b8841065 100644
+--- a/include/drm/drm_modeset_lock.h
++++ b/include/drm/drm_modeset_lock.h
+@@ -68,7 +68,7 @@ struct drm_modeset_acquire_ctx {
+ /**
+  * struct drm_modeset_lock - used for locking modeset resources.
+  * @mutex: resource locking
+- * @head: used to hold it's place on &drm_atomi_state.locked list when
++ * @head: used to hold its place on &drm_atomi_state.locked list when
+  *    part of an atomic update
+  *
+  * Used for locking CRTCs and other modeset resources.
+@@ -130,4 +130,63 @@ void drm_warn_on_modeset_not_all_locked(struct drm_device *dev);
+ int drm_modeset_lock_all_ctx(struct drm_device *dev,
+ 			     struct drm_modeset_acquire_ctx *ctx);
+ 
++/**
++ * DRM_MODESET_LOCK_ALL_BEGIN - Helper to acquire modeset locks
++ * @dev: drm device
++ * @ctx: local modeset acquire context, will be dereferenced
++ * @flags: DRM_MODESET_ACQUIRE_* flags to pass to drm_modeset_acquire_init()
++ * @ret: local ret/err/etc variable to track error status
++ *
++ * Use these macros to simplify grabbing all modeset locks using a local
++ * context. This has the advantage of reducing boilerplate, but also properly
++ * checking return values where appropriate.
++ *
++ * Any code run between BEGIN and END will be holding the modeset locks.
++ *
++ * This must be paired with DRM_MODESET_LOCK_ALL_END(). We will jump back and
++ * forth between the labels on deadlock and error conditions.
++ *
++ * Drivers can acquire additional modeset locks. If any lock acquisition
++ * fails, the control flow needs to jump to DRM_MODESET_LOCK_ALL_END() with
++ * the @ret parameter containing the return value of drm_modeset_lock().
++ *
++ * Returns:
++ * The only possible value of ret immediately after DRM_MODESET_LOCK_ALL_BEGIN()
++ * is 0, so no error checking is necessary
++ */
++#define DRM_MODESET_LOCK_ALL_BEGIN(dev, ctx, flags, ret)		\
++	drm_modeset_acquire_init(&ctx, flags);				\
++modeset_lock_retry:							\
++	ret = drm_modeset_lock_all_ctx(dev, &ctx);			\
++	if (ret)							\
++		goto modeset_lock_fail;
++
++/**
++ * DRM_MODESET_LOCK_ALL_END - Helper to release and cleanup modeset locks
++ * @ctx: local modeset acquire context, will be dereferenced
++ * @ret: local ret/err/etc variable to track error status
++ *
++ * The other side of DRM_MODESET_LOCK_ALL_BEGIN(). It will bounce back to BEGIN
++ * if ret is -EDEADLK.
++ *
++ * It's important that you use the same ret variable for begin and end so
++ * deadlock conditions are properly handled.
++ *
++ * Returns:
++ * ret will be untouched unless it is -EDEADLK on entry. That means that if you
++ * successfully acquire the locks, ret will be whatever your code sets it to. If
++ * there is a deadlock or other failure with acquire or backoff, ret will be set
++ * to that failure. In both of these cases the code between BEGIN/END will not
++ * be run, so the failure will reflect the inability to grab the locks.
++ */
++#define DRM_MODESET_LOCK_ALL_END(ctx, ret)				\
++modeset_lock_fail:							\
++	if (ret == -EDEADLK) {						\
++		ret = drm_modeset_backoff(&ctx);			\
++		if (!ret)						\
++			goto modeset_lock_retry;			\
++	}								\
++	drm_modeset_drop_locks(&ctx);					\
++	drm_modeset_acquire_fini(&ctx);
++
+ #endif /* DRM_MODESET_LOCK_H_ */
+diff --git a/include/drm/drm_panel.h b/include/drm/drm_panel.h
+index 777814755..8c738c0e6 100644
+--- a/include/drm/drm_panel.h
++++ b/include/drm/drm_panel.h
+@@ -82,6 +82,7 @@ struct drm_panel_funcs {
+  * @drm: DRM device owning the panel
+  * @connector: DRM connector that the panel is attached to
+  * @dev: parent device of the panel
++ * @link: link from panel device (supplier) to DRM device (consumer)
+  * @funcs: operations that can be performed on the panel
+  * @list: panel entry in registry
+  */
+diff --git a/include/drm/drm_pciids.h b/include/drm/drm_pciids.h
+index 683742826..b7e899ce4 100644
+--- a/include/drm/drm_pciids.h
++++ b/include/drm/drm_pciids.h
+@@ -1,4 +1,4 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
++/* SPDX-License-Identifier: MIT */
+ #define radeon_PCI_IDS \
+ 	{0x1002, 0x1304, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_KAVERI|RADEON_IS_MOBILITY|RADEON_NEW_MEMMAP|RADEON_IS_IGP}, \
+ 	{0x1002, 0x1305, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_KAVERI|RADEON_NEW_MEMMAP|RADEON_IS_IGP}, \
+diff --git a/include/drm/drm_plane.h b/include/drm/drm_plane.h
+index 8a152dc16..6078c700d 100644
+--- a/include/drm/drm_plane.h
++++ b/include/drm/drm_plane.h
+@@ -27,6 +27,9 @@
+ #include <linux/ctype.h>
+ #include <drm/drm_mode_object.h>
+ #include <drm/drm_color_mgmt.h>
++#include <drm/drm_rect.h>
++#include <drm/drm_modeset_lock.h>
++#include <drm/drm_util.h>
+ 
+ struct drm_crtc;
+ struct drm_printer;
+@@ -118,6 +121,14 @@ struct drm_plane_state {
+ 	 */
+ 	u16 alpha;
+ 
++	/**
++	 * @pixel_blend_mode:
++	 * The alpha blending equation selection, describing how the pixels from
++	 * the current plane are composited with the background. Value can be
++	 * one of DRM_MODE_BLEND_*
++	 */
++	uint16_t pixel_blend_mode;
++
+ 	/**
+ 	 * @rotation:
+ 	 * Rotation of the plane. See drm_plane_create_rotation_property() for
+@@ -162,6 +173,16 @@ struct drm_plane_state {
+ 	 */
+ 	enum drm_color_range color_range;
+ 
++	/**
++	 * @fb_damage_clips:
++	 *
++	 * Blob representing damage (area in plane framebuffer that changed
++	 * since last plane update) as an array of &drm_mode_rect in framebuffer
++	 * coodinates of the attached framebuffer. Note that unlike plane src,
++	 * damage clips are not in 16.16 fixed point.
++	 */
++	struct drm_property_blob *fb_damage_clips;
++
+ 	/** @src: clipped source coordinates of the plane (in 16.16) */
+ 	/** @dst: clipped destination coordinates of the plane */
+ 	struct drm_rect src, dst;
+@@ -659,6 +680,14 @@ struct drm_plane {
+ 	 * drm_plane_create_rotation_property().
+ 	 */
+ 	struct drm_property *rotation_property;
++	/**
++	 * @blend_mode_property:
++	 * Optional "pixel blend mode" enum property for this plane.
++	 * Blend mode property represents the alpha blending equation selection,
++	 * describing how the pixels from the current plane are composited with
++	 * the background.
++	 */
++	struct drm_property *blend_mode_property;
+ 
+ 	/**
+ 	 * @color_encoding_property:
+@@ -779,5 +808,39 @@ static inline struct drm_plane *drm_plane_find(struct drm_device *dev,
+ #define drm_for_each_plane(plane, dev) \
+ 	list_for_each_entry(plane, &(dev)->mode_config.plane_list, head)
+ 
++bool drm_any_plane_has_format(struct drm_device *dev,
++			      u32 format, u64 modifier);
++/**
++ * drm_plane_get_damage_clips_count - Returns damage clips count.
++ * @state: Plane state.
++ *
++ * Simple helper to get the number of &drm_mode_rect clips set by user-space
++ * during plane update.
++ *
++ * Return: Number of clips in plane fb_damage_clips blob property.
++ */
++static inline unsigned int
++drm_plane_get_damage_clips_count(const struct drm_plane_state *state)
++{
++	return (state && state->fb_damage_clips) ?
++		state->fb_damage_clips->length/sizeof(struct drm_mode_rect) : 0;
++}
++
++/**
++ * drm_plane_get_damage_clips - Returns damage clips.
++ * @state: Plane state.
++ *
++ * Note that this function returns uapi type &drm_mode_rect. Drivers might
++ * instead be interested in internal &drm_rect which can be obtained by calling
++ * drm_helper_get_plane_damage_clips().
++ *
++ * Return: Damage clips in plane fb_damage_clips blob property.
++ */
++static inline struct drm_mode_rect *
++drm_plane_get_damage_clips(const struct drm_plane_state *state)
++{
++	return (struct drm_mode_rect *)((state && state->fb_damage_clips) ?
++					state->fb_damage_clips->data : NULL);
++}
+ 
+ #endif
+diff --git a/include/drm/drm_plane_helper.h b/include/drm/drm_plane_helper.h
+index 26cee2934..331ebd60b 100644
+--- a/include/drm/drm_plane_helper.h
++++ b/include/drm/drm_plane_helper.h
+@@ -38,42 +38,7 @@
+  */
+ #define DRM_PLANE_HELPER_NO_SCALING (1<<16)
+ 
+-int drm_plane_helper_check_update(struct drm_plane *plane,
+-				  struct drm_crtc *crtc,
+-				  struct drm_framebuffer *fb,
+-				  struct drm_rect *src,
+-				  struct drm_rect *dest,
+-				  unsigned int rotation,
+-				  int min_scale,
+-				  int max_scale,
+-				  bool can_position,
+-				  bool can_update_disabled,
+-				  bool *visible);
+-int drm_primary_helper_update(struct drm_plane *plane,
+-			      struct drm_crtc *crtc,
+-			      struct drm_framebuffer *fb,
+-			      int crtc_x, int crtc_y,
+-			      unsigned int crtc_w, unsigned int crtc_h,
+-			      uint32_t src_x, uint32_t src_y,
+-			      uint32_t src_w, uint32_t src_h,
+-			      struct drm_modeset_acquire_ctx *ctx);
+-int drm_primary_helper_disable(struct drm_plane *plane,
+-			       struct drm_modeset_acquire_ctx *ctx);
+ void drm_primary_helper_destroy(struct drm_plane *plane);
+ extern const struct drm_plane_funcs drm_primary_helper_funcs;
+ 
+-int drm_plane_helper_update(struct drm_plane *plane, struct drm_crtc *crtc,
+-			    struct drm_framebuffer *fb,
+-			    int crtc_x, int crtc_y,
+-			    unsigned int crtc_w, unsigned int crtc_h,
+-			    uint32_t src_x, uint32_t src_y,
+-			    uint32_t src_w, uint32_t src_h,
+-			    struct drm_modeset_acquire_ctx *ctx);
+-int drm_plane_helper_disable(struct drm_plane *plane,
+-			     struct drm_modeset_acquire_ctx *ctx);
+-
+-/* For use by drm_crtc_helper.c */
+-int drm_plane_helper_commit(struct drm_plane *plane,
+-			    struct drm_plane_state *plane_state,
+-			    struct drm_framebuffer *old_fb);
+ #endif
+diff --git a/include/drm/drm_prime.h b/include/drm/drm_prime.h
+index d716d653b..b03731a3f 100644
+--- a/include/drm/drm_prime.h
++++ b/include/drm/drm_prime.h
+@@ -70,6 +70,7 @@ struct dma_buf *drm_gem_prime_export(struct drm_device *dev,
+ int drm_gem_prime_handle_to_fd(struct drm_device *dev,
+ 			       struct drm_file *file_priv, uint32_t handle, uint32_t flags,
+ 			       int *prime_fd);
++int drm_gem_prime_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma);
+ struct drm_gem_object *drm_gem_prime_import(struct drm_device *dev,
+ 					    struct dma_buf *dma_buf);
+ 
+@@ -93,9 +94,6 @@ void drm_gem_unmap_dma_buf(struct dma_buf_attachment *attach,
+ 			   enum dma_data_direction dir);
+ void *drm_gem_dmabuf_vmap(struct dma_buf *dma_buf);
+ void drm_gem_dmabuf_vunmap(struct dma_buf *dma_buf, void *vaddr);
+-void *drm_gem_dmabuf_kmap(struct dma_buf *dma_buf, unsigned long page_num);
+-void drm_gem_dmabuf_kunmap(struct dma_buf *dma_buf, unsigned long page_num,
+-			   void *addr);
+ int drm_gem_dmabuf_mmap(struct dma_buf *dma_buf, struct vm_area_struct *vma);
+ 
+ int drm_prime_sg_to_page_addr_arrays(struct sg_table *sgt, struct page **pages,
+diff --git a/include/drm/drm_print.h b/include/drm/drm_print.h
+index f3e6eed3e..afbc3beef 100644
+--- a/include/drm/drm_print.h
++++ b/include/drm/drm_print.h
+@@ -381,7 +381,7 @@ void drm_err(const char *format, ...);
+ 
+ #define	DRM_DEV_DEBUG_DP(dev, fmt, ...)					\
+ 	drm_dev_dbg(dev, DRM_UT_DP, fmt, ## __VA_ARGS__)
+-#define DRM_DEBUG_DP(dev, fmt, ...)					\
++#define DRM_DEBUG_DP(fmt, ...)						\
+ 	drm_dbg(DRM_UT_DP, fmt, ## __VA_ARGS__)
+ 
+ #define _DRM_DEV_DEFINE_DEBUG_RATELIMITED(dev, category, fmt, ...)	\
+diff --git a/include/drm/drm_property.h b/include/drm/drm_property.h
+index c030f6cca..4a0a80d65 100644
+--- a/include/drm/drm_property.h
++++ b/include/drm/drm_property.h
+@@ -27,6 +27,8 @@
+ #include <linux/ctype.h>
+ #include <drm/drm_mode_object.h>
+ 
++#include <uapi/drm/drm_mode.h>
++
+ /**
+  * struct drm_property_enum - symbolic values for enumerations
+  * @value: numeric property value for this enum entry
+@@ -151,7 +153,8 @@ struct drm_property {
+ 	 *     userspace. The kernel is allowed to update the value of these
+ 	 *     properties. This is generally used to expose probe state to
+ 	 *     userspace, e.g. the EDID, or the connector path property on DP
+-	 *     MST sinks.
++	 *     MST sinks. Kernel can update the value of an immutable property
++	 *     by calling drm_object_property_set_value().
+ 	 */
+ 	uint32_t flags;
+ 
+diff --git a/include/drm/drm_rect.h b/include/drm/drm_rect.h
+index 6c54544a4..6195820aa 100644
+--- a/include/drm/drm_rect.h
++++ b/include/drm/drm_rect.h
+@@ -182,12 +182,6 @@ int drm_rect_calc_hscale(const struct drm_rect *src,
+ int drm_rect_calc_vscale(const struct drm_rect *src,
+ 			 const struct drm_rect *dst,
+ 			 int min_vscale, int max_vscale);
+-int drm_rect_calc_hscale_relaxed(struct drm_rect *src,
+-				 struct drm_rect *dst,
+-				 int min_hscale, int max_hscale);
+-int drm_rect_calc_vscale_relaxed(struct drm_rect *src,
+-				 struct drm_rect *dst,
+-				 int min_vscale, int max_vscale);
+ void drm_rect_debug_print(const char *prefix,
+ 			  const struct drm_rect *r, bool fixed_point);
+ void drm_rect_rotate(struct drm_rect *r,
+diff --git a/include/drm/drm_syncobj.h b/include/drm/drm_syncobj.h
+index 398060247..0311c9fdb 100644
+--- a/include/drm/drm_syncobj.h
++++ b/include/drm/drm_syncobj.h
+@@ -26,9 +26,9 @@
+ #ifndef __DRM_SYNCOBJ_H__
+ #define __DRM_SYNCOBJ_H__
+ 
+-#include "linux/dma-fence.h"
++#include <linux/dma-fence.h>
+ 
+-struct drm_syncobj_cb;
++struct drm_file;
+ 
+ /**
+  * struct drm_syncobj - sync object.
+@@ -62,25 +62,6 @@ struct drm_syncobj {
+ 	struct file *file;
+ };
+ 
+-typedef void (*drm_syncobj_func_t)(struct drm_syncobj *syncobj,
+-				   struct drm_syncobj_cb *cb);
+-
+-/**
+- * struct drm_syncobj_cb - callback for drm_syncobj_add_callback
+- * @node: used by drm_syncob_add_callback to append this struct to
+- *	  &drm_syncobj.cb_list
+- * @func: drm_syncobj_func_t to call
+- *
+- * This struct will be initialized by drm_syncobj_add_callback, additional
+- * data can be passed along by embedding drm_syncobj_cb in another struct.
+- * The callback will get called the next time drm_syncobj_replace_fence is
+- * called.
+- */
+-struct drm_syncobj_cb {
+-	struct list_head node;
+-	drm_syncobj_func_t func;
+-};
+-
+ void drm_syncobj_free(struct kref *kref);
+ 
+ /**
+@@ -131,15 +112,10 @@ drm_syncobj_fence_get(struct drm_syncobj *syncobj)
+ 
+ struct drm_syncobj *drm_syncobj_find(struct drm_file *file_private,
+ 				     u32 handle);
+-void drm_syncobj_add_callback(struct drm_syncobj *syncobj,
+-			      struct drm_syncobj_cb *cb,
+-			      drm_syncobj_func_t func);
+-void drm_syncobj_remove_callback(struct drm_syncobj *syncobj,
+-				 struct drm_syncobj_cb *cb);
+ void drm_syncobj_replace_fence(struct drm_syncobj *syncobj,
+ 			       struct dma_fence *fence);
+ int drm_syncobj_find_fence(struct drm_file *file_private,
+-			   u32 handle,
++			   u32 handle, u64 point, u64 flags,
+ 			   struct dma_fence **fence);
+ void drm_syncobj_free(struct kref *kref);
+ int drm_syncobj_create(struct drm_syncobj **out_syncobj, uint32_t flags,
+diff --git a/include/drm/drm_util.h b/include/drm/drm_util.h
+new file mode 100644
+index 000000000..07b8e9f04
+--- /dev/null
++++ b/include/drm/drm_util.h
+@@ -0,0 +1,83 @@
++/*
++ * Internal Header for the Direct Rendering Manager
++ *
++ * Copyright 2018 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _DRM_UTIL_H_
++#define _DRM_UTIL_H_
++
++/**
++ * DOC: drm utils
++ *
++ * Macros and inline functions that does not naturally belong in other places
++ */
++
++#include <linux/interrupt.h>
++#include <linux/kgdb.h>
++#include <linux/preempt.h>
++#include <linux/smp.h>
++
++/*
++ * Use EXPORT_SYMBOL_FOR_TESTS_ONLY() for functions that shall
++ * only be visible for drmselftests.
++ */
++#if defined(CONFIG_DRM_DEBUG_SELFTEST_MODULE)
++#define EXPORT_SYMBOL_FOR_TESTS_ONLY(x) EXPORT_SYMBOL(x)
++#else
++#define EXPORT_SYMBOL_FOR_TESTS_ONLY(x)
++#endif
++
++/**
++ * for_each_if - helper for handling conditionals in various for_each macros
++ * @condition: The condition to check
++ *
++ * Typical use::
++ *
++ *	#define for_each_foo_bar(x, y) \'
++ *		list_for_each_entry(x, y->list, head) \'
++ *			for_each_if(x->something == SOMETHING)
++ *
++ * The for_each_if() macro makes the use of for_each_foo_bar() less error
++ * prone.
++ */
++#define for_each_if(condition) if (!(condition)) {} else
++
++/**
++ * drm_can_sleep - returns true if currently okay to sleep
++ *
++ * This function shall not be used in new code.
++ * The check for running in atomic context may not work - see linux/preempt.h.
++ *
++ * FIXME: All users of drm_can_sleep should be removed (see todo.rst)
++ *
++ * Returns:
++ * False if kgdb is active, we are in atomic context or irqs are disabled.
++ */
++static inline bool drm_can_sleep(void)
++{
++	if (in_atomic() || in_dbg_master() || irqs_disabled())
++		return false;
++	return true;
++}
++
++#endif
+diff --git a/include/drm/drm_vblank.h b/include/drm/drm_vblank.h
+index d25a9603a..e528bb2f6 100644
+--- a/include/drm/drm_vblank.h
++++ b/include/drm/drm_vblank.h
+@@ -95,7 +95,7 @@ struct drm_vblank_crtc {
+ 	/**
+ 	 * @queue: Wait queue for vblank waiters.
+ 	 */
+-	wait_queue_head_t queue;	/**< VBLANK wait queue */
++	wait_queue_head_t queue;
+ 	/**
+ 	 * @disable_timer: Disable timer for the delayed vblank disabling
+ 	 * hysteresis logic. Vblank disabling is controlled through the
+@@ -107,7 +107,7 @@ struct drm_vblank_crtc {
+ 	/**
+ 	 * @seqlock: Protect vblank count and time.
+ 	 */
+-	seqlock_t seqlock;		/* protects vblank count and time */
++	seqlock_t seqlock;
+ 
+ 	/**
+ 	 * @count: Current software vblank counter.
+@@ -123,11 +123,31 @@ struct drm_vblank_crtc {
+ 	 * this refcount reaches 0 can the hardware interrupt be disabled using
+ 	 * @disable_timer.
+ 	 */
+-	atomic_t refcount;		/* number of users of vblank interruptsper crtc */
++	atomic_t refcount;
+ 	/**
+ 	 * @last: Protected by &drm_device.vbl_lock, used for wraparound handling.
+ 	 */
+ 	u32 last;
++	/**
++	 * @max_vblank_count:
++	 *
++	 * Maximum value of the vblank registers for this crtc. This value +1
++	 * will result in a wrap-around of the vblank register. It is used
++	 * by the vblank core to handle wrap-arounds.
++	 *
++	 * If set to zero the vblank core will try to guess the elapsed vblanks
++	 * between times when the vblank interrupt is disabled through
++	 * high-precision timestamps. That approach is suffering from small
++	 * races and imprecision over longer time periods, hence exposing a
++	 * hardware vblank counter is always recommended.
++	 *
++	 * This is the runtime configurable per-crtc maximum set through
++	 * drm_crtc_set_max_vblank_count(). If this is used the driver
++	 * must leave the device wide &drm_device.max_vblank_count at zero.
++	 *
++	 * If non-zero, &drm_crtc_funcs.get_vblank_counter must be set.
++	 */
++	u32 max_vblank_count;
+ 	/**
+ 	 * @inmodeset: Tracks whether the vblank is disabled due to a modeset.
+ 	 * For legacy driver bit 2 additionally tracks whether an additional
+@@ -136,7 +156,7 @@ struct drm_vblank_crtc {
+ 	 * call drm_crtc_vblank_off() and drm_crtc_vblank_on(), which explicitly
+ 	 * save and restore the vblank count.
+ 	 */
+-	unsigned int inmodeset;		/* Display driver is setting mode */
++	unsigned int inmodeset;
+ 	/**
+ 	 * @pipe: drm_crtc_index() of the &drm_crtc corresponding to this
+ 	 * structure.
+@@ -206,4 +226,6 @@ bool drm_calc_vbltimestamp_from_scanoutpos(struct drm_device *dev,
+ void drm_calc_timestamping_constants(struct drm_crtc *crtc,
+ 				     const struct drm_display_mode *mode);
+ wait_queue_head_t *drm_crtc_vblank_waitqueue(struct drm_crtc *crtc);
++void drm_crtc_set_max_vblank_count(struct drm_crtc *crtc,
++				   u32 max_vblank_count);
+ #endif
+diff --git a/include/drm/gpu_scheduler.h b/include/drm/gpu_scheduler.h
+index 21c648b0b..0daca4d8d 100644
+--- a/include/drm/gpu_scheduler.h
++++ b/include/drm/gpu_scheduler.h
+@@ -50,7 +50,10 @@ enum drm_sched_priority {
+  *
+  * @list: used to append this struct to the list of entities in the
+  *        runqueue.
+- * @rq: runqueue to which this entity belongs.
++ * @rq: runqueue on which this entity is currently scheduled.
++ * @rq_list: a list of run queues on which jobs from this entity can
++ *           be scheduled
++ * @num_rq_list: number of run queues in the rq_list
+  * @rq_lock: lock to modify the runqueue to which this entity belongs.
+  * @job_queue: the list of jobs of this entity.
+  * @fence_seq: a linearly increasing seqno incremented with each
+@@ -67,6 +70,7 @@ enum drm_sched_priority {
+  * @fini_status: contains the exit status in case the process was signalled.
+  * @last_scheduled: points to the finished fence of the last scheduled job.
+  * @last_user: last group leader pushing a job into the entity.
++ * @stopped: Marks the enity as removed from rq and destined for termination.
+  *
+  * Entities will emit jobs in order to their corresponding hardware
+  * ring, and the scheduler will alternate between entities based on
+@@ -75,6 +79,8 @@ enum drm_sched_priority {
+ struct drm_sched_entity {
+ 	struct list_head		list;
+ 	struct drm_sched_rq		*rq;
++	struct drm_sched_rq		**rq_list;
++	unsigned int                    num_rq_list;
+ 	spinlock_t			rq_lock;
+ 
+ 	struct spsc_queue		job_queue;
+@@ -87,6 +93,7 @@ struct drm_sched_entity {
+ 	atomic_t			*guilty;
+ 	struct dma_fence                *last_scheduled;
+ 	struct task_struct		*last_user;
++	bool 				stopped;
+ };
+ 
+ /**
+@@ -130,10 +137,6 @@ struct drm_sched_fence {
+          */
+ 	struct dma_fence		finished;
+ 
+-        /**
+-         * @cb: the callback for the parent fence below.
+-         */
+-	struct dma_fence_cb		cb;
+         /**
+          * @parent: the fence returned by &drm_sched_backend_ops.run_job
+          * when scheduling the job on hardware. We signal the
+@@ -168,14 +171,13 @@ struct drm_sched_fence *to_drm_sched_fence(struct dma_fence *f);
+  *               finished to remove the job from the
+  *               @drm_gpu_scheduler.ring_mirror_list.
+  * @node: used to append this struct to the @drm_gpu_scheduler.ring_mirror_list.
+- * @work_tdr: schedules a delayed call to @drm_sched_job_timedout after the timeout
+- *            interval is over.
+  * @id: a unique id assigned to each job scheduled on the scheduler.
+  * @karma: increment on every hang caused by this job. If this exceeds the hang
+  *         limit of the scheduler then the job is marked guilty and will not
+  *         be scheduled further.
+  * @s_priority: the priority of the job.
+  * @entity: the entity to which this job belongs.
++ * @cb: the callback for the parent fence in s_fence.
+  *
+  * A job is created by the driver using drm_sched_job_init(), and
+  * should call drm_sched_entity_push_job() once it wants the scheduler
+@@ -188,11 +190,11 @@ struct drm_sched_job {
+ 	struct dma_fence_cb		finish_cb;
+ 	struct work_struct		finish_work;
+ 	struct list_head		node;
+-	struct delayed_work		work_tdr;
+ 	uint64_t			id;
+ 	atomic_t			karma;
+ 	enum drm_sched_priority		s_priority;
+ 	struct drm_sched_entity  *entity;
++	struct dma_fence_cb		cb;
+ };
+ 
+ static inline bool drm_sched_invalidate_job(struct drm_sched_job *s_job,
+@@ -252,11 +254,15 @@ struct drm_sched_backend_ops {
+  *                 finished.
+  * @hw_rq_count: the number of jobs currently in the hardware queue.
+  * @job_id_count: used to assign unique id to the each job.
++ * @work_tdr: schedules a delayed call to @drm_sched_job_timedout after the
++ *            timeout interval is over.
+  * @thread: the kthread on which the scheduler which run.
+  * @ring_mirror_list: the list of jobs which are currently in the job queue.
+  * @job_list_lock: lock to protect the ring_mirror_list.
+  * @hang_limit: once the hangs by a job crosses this limit then it is marked
+  *              guilty and it will be considered for scheduling further.
++ * @num_jobs: the number of jobs in queue in the scheduler
++ * @ready: marks if the underlying HW is ready to work
+  *
+  * One scheduler is implemented for each hardware ring.
+  */
+@@ -270,17 +276,39 @@ struct drm_gpu_scheduler {
+ 	wait_queue_head_t		job_scheduled;
+ 	atomic_t			hw_rq_count;
+ 	atomic64_t			job_id_count;
++	struct delayed_work		work_tdr;
+ 	struct task_struct		*thread;
+ 	struct list_head		ring_mirror_list;
+ 	spinlock_t			job_list_lock;
+ 	int				hang_limit;
++	atomic_t                        num_jobs;
++	bool			ready;
+ };
+ 
+ int drm_sched_init(struct drm_gpu_scheduler *sched,
+ 		   const struct drm_sched_backend_ops *ops,
+ 		   uint32_t hw_submission, unsigned hang_limit, long timeout,
+ 		   const char *name);
++
+ void drm_sched_fini(struct drm_gpu_scheduler *sched);
++int drm_sched_job_init(struct drm_sched_job *job,
++		       struct drm_sched_entity *entity,
++		       void *owner);
++void drm_sched_job_cleanup(struct drm_sched_job *job);
++void drm_sched_wakeup(struct drm_gpu_scheduler *sched);
++void drm_sched_stop(struct drm_gpu_scheduler *sched);
++void drm_sched_start(struct drm_gpu_scheduler *sched, bool full_recovery);
++void drm_sched_resubmit_jobs(struct drm_gpu_scheduler *sched);
++void drm_sched_increase_karma(struct drm_sched_job *bad);
++bool drm_sched_dependency_optimized(struct dma_fence* fence,
++				    struct drm_sched_entity *entity);
++void drm_sched_fault(struct drm_gpu_scheduler *sched);
++void drm_sched_job_kickout(struct drm_sched_job *s_job);
++
++void drm_sched_rq_add_entity(struct drm_sched_rq *rq,
++			     struct drm_sched_entity *entity);
++void drm_sched_rq_remove_entity(struct drm_sched_rq *rq,
++				struct drm_sched_entity *entity);
+ 
+ int drm_sched_entity_init(struct drm_sched_entity *entity,
+ 			  struct drm_sched_rq **rq_list,
+@@ -289,23 +317,21 @@ int drm_sched_entity_init(struct drm_sched_entity *entity,
+ long drm_sched_entity_flush(struct drm_sched_entity *entity, long timeout);
+ void drm_sched_entity_fini(struct drm_sched_entity *entity);
+ void drm_sched_entity_destroy(struct drm_sched_entity *entity);
++void drm_sched_entity_select_rq(struct drm_sched_entity *entity);
++struct drm_sched_job *drm_sched_entity_pop_job(struct drm_sched_entity *entity);
+ void drm_sched_entity_push_job(struct drm_sched_job *sched_job,
+ 			       struct drm_sched_entity *entity);
+-void drm_sched_entity_set_rq(struct drm_sched_entity *entity,
+-			     struct drm_sched_rq *rq);
++void drm_sched_entity_set_priority(struct drm_sched_entity *entity,
++				   enum drm_sched_priority priority);
++bool drm_sched_entity_is_ready(struct drm_sched_entity *entity);
+ 
+ struct drm_sched_fence *drm_sched_fence_create(
+ 	struct drm_sched_entity *s_entity, void *owner);
+ void drm_sched_fence_scheduled(struct drm_sched_fence *fence);
+ void drm_sched_fence_finished(struct drm_sched_fence *fence);
+-int drm_sched_job_init(struct drm_sched_job *job,
+-		       struct drm_sched_entity *entity,
+-		       void *owner);
+-void drm_sched_hw_job_reset(struct drm_gpu_scheduler *sched,
+-			    struct drm_sched_job *job);
+-void drm_sched_job_recovery(struct drm_gpu_scheduler *sched);
+-bool drm_sched_dependency_optimized(struct dma_fence* fence,
+-				    struct drm_sched_entity *entity);
+-void drm_sched_job_kickout(struct drm_sched_job *s_job);
++
++unsigned long drm_sched_suspend_timeout(struct drm_gpu_scheduler *sched);
++void drm_sched_resume_timeout(struct drm_gpu_scheduler *sched,
++		                unsigned long remaining);
+ 
+ #endif
+diff --git a/include/drm/i915_component.h b/include/drm/i915_component.h
+index fca22d463..dcb95bd9d 100644
+--- a/include/drm/i915_component.h
++++ b/include/drm/i915_component.h
+@@ -26,6 +26,11 @@
+ 
+ #include "drm_audio_component.h"
+ 
++enum i915_component_type {
++	I915_COMPONENT_AUDIO = 1,
++	I915_COMPONENT_HDCP,
++};
++
+ /* MAX_PORT is the number of port
+  * It must be sync with I915_MAX_PORTS defined i915_drv.h
+  */
+diff --git a/include/drm/i915_drm.h b/include/drm/i915_drm.h
+index c44703f47..7523e9a7b 100644
+--- a/include/drm/i915_drm.h
++++ b/include/drm/i915_drm.h
+@@ -100,4 +100,19 @@ extern struct resource intel_graphics_stolen_res;
+ #define INTEL_GEN11_BSM_DW1	0xc4
+ #define   INTEL_BSM_MASK	(-(1u << 20))
+ 
++enum port {
++	PORT_NONE = -1,
++
++	PORT_A = 0,
++	PORT_B,
++	PORT_C,
++	PORT_D,
++	PORT_E,
++	PORT_F,
++
++	I915_MAX_PORTS
++};
++
++#define port_name(p) ((p) + 'A')
++
+ #endif				/* _I915_DRM_H_ */
+diff --git a/include/drm/i915_mei_hdcp_interface.h b/include/drm/i915_mei_hdcp_interface.h
+new file mode 100644
+index 000000000..8c3442551
+--- /dev/null
++++ b/include/drm/i915_mei_hdcp_interface.h
+@@ -0,0 +1,149 @@
++/* SPDX-License-Identifier: (GPL-2.0+) */
++/*
++ * Copyright © 2017-2018 Intel Corporation
++ *
++ * Authors:
++ * Ramalingam C <ramalingam.c@intel.com>
++ */
++
++#ifndef _I915_MEI_HDCP_INTERFACE_H_
++#define _I915_MEI_HDCP_INTERFACE_H_
++
++#include <linux/mutex.h>
++#include <linux/device.h>
++#include <drm/drm_hdcp.h>
++#include <drm/i915_drm.h>
++
++/**
++ * enum hdcp_port_type - HDCP port implementation type defined by ME FW
++ * @HDCP_PORT_TYPE_INVALID: Invalid hdcp port type
++ * @HDCP_PORT_TYPE_INTEGRATED: In-Host HDCP2.x port
++ * @HDCP_PORT_TYPE_LSPCON: HDCP2.2 discrete wired Tx port with LSPCON
++ *			   (HDMI 2.0) solution
++ * @HDCP_PORT_TYPE_CPDP: HDCP2.2 discrete wired Tx port using the CPDP (DP 1.3)
++ *			 solution
++ */
++enum hdcp_port_type {
++	HDCP_PORT_TYPE_INVALID,
++	HDCP_PORT_TYPE_INTEGRATED,
++	HDCP_PORT_TYPE_LSPCON,
++	HDCP_PORT_TYPE_CPDP
++};
++
++/**
++ * enum hdcp_wired_protocol - HDCP adaptation used on the port
++ * @HDCP_PROTOCOL_INVALID: Invalid HDCP adaptation protocol
++ * @HDCP_PROTOCOL_HDMI: HDMI adaptation of HDCP used on the port
++ * @HDCP_PROTOCOL_DP: DP adaptation of HDCP used on the port
++ */
++enum hdcp_wired_protocol {
++	HDCP_PROTOCOL_INVALID,
++	HDCP_PROTOCOL_HDMI,
++	HDCP_PROTOCOL_DP
++};
++
++/**
++ * struct hdcp_port_data - intel specific HDCP port data
++ * @port: port index as per I915
++ * @port_type: HDCP port type as per ME FW classification
++ * @protocol: HDCP adaptation as per ME FW
++ * @k: No of streams transmitted on a port. Only on DP MST this is != 1
++ * @seq_num_m: Count of RepeaterAuth_Stream_Manage msg propagated.
++ *	       Initialized to 0 on AKE_INIT. Incremented after every successful
++ *	       transmission of RepeaterAuth_Stream_Manage message. When it rolls
++ *	       over re-Auth has to be triggered.
++ * @streams: struct hdcp2_streamid_type[k]. Defines the type and id for the
++ *	     streams
++ */
++struct hdcp_port_data {
++	enum port port;
++	u8 port_type;
++	u8 protocol;
++	u16 k;
++	u32 seq_num_m;
++	struct hdcp2_streamid_type *streams;
++};
++
++/**
++ * struct i915_hdcp_component_ops- ops for HDCP2.2 services.
++ * @owner: Module providing the ops
++ * @initiate_hdcp2_session: Initiate a Wired HDCP2.2 Tx Session.
++ *			    And Prepare AKE_Init.
++ * @verify_receiver_cert_prepare_km: Verify the Receiver Certificate
++ *				     AKE_Send_Cert and prepare
++				     AKE_Stored_Km/AKE_No_Stored_Km
++ * @verify_hprime: Verify AKE_Send_H_prime
++ * @store_pairing_info: Store pairing info received
++ * @initiate_locality_check: Prepare LC_Init
++ * @verify_lprime: Verify lprime
++ * @get_session_key: Prepare SKE_Send_Eks
++ * @repeater_check_flow_prepare_ack: Validate the Downstream topology
++ *				     and prepare rep_ack
++ * @verify_mprime: Verify mprime
++ * @enable_hdcp_authentication:  Mark a port as authenticated.
++ * @close_hdcp_session: Close the Wired HDCP Tx session per port.
++ *			This also disables the authenticated state of the port.
++ */
++struct i915_hdcp_component_ops {
++	/**
++	 * @owner: mei_hdcp module
++	 */
++	struct module *owner;
++
++	int (*initiate_hdcp2_session)(struct device *dev,
++				      struct hdcp_port_data *data,
++				      struct hdcp2_ake_init *ake_data);
++	int (*verify_receiver_cert_prepare_km)(struct device *dev,
++					       struct hdcp_port_data *data,
++					       struct hdcp2_ake_send_cert
++								*rx_cert,
++					       bool *km_stored,
++					       struct hdcp2_ake_no_stored_km
++								*ek_pub_km,
++					       size_t *msg_sz);
++	int (*verify_hprime)(struct device *dev,
++			     struct hdcp_port_data *data,
++			     struct hdcp2_ake_send_hprime *rx_hprime);
++	int (*store_pairing_info)(struct device *dev,
++				  struct hdcp_port_data *data,
++				  struct hdcp2_ake_send_pairing_info
++								*pairing_info);
++	int (*initiate_locality_check)(struct device *dev,
++				       struct hdcp_port_data *data,
++				       struct hdcp2_lc_init *lc_init_data);
++	int (*verify_lprime)(struct device *dev,
++			     struct hdcp_port_data *data,
++			     struct hdcp2_lc_send_lprime *rx_lprime);
++	int (*get_session_key)(struct device *dev,
++			       struct hdcp_port_data *data,
++			       struct hdcp2_ske_send_eks *ske_data);
++	int (*repeater_check_flow_prepare_ack)(struct device *dev,
++					       struct hdcp_port_data *data,
++					       struct hdcp2_rep_send_receiverid_list
++								*rep_topology,
++					       struct hdcp2_rep_send_ack
++								*rep_send_ack);
++	int (*verify_mprime)(struct device *dev,
++			     struct hdcp_port_data *data,
++			     struct hdcp2_rep_stream_ready *stream_ready);
++	int (*enable_hdcp_authentication)(struct device *dev,
++					  struct hdcp_port_data *data);
++	int (*close_hdcp_session)(struct device *dev,
++				  struct hdcp_port_data *data);
++};
++
++/**
++ * struct i915_hdcp_component_master - Used for communication between i915
++ * and mei_hdcp drivers for the HDCP2.2 services
++ * @mei_dev: device that provide the HDCP2.2 service from MEI Bus.
++ * @hdcp_ops: Ops implemented by mei_hdcp driver, used by i915 driver.
++ */
++struct i915_hdcp_comp_master {
++	struct device *mei_dev;
++	const struct i915_hdcp_component_ops *ops;
++
++	/* To protect the above members. */
++	struct mutex mutex;
++};
++
++#endif /* _I915_MEI_HDCP_INTERFACE_H_ */
+diff --git a/include/drm/i915_pciids.h b/include/drm/i915_pciids.h
+index fd965ffbb..d2fad7b0f 100644
+--- a/include/drm/i915_pciids.h
++++ b/include/drm/i915_pciids.h
+@@ -365,16 +365,20 @@
+ 	INTEL_VGA_DEVICE(0x593B, info) /* Halo GT4 */
+ 
+ /* AML/KBL Y GT2 */
+-#define INTEL_AML_GT2_IDS(info) \
++#define INTEL_AML_KBL_GT2_IDS(info) \
+ 	INTEL_VGA_DEVICE(0x591C, info),  /* ULX GT2 */ \
+ 	INTEL_VGA_DEVICE(0x87C0, info) /* ULX GT2 */
+ 
++/* AML/CFL Y GT2 */
++#define INTEL_AML_CFL_GT2_IDS(info) \
++	INTEL_VGA_DEVICE(0x87CA, info)
++
+ #define INTEL_KBL_IDS(info) \
+ 	INTEL_KBL_GT1_IDS(info), \
+ 	INTEL_KBL_GT2_IDS(info), \
+ 	INTEL_KBL_GT3_IDS(info), \
+ 	INTEL_KBL_GT4_IDS(info), \
+-	INTEL_AML_GT2_IDS(info)
++	INTEL_AML_KBL_GT2_IDS(info)
+ 
+ /* CFL S */
+ #define INTEL_CFL_S_GT1_IDS(info) \
+@@ -390,6 +394,9 @@
+ 	INTEL_VGA_DEVICE(0x3E9A, info)  /* SRV GT2 */
+ 
+ /* CFL H */
++#define INTEL_CFL_H_GT1_IDS(info) \
++	INTEL_VGA_DEVICE(0x3E9C, info)
++
+ #define INTEL_CFL_H_GT2_IDS(info) \
+ 	INTEL_VGA_DEVICE(0x3E9B, info), /* Halo GT2 */ \
+ 	INTEL_VGA_DEVICE(0x3E94, info)  /* Halo GT2 */
+@@ -407,27 +414,29 @@
+ 
+ /* WHL/CFL U GT1 */
+ #define INTEL_WHL_U_GT1_IDS(info) \
+-	INTEL_VGA_DEVICE(0x3EA1, info)
++	INTEL_VGA_DEVICE(0x3EA1, info), \
++	INTEL_VGA_DEVICE(0x3EA4, info)
+ 
+ /* WHL/CFL U GT2 */
+ #define INTEL_WHL_U_GT2_IDS(info) \
+-	INTEL_VGA_DEVICE(0x3EA0, info)
++	INTEL_VGA_DEVICE(0x3EA0, info), \
++	INTEL_VGA_DEVICE(0x3EA3, info)
+ 
+ /* WHL/CFL U GT3 */
+ #define INTEL_WHL_U_GT3_IDS(info) \
+-	INTEL_VGA_DEVICE(0x3EA2, info), \
+-	INTEL_VGA_DEVICE(0x3EA3, info), \
+-	INTEL_VGA_DEVICE(0x3EA4, info)
++	INTEL_VGA_DEVICE(0x3EA2, info)
+ 
+ #define INTEL_CFL_IDS(info)	   \
+ 	INTEL_CFL_S_GT1_IDS(info), \
+ 	INTEL_CFL_S_GT2_IDS(info), \
++	INTEL_CFL_H_GT1_IDS(info), \
+ 	INTEL_CFL_H_GT2_IDS(info), \
+ 	INTEL_CFL_U_GT2_IDS(info), \
+ 	INTEL_CFL_U_GT3_IDS(info), \
+ 	INTEL_WHL_U_GT1_IDS(info), \
+ 	INTEL_WHL_U_GT2_IDS(info), \
+-	INTEL_WHL_U_GT3_IDS(info)
++	INTEL_WHL_U_GT3_IDS(info), \
++	INTEL_AML_CFL_GT2_IDS(info)
+ 
+ /* CNL */
+ #define INTEL_CNL_IDS(info) \
+@@ -452,9 +461,13 @@
+ 	INTEL_VGA_DEVICE(0x8A51, info), \
+ 	INTEL_VGA_DEVICE(0x8A5C, info), \
+ 	INTEL_VGA_DEVICE(0x8A5D, info), \
++	INTEL_VGA_DEVICE(0x8A59, info),	\
++	INTEL_VGA_DEVICE(0x8A58, info),	\
+ 	INTEL_VGA_DEVICE(0x8A52, info), \
+ 	INTEL_VGA_DEVICE(0x8A5A, info), \
+ 	INTEL_VGA_DEVICE(0x8A5B, info), \
++	INTEL_VGA_DEVICE(0x8A57, info), \
++	INTEL_VGA_DEVICE(0x8A56, info), \
+ 	INTEL_VGA_DEVICE(0x8A71, info), \
+ 	INTEL_VGA_DEVICE(0x8A70, info)
+ 
+diff --git a/include/drm/intel-gtt.h b/include/drm/intel-gtt.h
+index 2324c84a2..71d81923e 100644
+--- a/include/drm/intel-gtt.h
++++ b/include/drm/intel-gtt.h
+@@ -4,6 +4,9 @@
+ #ifndef _DRM_INTEL_GTT_H
+ #define	_DRM_INTEL_GTT_H
+ 
++#include <linux/agp_backend.h>
++#include <linux/kernel.h>
++
+ void intel_gtt_get(u64 *gtt_total,
+ 		   phys_addr_t *mappable_base,
+ 		   resource_size_t *mappable_end);

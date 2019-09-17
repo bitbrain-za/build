@@ -1,0 +1,12 @@
+diff --git a/Documentation/devicetree/bindings/vendor-prefixes.txt b/Documentation/devicetree/bindings/vendor-prefixes.txt
+index 2c3fc512e..8f6f26e67 100644
+--- a/Documentation/devicetree/bindings/vendor-prefixes.txt
++++ b/Documentation/devicetree/bindings/vendor-prefixes.txt
+@@ -131,6 +131,7 @@ fairphone	Fairphone B.V.
+ faraday	Faraday Technology Corporation
+ fastrax	Fastrax Oy
+ fcs	Fairchild Semiconductor
++feixin  Shenzhen Feixin Photoelectic Co., Ltd
+ firefly	Firefly
+ focaltech	FocalTech Systems Co.,Ltd
+ friendlyarm	Guangzhou FriendlyARM Computer Tech Co., Ltd

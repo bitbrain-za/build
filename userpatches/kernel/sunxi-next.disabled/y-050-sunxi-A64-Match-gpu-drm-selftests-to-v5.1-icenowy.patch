@@ -1,0 +1,1807 @@
+diff --git a/drivers/gpu/drm/selftests/drm_modeset_selftests.h b/drivers/gpu/drm/selftests/drm_modeset_selftests.h
+new file mode 100644
+index 000000000..464753746
+--- /dev/null
++++ b/drivers/gpu/drm/selftests/drm_modeset_selftests.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* List each unit test as selftest(name, function)
++ *
++ * The name is used as both an enum and expanded as igt__name to create
++ * a module parameter. It must be unique and legal for a C identifier.
++ *
++ * Tests are executed in order by igt/drm_selftests_helper
++ */
++selftest(check_plane_state, igt_check_plane_state)
++selftest(check_drm_format_block_width, igt_check_drm_format_block_width)
++selftest(check_drm_format_block_height, igt_check_drm_format_block_height)
++selftest(check_drm_format_min_pitch, igt_check_drm_format_min_pitch)
++selftest(check_drm_framebuffer_create, igt_check_drm_framebuffer_create)
++selftest(damage_iter_no_damage, igt_damage_iter_no_damage)
++selftest(damage_iter_no_damage_fractional_src, igt_damage_iter_no_damage_fractional_src)
++selftest(damage_iter_no_damage_src_moved, igt_damage_iter_no_damage_src_moved)
++selftest(damage_iter_no_damage_fractional_src_moved, igt_damage_iter_no_damage_fractional_src_moved)
++selftest(damage_iter_no_damage_not_visible, igt_damage_iter_no_damage_not_visible)
++selftest(damage_iter_no_damage_no_crtc, igt_damage_iter_no_damage_no_crtc)
++selftest(damage_iter_no_damage_no_fb, igt_damage_iter_no_damage_no_fb)
++selftest(damage_iter_simple_damage, igt_damage_iter_simple_damage)
++selftest(damage_iter_single_damage, igt_damage_iter_single_damage)
++selftest(damage_iter_single_damage_intersect_src, igt_damage_iter_single_damage_intersect_src)
++selftest(damage_iter_single_damage_outside_src, igt_damage_iter_single_damage_outside_src)
++selftest(damage_iter_single_damage_fractional_src, igt_damage_iter_single_damage_fractional_src)
++selftest(damage_iter_single_damage_intersect_fractional_src, igt_damage_iter_single_damage_intersect_fractional_src)
++selftest(damage_iter_single_damage_outside_fractional_src, igt_damage_iter_single_damage_outside_fractional_src)
++selftest(damage_iter_single_damage_src_moved, igt_damage_iter_single_damage_src_moved)
++selftest(damage_iter_single_damage_fractional_src_moved, igt_damage_iter_single_damage_fractional_src_moved)
++selftest(damage_iter_damage, igt_damage_iter_damage)
++selftest(damage_iter_damage_one_intersect, igt_damage_iter_damage_one_intersect)
++selftest(damage_iter_damage_one_outside, igt_damage_iter_damage_one_outside)
++selftest(damage_iter_damage_src_moved, igt_damage_iter_damage_src_moved)
++selftest(damage_iter_damage_not_visible, igt_damage_iter_damage_not_visible)
+diff --git a/drivers/gpu/drm/selftests/test-drm_damage_helper.c b/drivers/gpu/drm/selftests/test-drm_damage_helper.c
+new file mode 100644
+index 000000000..9d2bcdf8b
+--- /dev/null
++++ b/drivers/gpu/drm/selftests/test-drm_damage_helper.c
+@@ -0,0 +1,811 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Test case for drm_damage_helper functions
++ */
++
++#define pr_fmt(fmt) "drm_damage_helper: " fmt
++
++#include <drm/drm_damage_helper.h>
++
++#include "test-drm_modeset_common.h"
++
++static void set_plane_src(struct drm_plane_state *state, int x1, int y1, int x2,
++			  int y2)
++{
++	state->src.x1 = x1;
++	state->src.y1 = y1;
++	state->src.x2 = x2;
++	state->src.y2 = y2;
++}
++
++static void set_damage_clip(struct drm_mode_rect *r, int x1, int y1, int x2,
++			    int y2)
++{
++	r->x1 = x1;
++	r->y1 = y1;
++	r->x2 = x2;
++	r->y2 = y2;
++}
++
++static void set_damage_blob(struct drm_property_blob *damage_blob,
++			    struct drm_mode_rect *r, uint32_t size)
++{
++	damage_blob->length = size;
++	damage_blob->data = r;
++}
++
++static void set_plane_damage(struct drm_plane_state *state,
++			     struct drm_property_blob *damage_blob)
++{
++	state->fb_damage_clips = damage_blob;
++}
++
++static bool check_damage_clip(struct drm_plane_state *state, struct drm_rect *r,
++			      int x1, int y1, int x2, int y2)
++{
++	/*
++	 * Round down x1/y1 and round up x2/y2. This is because damage is not in
++	 * 16.16 fixed point so to catch all pixels.
++	 */
++	int src_x1 = state->src.x1 >> 16;
++	int src_y1 = state->src.y1 >> 16;
++	int src_x2 = (state->src.x2 >> 16) + !!(state->src.x2 & 0xFFFF);
++	int src_y2 = (state->src.y2 >> 16) + !!(state->src.y2 & 0xFFFF);
++
++	if (x1 >= x2 || y1 >= y2) {
++		pr_err("Cannot have damage clip with no dimension.\n");
++		return false;
++	}
++
++	if (x1 < src_x1 || y1 < src_y1 || x2 > src_x2 || y2 > src_y2) {
++		pr_err("Damage cannot be outside rounded plane src.\n");
++		return false;
++	}
++
++	if (r->x1 != x1 || r->y1 != y1 || r->x2 != x2 || r->y2 != y2) {
++		pr_err("Damage = %d %d %d %d\n", r->x1, r->y1, r->x2, r->y2);
++		return false;
++	}
++
++	return true;
++}
++
++int igt_damage_iter_no_damage(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	/* Plane src same as fb size. */
++	set_plane_src(&old_state, 0, 0, fb.width << 16, fb.height << 16);
++	set_plane_src(&state, 0, 0, fb.width << 16, fb.height << 16);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return plane src as damage.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 0, 0, 2048, 2048));
++
++	return 0;
++}
++
++int igt_damage_iter_no_damage_fractional_src(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	/* Plane src has fractional part. */
++	set_plane_src(&old_state, 0x3fffe, 0x3fffe,
++		      0x3fffe + (1024 << 16), 0x3fffe + (768 << 16));
++	set_plane_src(&state, 0x3fffe, 0x3fffe,
++		      0x3fffe + (1024 << 16), 0x3fffe + (768 << 16));
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return rounded off plane src as damage.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 3, 3, 1028, 772));
++
++	return 0;
++}
++
++int igt_damage_iter_no_damage_src_moved(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	/* Plane src moved since old plane state. */
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 10 << 16, 10 << 16,
++		      (10 + 1024) << 16, (10 + 768) << 16);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return plane src as damage.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 10, 10, 1034, 778));
++
++	return 0;
++}
++
++int igt_damage_iter_no_damage_fractional_src_moved(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	/* Plane src has fractional part and it moved since old plane state. */
++	set_plane_src(&old_state, 0x3fffe, 0x3fffe,
++		      0x3fffe + (1024 << 16), 0x3fffe + (768 << 16));
++	set_plane_src(&state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return plane src as damage.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 4, 4, 1029, 773));
++
++	return 0;
++}
++
++int igt_damage_iter_no_damage_not_visible(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = false,
++	};
++
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 0, 0, 1024 << 16, 768 << 16);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 0, "Should have no damage.");
++
++	return 0;
++}
++
++int igt_damage_iter_no_damage_no_crtc(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = 0,
++		.fb = &fb,
++	};
++
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 0, 0, 1024 << 16, 768 << 16);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 0, "Should have no damage.");
++
++	return 0;
++}
++
++int igt_damage_iter_no_damage_no_fb(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = 0,
++	};
++
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 0, 0, 1024 << 16, 768 << 16);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 0, "Should have no damage.");
++
++	return 0;
++}
++
++int igt_damage_iter_simple_damage(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 0, 0, 1024 << 16, 768 << 16);
++	/* Damage set to plane src */
++	set_damage_clip(&damage, 0, 0, 1024, 768);
++	set_damage_blob(&damage_blob, &damage, sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return damage when set.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 0, 0, 1024, 768));
++
++	return 0;
++}
++
++int igt_damage_iter_single_damage(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 0, 0, 1024 << 16, 768 << 16);
++	set_damage_clip(&damage, 256, 192, 768, 576);
++	set_damage_blob(&damage_blob, &damage, sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return damage when set.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 256, 192, 768, 576));
++
++	return 0;
++}
++
++int igt_damage_iter_single_damage_intersect_src(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 0, 0, 1024 << 16, 768 << 16);
++	/* Damage intersect with plane src. */
++	set_damage_clip(&damage, 256, 192, 1360, 768);
++	set_damage_blob(&damage_blob, &damage, sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return damage clipped to src.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 256, 192, 1024, 768));
++
++	return 0;
++}
++
++int igt_damage_iter_single_damage_outside_src(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 0, 0, 1024 << 16, 768 << 16);
++	/* Damage clip outside plane src */
++	set_damage_clip(&damage, 1360, 1360, 1380, 1380);
++	set_damage_blob(&damage_blob, &damage, sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 0, "Should have no damage.");
++
++	return 0;
++}
++
++int igt_damage_iter_single_damage_fractional_src(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	/* Plane src has fractional part. */
++	set_plane_src(&old_state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	set_plane_src(&state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	set_damage_clip(&damage, 10, 10, 256, 330);
++	set_damage_blob(&damage_blob, &damage, sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return damage when set.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 10, 10, 256, 330));
++
++	return 0;
++}
++
++int igt_damage_iter_single_damage_intersect_fractional_src(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	/* Plane src has fractional part. */
++	set_plane_src(&old_state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	set_plane_src(&state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	/* Damage intersect with plane src. */
++	set_damage_clip(&damage, 10, 1, 1360, 330);
++	set_damage_blob(&damage_blob, &damage, sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return damage clipped to rounded off src.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 10, 4, 1029, 330));
++
++	return 0;
++}
++
++int igt_damage_iter_single_damage_outside_fractional_src(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	/* Plane src has fractional part. */
++	set_plane_src(&old_state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	set_plane_src(&state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	/* Damage clip outside plane src */
++	set_damage_clip(&damage, 1360, 1360, 1380, 1380);
++	set_damage_blob(&damage_blob, &damage, sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 0, "Should have no damage.");
++
++	return 0;
++}
++
++int igt_damage_iter_single_damage_src_moved(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	/* Plane src moved since old plane state. */
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 10 << 16, 10 << 16,
++		      (10 + 1024) << 16, (10 + 768) << 16);
++	set_damage_clip(&damage, 20, 30, 256, 256);
++	set_damage_blob(&damage_blob, &damage, sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return plane src as damage.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 10, 10, 1034, 778));
++
++	return 0;
++}
++
++int igt_damage_iter_single_damage_fractional_src_moved(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage;
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	/* Plane src with fractional part moved since old plane state. */
++	set_plane_src(&old_state, 0x3fffe, 0x3fffe,
++		      0x3fffe + (1024 << 16), 0x3fffe + (768 << 16));
++	set_plane_src(&state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	/* Damage intersect with plane src. */
++	set_damage_clip(&damage, 20, 30, 1360, 256);
++	set_damage_blob(&damage_blob, &damage, sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return rounded off plane src as damage.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 4, 4, 1029, 773));
++
++	return 0;
++}
++
++int igt_damage_iter_damage(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage[2];
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 0, 0, 1024 << 16, 768 << 16);
++	/* 2 damage clips. */
++	set_damage_clip(&damage[0], 20, 30, 200, 180);
++	set_damage_clip(&damage[1], 240, 200, 280, 250);
++	set_damage_blob(&damage_blob, &damage[0], sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip) {
++		if (num_hits == 0)
++			FAIL_ON(!check_damage_clip(&state, &clip, 20, 30, 200, 180));
++		if (num_hits == 1)
++			FAIL_ON(!check_damage_clip(&state, &clip, 240, 200, 280, 250));
++		num_hits++;
++	}
++
++	FAIL(num_hits != 2, "Should return damage when set.");
++
++	return 0;
++}
++
++int igt_damage_iter_damage_one_intersect(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage[2];
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	set_plane_src(&old_state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	set_plane_src(&state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	/* 2 damage clips, one intersect plane src. */
++	set_damage_clip(&damage[0], 20, 30, 200, 180);
++	set_damage_clip(&damage[1], 2, 2, 1360, 1360);
++	set_damage_blob(&damage_blob, &damage[0], sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip) {
++		if (num_hits == 0)
++			FAIL_ON(!check_damage_clip(&state, &clip, 20, 30, 200, 180));
++		if (num_hits == 1)
++			FAIL_ON(!check_damage_clip(&state, &clip, 4, 4, 1029, 773));
++		num_hits++;
++	}
++
++	FAIL(num_hits != 2, "Should return damage when set.");
++
++	return 0;
++}
++
++int igt_damage_iter_damage_one_outside(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage[2];
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	set_plane_src(&old_state, 0, 0, 1024 << 16, 768 << 16);
++	set_plane_src(&state, 0, 0, 1024 << 16, 768 << 16);
++	/* 2 damage clips, one outside plane src. */
++	set_damage_clip(&damage[0], 1360, 1360, 1380, 1380);
++	set_damage_clip(&damage[1], 240, 200, 280, 250);
++	set_damage_blob(&damage_blob, &damage[0], sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return damage when set.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 240, 200, 280, 250));
++
++	return 0;
++}
++
++int igt_damage_iter_damage_src_moved(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage[2];
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = true,
++	};
++
++	set_plane_src(&old_state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	set_plane_src(&state, 0x3fffe, 0x3fffe,
++		      0x3fffe + (1024 << 16), 0x3fffe + (768 << 16));
++	/* 2 damage clips, one outside plane src. */
++	set_damage_clip(&damage[0], 1360, 1360, 1380, 1380);
++	set_damage_clip(&damage[1], 240, 200, 280, 250);
++	set_damage_blob(&damage_blob, &damage[0], sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 1, "Should return round off plane src as damage.");
++	FAIL_ON(!check_damage_clip(&state, &clip, 3, 3, 1028, 772));
++
++	return 0;
++}
++
++int igt_damage_iter_damage_not_visible(void *ignored)
++{
++	struct drm_atomic_helper_damage_iter iter;
++	struct drm_plane_state old_state;
++	struct drm_property_blob damage_blob;
++	struct drm_mode_rect damage[2];
++	struct drm_rect clip;
++	uint32_t num_hits = 0;
++
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++
++	struct drm_plane_state state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.visible = false,
++	};
++
++	set_plane_src(&old_state, 0x40002, 0x40002,
++		      0x40002 + (1024 << 16), 0x40002 + (768 << 16));
++	set_plane_src(&state, 0x3fffe, 0x3fffe,
++		      0x3fffe + (1024 << 16), 0x3fffe + (768 << 16));
++	/* 2 damage clips, one outside plane src. */
++	set_damage_clip(&damage[0], 1360, 1360, 1380, 1380);
++	set_damage_clip(&damage[1], 240, 200, 280, 250);
++	set_damage_blob(&damage_blob, &damage[0], sizeof(damage));
++	set_plane_damage(&state, &damage_blob);
++	drm_atomic_helper_damage_iter_init(&iter, &old_state, &state);
++	drm_atomic_for_each_plane_damage(&iter, &clip)
++		num_hits++;
++
++	FAIL(num_hits != 0, "Should not return any damage.");
++
++	return 0;
++}
+diff --git a/drivers/gpu/drm/selftests/test-drm_format.c b/drivers/gpu/drm/selftests/test-drm_format.c
+new file mode 100644
+index 000000000..c5e212afa
+--- /dev/null
++++ b/drivers/gpu/drm/selftests/test-drm_format.c
+@@ -0,0 +1,280 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Test cases for the drm_format functions
++ */
++
++#define pr_fmt(fmt) "drm_format: " fmt
++
++#include <linux/errno.h>
++#include <linux/kernel.h>
++
++#include <drm/drm_fourcc.h>
++
++#include "test-drm_modeset_common.h"
++
++int igt_check_drm_format_block_width(void *ignored)
++{
++	const struct drm_format_info *info = NULL;
++
++	/* Test invalid arguments */
++	FAIL_ON(drm_format_info_block_width(info, 0) != 0);
++	FAIL_ON(drm_format_info_block_width(info, -1) != 0);
++	FAIL_ON(drm_format_info_block_width(info, 1) != 0);
++
++	/* Test 1 plane format */
++	info = drm_format_info(DRM_FORMAT_XRGB4444);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_block_width(info, 0) != 1);
++	FAIL_ON(drm_format_info_block_width(info, 1) != 0);
++	FAIL_ON(drm_format_info_block_width(info, -1) != 0);
++
++	/* Test 2 planes format */
++	info = drm_format_info(DRM_FORMAT_NV12);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_block_width(info, 0) != 1);
++	FAIL_ON(drm_format_info_block_width(info, 1) != 1);
++	FAIL_ON(drm_format_info_block_width(info, 2) != 0);
++	FAIL_ON(drm_format_info_block_width(info, -1) != 0);
++
++	/* Test 3 planes format */
++	info = drm_format_info(DRM_FORMAT_YUV422);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_block_width(info, 0) != 1);
++	FAIL_ON(drm_format_info_block_width(info, 1) != 1);
++	FAIL_ON(drm_format_info_block_width(info, 2) != 1);
++	FAIL_ON(drm_format_info_block_width(info, 3) != 0);
++	FAIL_ON(drm_format_info_block_width(info, -1) != 0);
++
++	/* Test a tiled format */
++	info = drm_format_info(DRM_FORMAT_X0L0);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_block_width(info, 0) != 2);
++	FAIL_ON(drm_format_info_block_width(info, 1) != 0);
++	FAIL_ON(drm_format_info_block_width(info, -1) != 0);
++
++	return 0;
++}
++
++int igt_check_drm_format_block_height(void *ignored)
++{
++	const struct drm_format_info *info = NULL;
++
++	/* Test invalid arguments */
++	FAIL_ON(drm_format_info_block_height(info, 0) != 0);
++	FAIL_ON(drm_format_info_block_height(info, -1) != 0);
++	FAIL_ON(drm_format_info_block_height(info, 1) != 0);
++
++	/* Test 1 plane format */
++	info = drm_format_info(DRM_FORMAT_XRGB4444);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_block_height(info, 0) != 1);
++	FAIL_ON(drm_format_info_block_height(info, 1) != 0);
++	FAIL_ON(drm_format_info_block_height(info, -1) != 0);
++
++	/* Test 2 planes format */
++	info = drm_format_info(DRM_FORMAT_NV12);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_block_height(info, 0) != 1);
++	FAIL_ON(drm_format_info_block_height(info, 1) != 1);
++	FAIL_ON(drm_format_info_block_height(info, 2) != 0);
++	FAIL_ON(drm_format_info_block_height(info, -1) != 0);
++
++	/* Test 3 planes format */
++	info = drm_format_info(DRM_FORMAT_YUV422);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_block_height(info, 0) != 1);
++	FAIL_ON(drm_format_info_block_height(info, 1) != 1);
++	FAIL_ON(drm_format_info_block_height(info, 2) != 1);
++	FAIL_ON(drm_format_info_block_height(info, 3) != 0);
++	FAIL_ON(drm_format_info_block_height(info, -1) != 0);
++
++	/* Test a tiled format */
++	info = drm_format_info(DRM_FORMAT_X0L0);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_block_height(info, 0) != 2);
++	FAIL_ON(drm_format_info_block_height(info, 1) != 0);
++	FAIL_ON(drm_format_info_block_height(info, -1) != 0);
++
++	return 0;
++}
++
++int igt_check_drm_format_min_pitch(void *ignored)
++{
++	const struct drm_format_info *info = NULL;
++
++	/* Test invalid arguments */
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, -1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 0) != 0);
++
++	/* Test 1 plane 8 bits per pixel format */
++	info = drm_format_info(DRM_FORMAT_RGB332);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, -1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 0) != 0);
++
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1) != 1);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 2) != 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 640) != 640);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1024) != 1024);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1920) != 1920);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 4096) != 4096);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 671) != 671);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX) !=
++			(uint64_t)UINT_MAX);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, (UINT_MAX - 1)) !=
++			(uint64_t)(UINT_MAX - 1));
++
++	/* Test 1 plane 16 bits per pixel format */
++	info = drm_format_info(DRM_FORMAT_XRGB4444);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, -1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 0) != 0);
++
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1) != 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 2) != 4);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 640) != 1280);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1024) != 2048);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1920) != 3840);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 4096) != 8192);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 671) != 1342);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX) !=
++			(uint64_t)UINT_MAX * 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, (UINT_MAX - 1)) !=
++			(uint64_t)(UINT_MAX - 1) * 2);
++
++	/* Test 1 plane 24 bits per pixel format */
++	info = drm_format_info(DRM_FORMAT_RGB888);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, -1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 0) != 0);
++
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1) != 3);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 2) != 6);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 640) != 1920);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1024) != 3072);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1920) != 5760);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 4096) != 12288);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 671) != 2013);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX) !=
++			(uint64_t)UINT_MAX * 3);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX - 1) !=
++			(uint64_t)(UINT_MAX - 1) * 3);
++
++	/* Test 1 plane 32 bits per pixel format */
++	info = drm_format_info(DRM_FORMAT_ABGR8888);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, -1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 0) != 0);
++
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1) != 4);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 2) != 8);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 640) != 2560);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1024) != 4096);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1920) != 7680);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 4096) != 16384);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 671) != 2684);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX) !=
++			(uint64_t)UINT_MAX * 4);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX - 1) !=
++			(uint64_t)(UINT_MAX - 1) * 4);
++
++	/* Test 2 planes format */
++	info = drm_format_info(DRM_FORMAT_NV12);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, -1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, 0) != 0);
++
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1) != 1);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 1) != 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 2) != 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 1) != 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 640) != 640);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 320) != 640);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1024) != 1024);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 512) != 1024);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1920) != 1920);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 960) != 1920);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 4096) != 4096);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 2048) != 4096);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 671) != 671);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 336) != 672);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX) !=
++			(uint64_t)UINT_MAX);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, UINT_MAX / 2 + 1) !=
++			(uint64_t)UINT_MAX + 1);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, (UINT_MAX - 1)) !=
++			(uint64_t)(UINT_MAX - 1));
++	FAIL_ON(drm_format_info_min_pitch(info, 1, (UINT_MAX - 1) /  2) !=
++			(uint64_t)(UINT_MAX - 1));
++
++	/* Test 3 planes 8 bits per pixel format */
++	info = drm_format_info(DRM_FORMAT_YUV422);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, -1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 3, 0) != 0);
++
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1) != 1);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 1) != 1);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, 1) != 1);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 2) != 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 2) != 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, 2) != 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 640) != 640);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 320) != 320);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, 320) != 320);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1024) != 1024);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 512) != 512);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, 512) != 512);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1920) != 1920);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 960) != 960);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, 960) != 960);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 4096) != 4096);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 2048) != 2048);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, 2048) != 2048);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 671) != 671);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 336) != 336);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, 336) != 336);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX) !=
++			(uint64_t)UINT_MAX);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, UINT_MAX / 2 + 1) !=
++			(uint64_t)UINT_MAX / 2 + 1);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, UINT_MAX / 2 + 1) !=
++			(uint64_t)UINT_MAX / 2 + 1);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, (UINT_MAX - 1) / 2) !=
++			(uint64_t)(UINT_MAX - 1) / 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, (UINT_MAX - 1) / 2) !=
++			(uint64_t)(UINT_MAX - 1) / 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 2, (UINT_MAX - 1) / 2) !=
++			(uint64_t)(UINT_MAX - 1) / 2);
++
++	/* Test tiled format */
++	info = drm_format_info(DRM_FORMAT_X0L2);
++	FAIL_ON(!info);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, -1, 0) != 0);
++	FAIL_ON(drm_format_info_min_pitch(info, 1, 0) != 0);
++
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1) != 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 2) != 4);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 640) != 1280);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1024) != 2048);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 1920) != 3840);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 4096) != 8192);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, 671) != 1342);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX) !=
++			(uint64_t)UINT_MAX * 2);
++	FAIL_ON(drm_format_info_min_pitch(info, 0, UINT_MAX - 1) !=
++			(uint64_t)(UINT_MAX - 1) * 2);
++
++	return 0;
++}
+diff --git a/drivers/gpu/drm/selftests/test-drm_framebuffer.c b/drivers/gpu/drm/selftests/test-drm_framebuffer.c
+new file mode 100644
+index 000000000..a04d02dac
+--- /dev/null
++++ b/drivers/gpu/drm/selftests/test-drm_framebuffer.c
+@@ -0,0 +1,346 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Test cases for the drm_framebuffer functions
++ */
++
++#include <drm/drmP.h>
++#include "../drm_crtc_internal.h"
++
++#include "test-drm_modeset_common.h"
++
++#define MIN_WIDTH 4
++#define MAX_WIDTH 4096
++#define MIN_HEIGHT 4
++#define MAX_HEIGHT 4096
++
++struct drm_framebuffer_test {
++	int buffer_created;
++	struct drm_mode_fb_cmd2 cmd;
++	const char *name;
++};
++
++static struct drm_framebuffer_test createbuffer_tests[] = {
++{ .buffer_created = 1, .name = "ABGR8888 normal sizes",
++	.cmd = { .width = 600, .height = 600, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .pitches = { 4 * 600, 0, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "ABGR8888 max sizes",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .pitches = { 4 * MAX_WIDTH, 0, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "ABGR8888 pitch greater than min required",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .pitches = { 4 * MAX_WIDTH + 1, 0, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "ABGR8888 pitch less than min required",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .pitches = { 4 * MAX_WIDTH - 1, 0, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "ABGR8888 Invalid width",
++	.cmd = { .width = MAX_WIDTH + 1, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .pitches = { 4 * (MAX_WIDTH + 1), 0, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "ABGR8888 Invalid buffer handle",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 0, 0, 0 }, .pitches = { 4 * MAX_WIDTH, 0, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "No pixel format",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = 0,
++		 .handles = { 1, 0, 0 }, .pitches = { 4 * MAX_WIDTH, 0, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "ABGR8888 Width 0",
++	.cmd = { .width = 0, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .pitches = { 4 * MAX_WIDTH, 0, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "ABGR8888 Height 0",
++	.cmd = { .width = MAX_WIDTH, .height = 0, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .pitches = { 4 * MAX_WIDTH, 0, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "ABGR8888 Out of bound height * pitch combination",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .offsets = { UINT_MAX - 1, 0, 0 }, .pitches = { 4 * MAX_WIDTH, 0, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "ABGR8888 Large buffer offset",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .offsets = { UINT_MAX / 2, 0, 0 }, .pitches = { 4 * MAX_WIDTH, 0, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "ABGR8888 Set DRM_MODE_FB_MODIFIERS without modifiers",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .offsets = { UINT_MAX / 2, 0, 0 },
++		 .pitches = { 4 * MAX_WIDTH, 0, 0 }, .flags = DRM_MODE_FB_MODIFIERS,
++	}
++},
++{ .buffer_created = 1, .name = "ABGR8888 Valid buffer modifier",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .offsets = { UINT_MAX / 2, 0, 0 }, .pitches = { 4 * MAX_WIDTH, 0, 0 },
++		 .flags = DRM_MODE_FB_MODIFIERS, .modifier = { AFBC_FORMAT_MOD_YTR, 0, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "ABGR8888 Invalid buffer modifier(DRM_FORMAT_MOD_SAMSUNG_64_32_TILE)",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .offsets = { UINT_MAX / 2, 0, 0 },
++		 .pitches = { 4 * MAX_WIDTH, 0, 0 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .modifier = { DRM_FORMAT_MOD_SAMSUNG_64_32_TILE, 0, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "ABGR8888 Extra pitches without DRM_MODE_FB_MODIFIERS",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .offsets = { UINT_MAX / 2, 0, 0 },
++		 .pitches = { 4 * MAX_WIDTH, 4 * MAX_WIDTH, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "ABGR8888 Extra pitches with DRM_MODE_FB_MODIFIERS",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_ABGR8888,
++		 .handles = { 1, 0, 0 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .pitches = { 4 * MAX_WIDTH, 4 * MAX_WIDTH, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "NV12 Normal sizes",
++	.cmd = { .width = 600, .height = 600, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 0 }, .pitches = { 600, 600, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "NV12 Max sizes",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 0 }, .pitches = { MAX_WIDTH, MAX_WIDTH, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "NV12 Invalid pitch",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 0 }, .pitches = { MAX_WIDTH, MAX_WIDTH - 1, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "NV12 Invalid modifier/misssing DRM_MODE_FB_MODIFIERS flag",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 0 }, .modifier = { DRM_FORMAT_MOD_SAMSUNG_64_32_TILE, 0, 0 },
++		 .pitches = { MAX_WIDTH, MAX_WIDTH, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "NV12 different  modifier per-plane",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 0 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .modifier = { DRM_FORMAT_MOD_SAMSUNG_64_32_TILE, 0, 0 },
++		 .pitches = { MAX_WIDTH, MAX_WIDTH, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "NV12 with DRM_FORMAT_MOD_SAMSUNG_64_32_TILE",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 0 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .modifier = { DRM_FORMAT_MOD_SAMSUNG_64_32_TILE, DRM_FORMAT_MOD_SAMSUNG_64_32_TILE, 0 },
++		 .pitches = { MAX_WIDTH, MAX_WIDTH, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "NV12 Valid modifiers without DRM_MODE_FB_MODIFIERS",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 0 }, .modifier = { DRM_FORMAT_MOD_SAMSUNG_64_32_TILE,
++						       DRM_FORMAT_MOD_SAMSUNG_64_32_TILE, 0 },
++		 .pitches = { MAX_WIDTH, MAX_WIDTH, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "NV12 Modifier for inexistent plane",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 0 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .modifier = { DRM_FORMAT_MOD_SAMSUNG_64_32_TILE, DRM_FORMAT_MOD_SAMSUNG_64_32_TILE,
++			       DRM_FORMAT_MOD_SAMSUNG_64_32_TILE },
++		 .pitches = { MAX_WIDTH, MAX_WIDTH, 0 },
++	}
++},
++{ .buffer_created = 0, .name = "NV12 Handle for inexistent plane",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 1 }, .flags = DRM_MODE_FB_MODIFIERS, .pitches = { MAX_WIDTH, MAX_WIDTH, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "NV12 Handle for inexistent plane without DRM_MODE_FB_MODIFIERS",
++	.cmd = { .width = 600, .height = 600, .pixel_format = DRM_FORMAT_NV12,
++		 .handles = { 1, 1, 1 }, .pitches = { 600, 600, 600 },
++	}
++},
++{ .buffer_created = 1, .name = "YVU420 Normal sizes",
++	.cmd = { .width = 600, .height = 600, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .pitches = { 600, 300, 300 },
++	}
++},
++{ .buffer_created = 1, .name = "YVU420 DRM_MODE_FB_MODIFIERS set without modifier",
++	.cmd = { .width = 600, .height = 600, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .pitches = { 600, 300, 300 },
++	}
++},
++{ .buffer_created = 1, .name = "YVU420 Max sizes",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2),
++						      DIV_ROUND_UP(MAX_WIDTH, 2) },
++	}
++},
++{ .buffer_created = 0, .name = "YVU420 Invalid pitch",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2) - 1,
++						      DIV_ROUND_UP(MAX_WIDTH, 2) },
++	}
++},
++{ .buffer_created = 1, .name = "YVU420 Different pitches",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2) + 1,
++						      DIV_ROUND_UP(MAX_WIDTH, 2) + 7 },
++	}
++},
++{ .buffer_created = 1, .name = "YVU420 Different buffer offsets/pitches",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .offsets = { MAX_WIDTH, MAX_WIDTH  + MAX_WIDTH * MAX_HEIGHT,
++						      MAX_WIDTH  + 2 * MAX_WIDTH * MAX_HEIGHT },
++		 .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2) + 1, DIV_ROUND_UP(MAX_WIDTH, 2) + 7 },
++	}
++},
++{ .buffer_created = 0, .name = "YVU420 Modifier set just for plane 0, without DRM_MODE_FB_MODIFIERS",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .modifier = { AFBC_FORMAT_MOD_SPARSE, 0, 0 },
++		 .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2), DIV_ROUND_UP(MAX_WIDTH, 2) },
++	}
++},
++{ .buffer_created = 0, .name = "YVU420 Modifier set just for planes 0, 1, without DRM_MODE_FB_MODIFIERS",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .modifier = { AFBC_FORMAT_MOD_SPARSE, AFBC_FORMAT_MOD_SPARSE, 0 },
++		 .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2), DIV_ROUND_UP(MAX_WIDTH, 2) },
++	}
++},
++{ .buffer_created = 0, .name = "YVU420 Modifier set just for plane 0, 1, with DRM_MODE_FB_MODIFIERS",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .modifier = { AFBC_FORMAT_MOD_SPARSE, AFBC_FORMAT_MOD_SPARSE, 0 },
++		 .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2), DIV_ROUND_UP(MAX_WIDTH, 2) },
++	}
++},
++{ .buffer_created = 1, .name = "YVU420 Valid modifier",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .modifier = { AFBC_FORMAT_MOD_SPARSE, AFBC_FORMAT_MOD_SPARSE, AFBC_FORMAT_MOD_SPARSE },
++		 .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2), DIV_ROUND_UP(MAX_WIDTH, 2) },
++	}
++},
++{ .buffer_created = 0, .name = "YVU420 Different modifiers per plane",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .modifier = { AFBC_FORMAT_MOD_SPARSE, AFBC_FORMAT_MOD_SPARSE | AFBC_FORMAT_MOD_YTR,
++			       AFBC_FORMAT_MOD_SPARSE },
++		 .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2), DIV_ROUND_UP(MAX_WIDTH, 2) },
++	}
++},
++{ .buffer_created = 0, .name = "YVU420 Modifier for inexistent plane",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_YVU420,
++		 .handles = { 1, 1, 1 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .modifier = { AFBC_FORMAT_MOD_SPARSE, AFBC_FORMAT_MOD_SPARSE, AFBC_FORMAT_MOD_SPARSE,
++			       AFBC_FORMAT_MOD_SPARSE },
++		 .pitches = { MAX_WIDTH, DIV_ROUND_UP(MAX_WIDTH, 2), DIV_ROUND_UP(MAX_WIDTH, 2) },
++	}
++},
++{ .buffer_created = 1, .name = "X0L2 Normal sizes",
++	.cmd = { .width = 600, .height = 600, .pixel_format = DRM_FORMAT_X0L2,
++		 .handles = { 1, 0, 0 }, .pitches = { 1200, 0, 0 }
++	}
++},
++{ .buffer_created = 1, .name = "X0L2 Max sizes",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_X0L2,
++		 .handles = { 1, 0, 0 }, .pitches = { 2 * MAX_WIDTH, 0, 0 }
++	}
++},
++{ .buffer_created = 0, .name = "X0L2 Invalid pitch",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_X0L2,
++		 .handles = { 1, 0, 0 }, .pitches = { 2 * MAX_WIDTH - 1, 0, 0 }
++	}
++},
++{ .buffer_created = 1, .name = "X0L2 Pitch greater than minimum required",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_X0L2,
++		 .handles = { 1, 0, 0 }, .pitches = { 2 * MAX_WIDTH + 1, 0, 0 }
++	}
++},
++{ .buffer_created = 0, .name = "X0L2 Handle for inexistent plane",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_X0L2,
++		 .handles = { 1, 1, 0 }, .flags = DRM_MODE_FB_MODIFIERS,
++		 .pitches = { 2 * MAX_WIDTH + 1, 0, 0 }
++	}
++},
++{ .buffer_created = 1, .name = "X0L2 Offset for inexistent plane, without DRM_MODE_FB_MODIFIERS set",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_X0L2,
++		 .handles = { 1, 0, 0 }, .offsets = { 0, 0, 3 },
++		 .pitches = { 2 * MAX_WIDTH + 1, 0, 0 }
++	}
++},
++{ .buffer_created = 0, .name = "X0L2 Modifier without DRM_MODE_FB_MODIFIERS set",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_X0L2,
++		 .handles = { 1, 0, 0 }, .pitches = { 2 * MAX_WIDTH + 1, 0, 0 },
++		 .modifier = { AFBC_FORMAT_MOD_SPARSE, 0, 0 },
++	}
++},
++{ .buffer_created = 1, .name = "X0L2 Valid modifier",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT, .pixel_format = DRM_FORMAT_X0L2,
++		 .handles = { 1, 0, 0 }, .pitches = { 2 * MAX_WIDTH + 1, 0, 0 },
++		 .modifier = { AFBC_FORMAT_MOD_SPARSE, 0, 0 }, .flags = DRM_MODE_FB_MODIFIERS,
++	}
++},
++{ .buffer_created = 0, .name = "X0L2 Modifier for inexistent plane",
++	.cmd = { .width = MAX_WIDTH, .height = MAX_HEIGHT,
++		 .pixel_format = DRM_FORMAT_X0L2, .handles = { 1, 0, 0 },
++		 .pitches = { 2 * MAX_WIDTH + 1, 0, 0 },
++		 .modifier = { AFBC_FORMAT_MOD_SPARSE, AFBC_FORMAT_MOD_SPARSE, 0 },
++		 .flags = DRM_MODE_FB_MODIFIERS,
++	}
++},
++};
++
++static struct drm_framebuffer *fb_create_mock(struct drm_device *dev,
++					      struct drm_file *file_priv,
++					      const struct drm_mode_fb_cmd2 *mode_cmd)
++{
++	int *buffer_created = dev->dev_private;
++	*buffer_created = 1;
++	return ERR_PTR(-EINVAL);
++}
++
++static struct drm_mode_config_funcs mock_config_funcs = {
++	.fb_create = fb_create_mock,
++};
++
++static struct drm_device mock_drm_device = {
++	.mode_config = {
++		.min_width = MIN_WIDTH,
++		.max_width = MAX_WIDTH,
++		.min_height = MIN_HEIGHT,
++		.max_height = MAX_HEIGHT,
++		.allow_fb_modifiers = true,
++		.funcs = &mock_config_funcs,
++	},
++};
++
++static int execute_drm_mode_fb_cmd2(struct drm_mode_fb_cmd2 *r)
++{
++	int buffer_created = 0;
++	struct drm_framebuffer *fb;
++
++	mock_drm_device.dev_private = &buffer_created;
++	fb = drm_internal_framebuffer_create(&mock_drm_device, r, NULL);
++	return buffer_created;
++}
++
++int igt_check_drm_framebuffer_create(void *ignored)
++{
++	int i = 0;
++
++	for (i = 0; i < ARRAY_SIZE(createbuffer_tests); i++) {
++		FAIL(createbuffer_tests[i].buffer_created !=
++				execute_drm_mode_fb_cmd2(&createbuffer_tests[i].cmd),
++		     "Test %d: \"%s\" failed\n", i, createbuffer_tests[i].name);
++	}
++
++	return 0;
++}
+diff --git a/drivers/gpu/drm/selftests/test-drm_modeset_common.c b/drivers/gpu/drm/selftests/test-drm_modeset_common.c
+new file mode 100644
+index 000000000..2a7f93774
+--- /dev/null
++++ b/drivers/gpu/drm/selftests/test-drm_modeset_common.c
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Common file for modeset selftests.
++ */
++
++#include <linux/module.h>
++
++#include "test-drm_modeset_common.h"
++
++#define TESTS "drm_modeset_selftests.h"
++#include "drm_selftest.h"
++
++#include "drm_selftest.c"
++
++static int __init test_drm_modeset_init(void)
++{
++	int err;
++
++	err = run_selftests(selftests, ARRAY_SIZE(selftests), NULL);
++
++	return err > 0 ? 0 : err;
++}
++
++static void __exit test_drm_modeset_exit(void)
++{
++}
++
++module_init(test_drm_modeset_init);
++module_exit(test_drm_modeset_exit);
++
++MODULE_AUTHOR("Intel Corporation");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/selftests/test-drm_modeset_common.h b/drivers/gpu/drm/selftests/test-drm_modeset_common.h
+new file mode 100644
+index 000000000..8c76f09c1
+--- /dev/null
++++ b/drivers/gpu/drm/selftests/test-drm_modeset_common.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++
++#ifndef __TEST_DRM_MODESET_COMMON_H__
++#define __TEST_DRM_MODESET_COMMON_H__
++
++#define FAIL(test, msg, ...) \
++	do { \
++		if (test) { \
++			pr_err("%s/%u: " msg, __FUNCTION__, __LINE__, ##__VA_ARGS__); \
++			return -EINVAL; \
++		} \
++	} while (0)
++
++#define FAIL_ON(x) FAIL((x), "%s", "FAIL_ON(" __stringify(x) ")\n")
++
++int igt_check_plane_state(void *ignored);
++int igt_check_drm_format_block_width(void *ignored);
++int igt_check_drm_format_block_height(void *ignored);
++int igt_check_drm_format_min_pitch(void *ignored);
++int igt_check_drm_framebuffer_create(void *ignored);
++int igt_damage_iter_no_damage(void *ignored);
++int igt_damage_iter_no_damage_fractional_src(void *ignored);
++int igt_damage_iter_no_damage_src_moved(void *ignored);
++int igt_damage_iter_no_damage_fractional_src_moved(void *ignored);
++int igt_damage_iter_no_damage_not_visible(void *ignored);
++int igt_damage_iter_no_damage_no_crtc(void *ignored);
++int igt_damage_iter_no_damage_no_fb(void *ignored);
++int igt_damage_iter_simple_damage(void *ignored);
++int igt_damage_iter_single_damage(void *ignored);
++int igt_damage_iter_single_damage_intersect_src(void *ignored);
++int igt_damage_iter_single_damage_outside_src(void *ignored);
++int igt_damage_iter_single_damage_fractional_src(void *ignored);
++int igt_damage_iter_single_damage_intersect_fractional_src(void *ignored);
++int igt_damage_iter_single_damage_outside_fractional_src(void *ignored);
++int igt_damage_iter_single_damage_src_moved(void *ignored);
++int igt_damage_iter_single_damage_fractional_src_moved(void *ignored);
++int igt_damage_iter_damage(void *ignored);
++int igt_damage_iter_damage_one_intersect(void *ignored);
++int igt_damage_iter_damage_one_outside(void *ignored);
++int igt_damage_iter_damage_src_moved(void *ignored);
++int igt_damage_iter_damage_not_visible(void *ignored);
++
++#endif
+diff --git a/drivers/gpu/drm/selftests/test-drm_plane_helper.c b/drivers/gpu/drm/selftests/test-drm_plane_helper.c
+new file mode 100644
+index 000000000..0a9553f51
+--- /dev/null
++++ b/drivers/gpu/drm/selftests/test-drm_plane_helper.c
+@@ -0,0 +1,219 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Test cases for the drm_plane_helper functions
++ */
++
++#define pr_fmt(fmt) "drm_plane_helper: " fmt
++
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_plane_helper.h>
++#include <drm/drm_modes.h>
++
++#include "test-drm_modeset_common.h"
++
++static void set_src(struct drm_plane_state *plane_state,
++		    unsigned src_x, unsigned src_y,
++		    unsigned src_w, unsigned src_h)
++{
++	plane_state->src_x = src_x;
++	plane_state->src_y = src_y;
++	plane_state->src_w = src_w;
++	plane_state->src_h = src_h;
++}
++
++static bool check_src_eq(struct drm_plane_state *plane_state,
++			 unsigned src_x, unsigned src_y,
++			 unsigned src_w, unsigned src_h)
++{
++	if (plane_state->src.x1 < 0) {
++		pr_err("src x coordinate %x should never be below 0.\n", plane_state->src.x1);
++		drm_rect_debug_print("src: ", &plane_state->src, true);
++		return false;
++	}
++	if (plane_state->src.y1 < 0) {
++		pr_err("src y coordinate %x should never be below 0.\n", plane_state->src.y1);
++		drm_rect_debug_print("src: ", &plane_state->src, true);
++		return false;
++	}
++
++	if (plane_state->src.x1 != src_x ||
++	    plane_state->src.y1 != src_y ||
++	    drm_rect_width(&plane_state->src) != src_w ||
++	    drm_rect_height(&plane_state->src) != src_h) {
++		drm_rect_debug_print("src: ", &plane_state->src, true);
++		return false;
++	}
++
++	return true;
++}
++
++static void set_crtc(struct drm_plane_state *plane_state,
++		     int crtc_x, int crtc_y,
++		     unsigned crtc_w, unsigned crtc_h)
++{
++	plane_state->crtc_x = crtc_x;
++	plane_state->crtc_y = crtc_y;
++	plane_state->crtc_w = crtc_w;
++	plane_state->crtc_h = crtc_h;
++}
++
++static bool check_crtc_eq(struct drm_plane_state *plane_state,
++			  int crtc_x, int crtc_y,
++			  unsigned crtc_w, unsigned crtc_h)
++{
++	if (plane_state->dst.x1 != crtc_x ||
++	    plane_state->dst.y1 != crtc_y ||
++	    drm_rect_width(&plane_state->dst) != crtc_w ||
++	    drm_rect_height(&plane_state->dst) != crtc_h) {
++		drm_rect_debug_print("dst: ", &plane_state->dst, false);
++
++		return false;
++	}
++
++	return true;
++}
++
++int igt_check_plane_state(void *ignored)
++{
++	int ret;
++
++	const struct drm_crtc_state crtc_state = {
++		.crtc = ZERO_SIZE_PTR,
++		.enable = true,
++		.active = true,
++		.mode = {
++			DRM_MODE("1024x768", 0, 65000, 1024, 1048,
++				1184, 1344, 0, 768, 771, 777, 806, 0,
++				DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC)
++		},
++	};
++	struct drm_framebuffer fb = {
++		.width = 2048,
++		.height = 2048
++	};
++	struct drm_plane_state plane_state = {
++		.crtc = ZERO_SIZE_PTR,
++		.fb = &fb,
++		.rotation = DRM_MODE_ROTATE_0
++	};
++
++	/* Simple clipping, no scaling. */
++	set_src(&plane_state, 0, 0, fb.width << 16, fb.height << 16);
++	set_crtc(&plane_state, 0, 0, fb.width, fb.height);
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  false, false);
++	FAIL(ret < 0, "Simple clipping check should pass\n");
++	FAIL_ON(!plane_state.visible);
++	FAIL_ON(!check_src_eq(&plane_state, 0, 0, 1024 << 16, 768 << 16));
++	FAIL_ON(!check_crtc_eq(&plane_state, 0, 0, 1024, 768));
++
++	/* Rotated clipping + reflection, no scaling. */
++	plane_state.rotation = DRM_MODE_ROTATE_90 | DRM_MODE_REFLECT_X;
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  false, false);
++	FAIL(ret < 0, "Rotated clipping check should pass\n");
++	FAIL_ON(!plane_state.visible);
++	FAIL_ON(!check_src_eq(&plane_state, 0, 0, 768 << 16, 1024 << 16));
++	FAIL_ON(!check_crtc_eq(&plane_state, 0, 0, 1024, 768));
++	plane_state.rotation = DRM_MODE_ROTATE_0;
++
++	/* Check whether positioning works correctly. */
++	set_src(&plane_state, 0, 0, 1023 << 16, 767 << 16);
++	set_crtc(&plane_state, 0, 0, 1023, 767);
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  false, false);
++	FAIL(!ret, "Should not be able to position on the crtc with can_position=false\n");
++
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  true, false);
++	FAIL(ret < 0, "Simple positioning should work\n");
++	FAIL_ON(!plane_state.visible);
++	FAIL_ON(!check_src_eq(&plane_state, 0, 0, 1023 << 16, 767 << 16));
++	FAIL_ON(!check_crtc_eq(&plane_state, 0, 0, 1023, 767));
++
++	/* Simple scaling tests. */
++	set_src(&plane_state, 0, 0, 512 << 16, 384 << 16);
++	set_crtc(&plane_state, 0, 0, 1024, 768);
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  0x8001,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  false, false);
++	FAIL(!ret, "Upscaling out of range should fail.\n");
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  0x8000,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  false, false);
++	FAIL(ret < 0, "Upscaling exactly 2x should work\n");
++	FAIL_ON(!plane_state.visible);
++	FAIL_ON(!check_src_eq(&plane_state, 0, 0, 512 << 16, 384 << 16));
++	FAIL_ON(!check_crtc_eq(&plane_state, 0, 0, 1024, 768));
++
++	set_src(&plane_state, 0, 0, 2048 << 16, 1536 << 16);
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  0x1ffff, false, false);
++	FAIL(!ret, "Downscaling out of range should fail.\n");
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  0x20000, false, false);
++	FAIL(ret < 0, "Should succeed with exact scaling limit\n");
++	FAIL_ON(!plane_state.visible);
++	FAIL_ON(!check_src_eq(&plane_state, 0, 0, 2048 << 16, 1536 << 16));
++	FAIL_ON(!check_crtc_eq(&plane_state, 0, 0, 1024, 768));
++
++	/* Testing rounding errors. */
++	set_src(&plane_state, 0, 0, 0x40001, 0x40001);
++	set_crtc(&plane_state, 1022, 766, 4, 4);
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  0x10001,
++						  true, false);
++	FAIL(ret < 0, "Should succeed by clipping to exact multiple");
++	FAIL_ON(!plane_state.visible);
++	FAIL_ON(!check_src_eq(&plane_state, 0, 0, 2 << 16, 2 << 16));
++	FAIL_ON(!check_crtc_eq(&plane_state, 1022, 766, 2, 2));
++
++	set_src(&plane_state, 0x20001, 0x20001, 0x4040001, 0x3040001);
++	set_crtc(&plane_state, -2, -2, 1028, 772);
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  0x10001,
++						  false, false);
++	FAIL(ret < 0, "Should succeed by clipping to exact multiple");
++	FAIL_ON(!plane_state.visible);
++	FAIL_ON(!check_src_eq(&plane_state, 0x40002, 0x40002, 1024 << 16, 768 << 16));
++	FAIL_ON(!check_crtc_eq(&plane_state, 0, 0, 1024, 768));
++
++	set_src(&plane_state, 0, 0, 0x3ffff, 0x3ffff);
++	set_crtc(&plane_state, 1022, 766, 4, 4);
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  0xffff,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  true, false);
++	FAIL(ret < 0, "Should succeed by clipping to exact multiple");
++	FAIL_ON(!plane_state.visible);
++	/* Should not be rounded to 0x20001, which would be upscaling. */
++	FAIL_ON(!check_src_eq(&plane_state, 0, 0, 2 << 16, 2 << 16));
++	FAIL_ON(!check_crtc_eq(&plane_state, 1022, 766, 2, 2));
++
++	set_src(&plane_state, 0x1ffff, 0x1ffff, 0x403ffff, 0x303ffff);
++	set_crtc(&plane_state, -2, -2, 1028, 772);
++	ret = drm_atomic_helper_check_plane_state(&plane_state, &crtc_state,
++						  0xffff,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  false, false);
++	FAIL(ret < 0, "Should succeed by clipping to exact multiple");
++	FAIL_ON(!plane_state.visible);
++	FAIL_ON(!check_src_eq(&plane_state, 0x3fffe, 0x3fffe, 1024 << 16, 768 << 16));
++	FAIL_ON(!check_crtc_eq(&plane_state, 0, 0, 1024, 768));
++
++	return 0;
++}

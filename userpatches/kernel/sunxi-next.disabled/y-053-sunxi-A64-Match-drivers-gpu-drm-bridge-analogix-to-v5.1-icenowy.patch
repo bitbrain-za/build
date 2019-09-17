@@ -1,0 +1,211 @@
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix-anx6345.c b/drivers/gpu/drm/bridge/analogix/analogix-anx6345.c
+index 81676407a..1b7009840 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix-anx6345.c
++++ b/drivers/gpu/drm/bridge/analogix/analogix-anx6345.c
+@@ -1,8 +1,17 @@
+-// SPDX-License-Identifier: GPL-2.0
+ /*
+  * Copyright(c) Icenowy Zheng <icenowy@aosc.io>
+  * Based on analogix-anx6345.c, which is:
+  *   Copyright(c) 2016, Analogix Semiconductor.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
+  */
+ #include <linux/delay.h>
+ #include <linux/err.h>
+@@ -23,6 +32,7 @@
+ #include <drm/drm_crtc_helper.h>
+ #include <drm/drm_dp_helper.h>
+ #include <drm/drm_edid.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include "analogix-i2c-dptx.h"
+ #include "analogix-i2c-txcommon.h"
+@@ -661,8 +671,8 @@ static void anx6345_bridge_disable(struct drm_bridge *bridge)
+ }
+ 
+ static void anx6345_bridge_mode_set(struct drm_bridge *bridge,
+-				    struct drm_display_mode *mode,
+-				    struct drm_display_mode *adjusted_mode)
++				    const struct drm_display_mode *mode,
++				    const struct drm_display_mode *adjusted_mode)
+ {
+ 	struct anx6345 *anx6345 = bridge_to_anx6345(bridge);
+ 
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix-anx78xx.c b/drivers/gpu/drm/bridge/analogix/analogix-anx78xx.c
+index bf8291d0d..4ab799580 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix-anx78xx.c
++++ b/drivers/gpu/drm/bridge/analogix/analogix-anx78xx.c
+@@ -31,9 +31,9 @@
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_dp_helper.h>
+ #include <drm/drm_edid.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include "analogix-anx78xx.h"
+ 
+@@ -938,8 +938,8 @@ static void anx78xx_bridge_disable(struct drm_bridge *bridge)
+ }
+ 
+ static void anx78xx_bridge_mode_set(struct drm_bridge *bridge,
+-				    struct drm_display_mode *mode,
+-				    struct drm_display_mode *adjusted_mode)
++				const struct drm_display_mode *mode,
++				const struct drm_display_mode *adjusted_mode)
+ {
+ 	struct anx78xx *anx78xx = bridge_to_anx78xx(bridge);
+ 	struct hdmi_avi_infoframe frame;
+@@ -950,8 +950,9 @@ static void anx78xx_bridge_mode_set(struct drm_bridge *bridge,
+ 
+ 	mutex_lock(&anx78xx->lock);
+ 
+-	err = drm_hdmi_avi_infoframe_from_display_mode(&frame, adjusted_mode,
+-						       false);
++	err = drm_hdmi_avi_infoframe_from_display_mode(&frame,
++						       &anx78xx->connector,
++						       adjusted_mode);
+ 	if (err) {
+ 		DRM_ERROR("Failed to setup AVI infoframe: %d\n", err);
+ 		goto unlock;
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix-i2c-dptx.c b/drivers/gpu/drm/bridge/analogix/analogix-i2c-dptx.c
+index 53b0e73d6..80bc4657b 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix-i2c-dptx.c
++++ b/drivers/gpu/drm/bridge/analogix/analogix-i2c-dptx.c
+@@ -1,9 +1,17 @@
+-// SPDX-License-Identifier: GPL-2.0
+ /*
+  * Copyright(c) 2017 Icenowy Zheng <icenowy@aosc.io>
+  *
+  * Based on analogix-anx78xx.c, which is:
+  *   Copyright(c) 2016, Analogix Semiconductor. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
+  */
+ 
+ #include <linux/module.h>
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix-i2c-dptx.h b/drivers/gpu/drm/bridge/analogix/analogix-i2c-dptx.h
+index b29a0b3bc..4b60c94a1 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix-i2c-dptx.h
++++ b/drivers/gpu/drm/bridge/analogix/analogix-i2c-dptx.h
+@@ -1,9 +1,17 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
+ /*
+  * Copyright(c) 2017 Icenowy Zheng <icenowy@aosc.io>
+  *
+  * Based on analogix-anx78xx.h, which is:
+  *   Copyright(c) 2016, Analogix Semiconductor. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
+  */
+ 
+ #ifndef _ANALOGIX_I2C_DPTX_H_
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix-i2c-txcommon.h b/drivers/gpu/drm/bridge/analogix/analogix-i2c-txcommon.h
+index 480c98a22..ea92c7228 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix-i2c-txcommon.h
++++ b/drivers/gpu/drm/bridge/analogix/analogix-i2c-txcommon.h
+@@ -1,9 +1,17 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
+ /*
+  * Copyright(c) 2017 Icenowy Zheng <icenowy@aosc.io>
+  *
+  * Based on analogix-anx78xx.h, which is:
+  *   Copyright(c) 2016, Analogix Semiconductor. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
+  */
+ 
+ #ifndef _ANALOGIX_I2C_TXCOMMON_H_
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c b/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c
+index d68986cea..225f5e5dd 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c
++++ b/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c
+@@ -26,8 +26,8 @@
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include <drm/bridge/analogix_dp.h>
+ 
+@@ -554,7 +554,7 @@ static int analogix_dp_process_clock_recovery(struct analogix_dp_device *dp)
+ 		if (retval < 0)
+ 			return retval;
+ 
+-		dev_info(dp->dev, "Link Training Clock Recovery success\n");
++		dev_dbg(dp->dev, "Link Training Clock Recovery success\n");
+ 		dp->link_train.lt_state = EQUALIZER_TRAINING;
+ 	} else {
+ 		for (lane = 0; lane < lane_count; lane++) {
+@@ -634,7 +634,7 @@ static int analogix_dp_process_equalizer_training(struct analogix_dp_device *dp)
+ 		if (retval < 0)
+ 			return retval;
+ 
+-		dev_info(dp->dev, "Link Training success!\n");
++		dev_dbg(dp->dev, "Link Training success!\n");
+ 		analogix_dp_get_link_bandwidth(dp, &reg);
+ 		dp->link_train.link_rate = reg;
+ 		dev_dbg(dp->dev, "final bandwidth = %.2x\n",
+@@ -1219,12 +1219,12 @@ static int analogix_dp_bridge_attach(struct drm_bridge *bridge)
+ 	 * plat_data->attch return, that's why we record the connector
+ 	 * point after plat attached.
+ 	 */
+-	 if (dp->plat_data->attach) {
+-		 ret = dp->plat_data->attach(dp->plat_data, bridge, connector);
+-		 if (ret) {
+-			 DRM_ERROR("Failed at platform attch func\n");
+-			 return ret;
+-		 }
++	if (dp->plat_data->attach) {
++		ret = dp->plat_data->attach(dp->plat_data, bridge, connector);
++		if (ret) {
++			DRM_ERROR("Failed at platform attach func\n");
++			return ret;
++		}
+ 	}
+ 
+ 	if (dp->plat_data->panel) {
+@@ -1361,8 +1361,8 @@ static void analogix_dp_bridge_disable(struct drm_bridge *bridge)
+ }
+ 
+ static void analogix_dp_bridge_mode_set(struct drm_bridge *bridge,
+-					struct drm_display_mode *orig_mode,
+-					struct drm_display_mode *mode)
++				const struct drm_display_mode *orig_mode,
++				const struct drm_display_mode *mode)
+ {
+ 	struct analogix_dp_device *dp = bridge->driver_private;
+ 	struct drm_display_info *display_info = &dp->connector.display_info;

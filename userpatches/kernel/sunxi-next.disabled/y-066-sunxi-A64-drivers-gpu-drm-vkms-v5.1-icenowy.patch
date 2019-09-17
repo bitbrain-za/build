@@ -1,0 +1,1108 @@
+diff --git a/drivers/gpu/drm/vkms/Makefile b/drivers/gpu/drm/vkms/Makefile
+index 986297da5..37966914f 100644
+--- a/drivers/gpu/drm/vkms/Makefile
++++ b/drivers/gpu/drm/vkms/Makefile
+@@ -1,3 +1,3 @@
+-vkms-y := vkms_drv.o vkms_plane.o vkms_output.o vkms_crtc.o vkms_gem.o
++vkms-y := vkms_drv.o vkms_plane.o vkms_output.o vkms_crtc.o vkms_gem.o vkms_crc.o
+ 
+ obj-$(CONFIG_DRM_VKMS) += vkms.o
+diff --git a/drivers/gpu/drm/vkms/vkms_crc.c b/drivers/gpu/drm/vkms/vkms_crc.c
+new file mode 100644
+index 000000000..d7b409a3c
+--- /dev/null
++++ b/drivers/gpu/drm/vkms/vkms_crc.c
+@@ -0,0 +1,263 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++#include "vkms_drv.h"
++#include <linux/crc32.h>
++#include <drm/drm_atomic.h>
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++
++/**
++ * compute_crc - Compute CRC value on output frame
++ *
++ * @vaddr_out: address to final framebuffer
++ * @crc_out: framebuffer's metadata
++ *
++ * returns CRC value computed using crc32 on the visible portion of
++ * the final framebuffer at vaddr_out
++ */
++static uint32_t compute_crc(void *vaddr_out, struct vkms_crc_data *crc_out)
++{
++	int i, j, src_offset;
++	int x_src = crc_out->src.x1 >> 16;
++	int y_src = crc_out->src.y1 >> 16;
++	int h_src = drm_rect_height(&crc_out->src) >> 16;
++	int w_src = drm_rect_width(&crc_out->src) >> 16;
++	u32 crc = 0;
++
++	for (i = y_src; i < y_src + h_src; ++i) {
++		for (j = x_src; j < x_src + w_src; ++j) {
++			src_offset = crc_out->offset
++				     + (i * crc_out->pitch)
++				     + (j * crc_out->cpp);
++			/* XRGB format ignores Alpha channel */
++			memset(vaddr_out + src_offset + 24, 0,  8);
++			crc = crc32_le(crc, vaddr_out + src_offset,
++				       sizeof(u32));
++		}
++	}
++
++	return crc;
++}
++
++/**
++ * blend - belnd value at vaddr_src with value at vaddr_dst
++ * @vaddr_dst: destination address
++ * @vaddr_src: source address
++ * @crc_dst: destination framebuffer's metadata
++ * @crc_src: source framebuffer's metadata
++ *
++ * Blend value at vaddr_src with value at vaddr_dst.
++ * Currently, this function write value at vaddr_src on value
++ * at vaddr_dst using buffer's metadata to locate the new values
++ * from vaddr_src and their distenation at vaddr_dst.
++ *
++ * Todo: Use the alpha value to blend vaddr_src with vaddr_dst
++ *	 instead of overwriting it.
++ */
++static void blend(void *vaddr_dst, void *vaddr_src,
++		  struct vkms_crc_data *crc_dst,
++		  struct vkms_crc_data *crc_src)
++{
++	int i, j, j_dst, i_dst;
++	int offset_src, offset_dst;
++
++	int x_src = crc_src->src.x1 >> 16;
++	int y_src = crc_src->src.y1 >> 16;
++
++	int x_dst = crc_src->dst.x1;
++	int y_dst = crc_src->dst.y1;
++	int h_dst = drm_rect_height(&crc_src->dst);
++	int w_dst = drm_rect_width(&crc_src->dst);
++
++	int y_limit = y_src + h_dst;
++	int x_limit = x_src + w_dst;
++
++	for (i = y_src, i_dst = y_dst; i < y_limit; ++i) {
++		for (j = x_src, j_dst = x_dst; j < x_limit; ++j) {
++			offset_dst = crc_dst->offset
++				     + (i_dst * crc_dst->pitch)
++				     + (j_dst++ * crc_dst->cpp);
++			offset_src = crc_src->offset
++				     + (i * crc_src->pitch)
++				     + (j * crc_src->cpp);
++
++			memcpy(vaddr_dst + offset_dst,
++			       vaddr_src + offset_src, sizeof(u32));
++		}
++		i_dst++;
++	}
++}
++
++static void compose_cursor(struct vkms_crc_data *cursor_crc,
++			   struct vkms_crc_data *primary_crc, void *vaddr_out)
++{
++	struct drm_gem_object *cursor_obj;
++	struct vkms_gem_object *cursor_vkms_obj;
++
++	cursor_obj = drm_gem_fb_get_obj(&cursor_crc->fb, 0);
++	cursor_vkms_obj = drm_gem_to_vkms_gem(cursor_obj);
++
++	mutex_lock(&cursor_vkms_obj->pages_lock);
++	if (!cursor_vkms_obj->vaddr) {
++		DRM_WARN("cursor plane vaddr is NULL");
++		goto out;
++	}
++
++	blend(vaddr_out, cursor_vkms_obj->vaddr, primary_crc, cursor_crc);
++
++out:
++	mutex_unlock(&cursor_vkms_obj->pages_lock);
++}
++
++static uint32_t _vkms_get_crc(struct vkms_crc_data *primary_crc,
++			      struct vkms_crc_data *cursor_crc)
++{
++	struct drm_framebuffer *fb = &primary_crc->fb;
++	struct drm_gem_object *gem_obj = drm_gem_fb_get_obj(fb, 0);
++	struct vkms_gem_object *vkms_obj = drm_gem_to_vkms_gem(gem_obj);
++	void *vaddr_out = kzalloc(vkms_obj->gem.size, GFP_KERNEL);
++	u32 crc = 0;
++
++	if (!vaddr_out) {
++		DRM_ERROR("Failed to allocate memory for output frame.");
++		return 0;
++	}
++
++	mutex_lock(&vkms_obj->pages_lock);
++	if (WARN_ON(!vkms_obj->vaddr)) {
++		mutex_unlock(&vkms_obj->pages_lock);
++		kfree(vaddr_out);
++		return crc;
++	}
++
++	memcpy(vaddr_out, vkms_obj->vaddr, vkms_obj->gem.size);
++	mutex_unlock(&vkms_obj->pages_lock);
++
++	if (cursor_crc)
++		compose_cursor(cursor_crc, primary_crc, vaddr_out);
++
++	crc = compute_crc(vaddr_out, primary_crc);
++
++	kfree(vaddr_out);
++
++	return crc;
++}
++
++/**
++ * vkms_crc_work_handle - ordered work_struct to compute CRC
++ *
++ * @work: work_struct
++ *
++ * Work handler for computing CRCs. work_struct scheduled in
++ * an ordered workqueue that's periodically scheduled to run by
++ * _vblank_handle() and flushed at vkms_atomic_crtc_destroy_state().
++ */
++void vkms_crc_work_handle(struct work_struct *work)
++{
++	struct vkms_crtc_state *crtc_state = container_of(work,
++						struct vkms_crtc_state,
++						crc_work);
++	struct drm_crtc *crtc = crtc_state->base.crtc;
++	struct vkms_output *out = drm_crtc_to_vkms_output(crtc);
++	struct vkms_device *vdev = container_of(out, struct vkms_device,
++						output);
++	struct vkms_crc_data *primary_crc = NULL;
++	struct vkms_crc_data *cursor_crc = NULL;
++	struct drm_plane *plane;
++	u32 crc32 = 0;
++	u64 frame_start, frame_end;
++	unsigned long flags;
++
++	spin_lock_irqsave(&out->state_lock, flags);
++	frame_start = crtc_state->frame_start;
++	frame_end = crtc_state->frame_end;
++	spin_unlock_irqrestore(&out->state_lock, flags);
++
++	/* _vblank_handle() hasn't updated frame_start yet */
++	if (!frame_start || frame_start == frame_end)
++		goto out;
++
++	drm_for_each_plane(plane, &vdev->drm) {
++		struct vkms_plane_state *vplane_state;
++		struct vkms_crc_data *crc_data;
++
++		vplane_state = to_vkms_plane_state(plane->state);
++		crc_data = vplane_state->crc_data;
++
++		if (drm_framebuffer_read_refcount(&crc_data->fb) == 0)
++			continue;
++
++		if (plane->type == DRM_PLANE_TYPE_PRIMARY)
++			primary_crc = crc_data;
++		else
++			cursor_crc = crc_data;
++	}
++
++	if (primary_crc)
++		crc32 = _vkms_get_crc(primary_crc, cursor_crc);
++
++	frame_end = drm_crtc_accurate_vblank_count(crtc);
++
++	/* queue_work can fail to schedule crc_work; add crc for
++	 * missing frames
++	 */
++	while (frame_start <= frame_end)
++		drm_crtc_add_crc_entry(crtc, true, frame_start++, &crc32);
++
++out:
++	/* to avoid using the same value for frame number again */
++	spin_lock_irqsave(&out->state_lock, flags);
++	crtc_state->frame_end = frame_end;
++	crtc_state->frame_start = 0;
++	spin_unlock_irqrestore(&out->state_lock, flags);
++}
++
++static int vkms_crc_parse_source(const char *src_name, bool *enabled)
++{
++	int ret = 0;
++
++	if (!src_name) {
++		*enabled = false;
++	} else if (strcmp(src_name, "auto") == 0) {
++		*enabled = true;
++	} else {
++		*enabled = false;
++		ret = -EINVAL;
++	}
++
++	return ret;
++}
++
++int vkms_verify_crc_source(struct drm_crtc *crtc, const char *src_name,
++			   size_t *values_cnt)
++{
++	bool enabled;
++
++	if (vkms_crc_parse_source(src_name, &enabled) < 0) {
++		DRM_DEBUG_DRIVER("unknown source %s\n", src_name);
++		return -EINVAL;
++	}
++
++	*values_cnt = 1;
++
++	return 0;
++}
++
++int vkms_set_crc_source(struct drm_crtc *crtc, const char *src_name)
++{
++	struct vkms_output *out = drm_crtc_to_vkms_output(crtc);
++	bool enabled = false;
++	unsigned long flags;
++	int ret = 0;
++
++	ret = vkms_crc_parse_source(src_name, &enabled);
++
++	/* make sure nothing is scheduled on crtc workq */
++	flush_workqueue(out->crc_workq);
++
++	spin_lock_irqsave(&out->lock, flags);
++	out->crc_enabled = enabled;
++	spin_unlock_irqrestore(&out->lock, flags);
++
++	return ret;
++}
+diff --git a/drivers/gpu/drm/vkms/vkms_crtc.c b/drivers/gpu/drm/vkms/vkms_crtc.c
+index 0a271f762..8a9aeb0a9 100644
+--- a/drivers/gpu/drm/vkms/vkms_crtc.c
++++ b/drivers/gpu/drm/vkms/vkms_crtc.c
+@@ -2,22 +2,44 @@
+ 
+ #include "vkms_drv.h"
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
++#include <drm/drm_probe_helper.h>
+ 
+ static enum hrtimer_restart vkms_vblank_simulate(struct hrtimer *timer)
+ {
+ 	struct vkms_output *output = container_of(timer, struct vkms_output,
+ 						  vblank_hrtimer);
+ 	struct drm_crtc *crtc = &output->crtc;
+-	int ret_overrun;
++	struct vkms_crtc_state *state = to_vkms_crtc_state(crtc->state);
++	u64 ret_overrun;
+ 	bool ret;
+ 
++	spin_lock(&output->lock);
++
+ 	ret = drm_crtc_handle_vblank(crtc);
+ 	if (!ret)
+ 		DRM_ERROR("vkms failure on handling vblank");
+ 
++	if (state && output->crc_enabled) {
++		u64 frame = drm_crtc_accurate_vblank_count(crtc);
++
++		/* update frame_start only if a queued vkms_crc_work_handle()
++		 * has read the data
++		 */
++		spin_lock(&output->state_lock);
++		if (!state->frame_start)
++			state->frame_start = frame;
++		spin_unlock(&output->state_lock);
++
++		ret = queue_work(output->crc_workq, &state->crc_work);
++		if (!ret)
++			DRM_WARN("failed to queue vkms_crc_work_handle");
++	}
++
+ 	ret_overrun = hrtimer_forward_now(&output->vblank_hrtimer,
+ 					  output->period_ns);
++	WARN_ON(ret_overrun != 1);
++
++	spin_unlock(&output->lock);
+ 
+ 	return HRTIMER_RESTART;
+ }
+@@ -61,15 +83,69 @@ bool vkms_get_vblank_timestamp(struct drm_device *dev, unsigned int pipe,
+ 	return true;
+ }
+ 
++static void vkms_atomic_crtc_reset(struct drm_crtc *crtc)
++{
++	struct vkms_crtc_state *vkms_state = NULL;
++
++	if (crtc->state) {
++		vkms_state = to_vkms_crtc_state(crtc->state);
++		__drm_atomic_helper_crtc_destroy_state(crtc->state);
++		kfree(vkms_state);
++		crtc->state = NULL;
++	}
++
++	vkms_state = kzalloc(sizeof(*vkms_state), GFP_KERNEL);
++	if (!vkms_state)
++		return;
++	INIT_WORK(&vkms_state->crc_work, vkms_crc_work_handle);
++
++	crtc->state = &vkms_state->base;
++	crtc->state->crtc = crtc;
++}
++
++static struct drm_crtc_state *
++vkms_atomic_crtc_duplicate_state(struct drm_crtc *crtc)
++{
++	struct vkms_crtc_state *vkms_state;
++
++	if (WARN_ON(!crtc->state))
++		return NULL;
++
++	vkms_state = kzalloc(sizeof(*vkms_state), GFP_KERNEL);
++	if (!vkms_state)
++		return NULL;
++
++	__drm_atomic_helper_crtc_duplicate_state(crtc, &vkms_state->base);
++
++	INIT_WORK(&vkms_state->crc_work, vkms_crc_work_handle);
++
++	return &vkms_state->base;
++}
++
++static void vkms_atomic_crtc_destroy_state(struct drm_crtc *crtc,
++					   struct drm_crtc_state *state)
++{
++	struct vkms_crtc_state *vkms_state = to_vkms_crtc_state(state);
++
++	__drm_atomic_helper_crtc_destroy_state(state);
++
++	if (vkms_state) {
++		flush_work(&vkms_state->crc_work);
++		kfree(vkms_state);
++	}
++}
++
+ static const struct drm_crtc_funcs vkms_crtc_funcs = {
+ 	.set_config             = drm_atomic_helper_set_config,
+ 	.destroy                = drm_crtc_cleanup,
+ 	.page_flip              = drm_atomic_helper_page_flip,
+-	.reset                  = drm_atomic_helper_crtc_reset,
+-	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
+-	.atomic_destroy_state   = drm_atomic_helper_crtc_destroy_state,
++	.reset                  = vkms_atomic_crtc_reset,
++	.atomic_duplicate_state = vkms_atomic_crtc_duplicate_state,
++	.atomic_destroy_state   = vkms_atomic_crtc_destroy_state,
+ 	.enable_vblank		= vkms_enable_vblank,
+ 	.disable_vblank		= vkms_disable_vblank,
++	.set_crc_source		= vkms_set_crc_source,
++	.verify_crc_source	= vkms_verify_crc_source,
+ };
+ 
+ static void vkms_crtc_atomic_enable(struct drm_crtc *crtc,
+@@ -84,9 +160,21 @@ static void vkms_crtc_atomic_disable(struct drm_crtc *crtc,
+ 	drm_crtc_vblank_off(crtc);
+ }
+ 
++static void vkms_crtc_atomic_begin(struct drm_crtc *crtc,
++				   struct drm_crtc_state *old_crtc_state)
++{
++	struct vkms_output *vkms_output = drm_crtc_to_vkms_output(crtc);
++
++	/* This lock is held across the atomic commit to block vblank timer
++	 * from scheduling vkms_crc_work_handle until the crc_data is updated
++	 */
++	spin_lock_irq(&vkms_output->lock);
++}
++
+ static void vkms_crtc_atomic_flush(struct drm_crtc *crtc,
+ 				   struct drm_crtc_state *old_crtc_state)
+ {
++	struct vkms_output *vkms_output = drm_crtc_to_vkms_output(crtc);
+ 	unsigned long flags;
+ 
+ 	if (crtc->state->event) {
+@@ -101,9 +189,12 @@ static void vkms_crtc_atomic_flush(struct drm_crtc *crtc,
+ 
+ 		crtc->state->event = NULL;
+ 	}
++
++	spin_unlock_irq(&vkms_output->lock);
+ }
+ 
+ static const struct drm_crtc_helper_funcs vkms_crtc_helper_funcs = {
++	.atomic_begin	= vkms_crtc_atomic_begin,
+ 	.atomic_flush	= vkms_crtc_atomic_flush,
+ 	.atomic_enable	= vkms_crtc_atomic_enable,
+ 	.atomic_disable	= vkms_crtc_atomic_disable,
+@@ -112,6 +203,7 @@ static const struct drm_crtc_helper_funcs vkms_crtc_helper_funcs = {
+ int vkms_crtc_init(struct drm_device *dev, struct drm_crtc *crtc,
+ 		   struct drm_plane *primary, struct drm_plane *cursor)
+ {
++	struct vkms_output *vkms_out = drm_crtc_to_vkms_output(crtc);
+ 	int ret;
+ 
+ 	ret = drm_crtc_init_with_planes(dev, crtc, primary, cursor,
+@@ -123,5 +215,10 @@ int vkms_crtc_init(struct drm_device *dev, struct drm_crtc *crtc,
+ 
+ 	drm_crtc_helper_add(crtc, &vkms_crtc_helper_funcs);
+ 
++	spin_lock_init(&vkms_out->lock);
++	spin_lock_init(&vkms_out->state_lock);
++
++	vkms_out->crc_workq = alloc_ordered_workqueue("vkms_crc_workq", 0);
++
+ 	return ret;
+ }
+diff --git a/drivers/gpu/drm/vkms/vkms_drv.c b/drivers/gpu/drm/vkms/vkms_drv.c
+index b1201c18d..738dd6206 100644
+--- a/drivers/gpu/drm/vkms/vkms_drv.c
++++ b/drivers/gpu/drm/vkms/vkms_drv.c
+@@ -1,11 +1,20 @@
+ // SPDX-License-Identifier: GPL-2.0+
+ 
++/**
++ * DOC: vkms (Virtual Kernel Modesetting)
++ *
++ * vkms is a software-only model of a kms driver that is useful for testing,
++ * or for running X (or similar) on headless machines and be able to still
++ * use the GPU. vkms aims to enable a virtual display without the need for
++ * a hardware display capability.
++ */
++
+ #include <linux/module.h>
+ #include <drm/drm_gem.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drm_fb_helper.h>
++#include <drm/drm_probe_helper.h>
+ #include "vkms_drv.h"
+ 
+ #define DRIVER_NAME	"vkms"
+@@ -16,6 +25,10 @@
+ 
+ static struct vkms_device *vkms_device;
+ 
++bool enable_cursor;
++module_param_named(enable_cursor, enable_cursor, bool, 0444);
++MODULE_PARM_DESC(enable_cursor, "Enable/Disable cursor support");
++
+ static const struct file_operations vkms_driver_fops = {
+ 	.owner		= THIS_MODULE,
+ 	.open		= drm_open,
+@@ -42,6 +55,7 @@ static void vkms_release(struct drm_device *dev)
+ 	drm_atomic_helper_shutdown(&vkms->drm);
+ 	drm_mode_config_cleanup(&vkms->drm);
+ 	drm_dev_fini(&vkms->drm);
++	destroy_workqueue(vkms->output.crc_workq);
+ }
+ 
+ static struct drm_driver vkms_driver = {
+@@ -49,7 +63,6 @@ static struct drm_driver vkms_driver = {
+ 	.release		= vkms_release,
+ 	.fops			= &vkms_driver_fops,
+ 	.dumb_create		= vkms_dumb_create,
+-	.dumb_map_offset	= vkms_dumb_map,
+ 	.gem_vm_ops		= &vkms_gem_vm_ops,
+ 	.gem_free_object_unlocked = vkms_gem_free_object,
+ 	.get_vblank_timestamp	= vkms_get_vblank_timestamp,
+@@ -77,6 +90,7 @@ static int vkms_modeset_init(struct vkms_device *vkmsdev)
+ 	dev->mode_config.min_height = YRES_MIN;
+ 	dev->mode_config.max_width = XRES_MAX;
+ 	dev->mode_config.max_height = YRES_MAX;
++	dev->mode_config.preferred_depth = 24;
+ 
+ 	return vkms_output_init(vkmsdev);
+ }
+@@ -89,17 +103,18 @@ static int __init vkms_init(void)
+ 	if (!vkms_device)
+ 		return -ENOMEM;
+ 
+-	ret = drm_dev_init(&vkms_device->drm, &vkms_driver, NULL);
+-	if (ret)
+-		goto out_free;
+-
+ 	vkms_device->platform =
+ 		platform_device_register_simple(DRIVER_NAME, -1, NULL, 0);
+ 	if (IS_ERR(vkms_device->platform)) {
+ 		ret = PTR_ERR(vkms_device->platform);
+-		goto out_fini;
++		goto out_free;
+ 	}
+ 
++	ret = drm_dev_init(&vkms_device->drm, &vkms_driver,
++			   &vkms_device->platform->dev);
++	if (ret)
++		goto out_unregister;
++
+ 	vkms_device->drm.irq_enabled = true;
+ 
+ 	ret = drm_vblank_init(&vkms_device->drm, 1);
+@@ -110,20 +125,20 @@ static int __init vkms_init(void)
+ 
+ 	ret = vkms_modeset_init(vkms_device);
+ 	if (ret)
+-		goto out_unregister;
++		goto out_fini;
+ 
+ 	ret = drm_dev_register(&vkms_device->drm, 0);
+ 	if (ret)
+-		goto out_unregister;
++		goto out_fini;
+ 
+ 	return 0;
+ 
+-out_unregister:
+-	platform_device_unregister(vkms_device->platform);
+-
+ out_fini:
+ 	drm_dev_fini(&vkms_device->drm);
+ 
++out_unregister:
++	platform_device_unregister(vkms_device->platform);
++
+ out_free:
+ 	kfree(vkms_device);
+ 	return ret;
+diff --git a/drivers/gpu/drm/vkms/vkms_drv.h b/drivers/gpu/drm/vkms/vkms_drv.h
+index e018752d5..81f1cfbeb 100644
+--- a/drivers/gpu/drm/vkms/vkms_drv.h
++++ b/drivers/gpu/drm/vkms/vkms_drv.h
+@@ -9,8 +9,8 @@
+ #include <drm/drm_encoder.h>
+ #include <linux/hrtimer.h>
+ 
+-#define XRES_MIN    32
+-#define YRES_MIN    32
++#define XRES_MIN    20
++#define YRES_MIN    20
+ 
+ #define XRES_DEF  1024
+ #define YRES_DEF   768
+@@ -18,10 +18,48 @@
+ #define XRES_MAX  8192
+ #define YRES_MAX  8192
+ 
++extern bool enable_cursor;
++
+ static const u32 vkms_formats[] = {
+ 	DRM_FORMAT_XRGB8888,
+ };
+ 
++static const u32 vkms_cursor_formats[] = {
++	DRM_FORMAT_ARGB8888,
++};
++
++struct vkms_crc_data {
++	struct drm_framebuffer fb;
++	struct drm_rect src, dst;
++	unsigned int offset;
++	unsigned int pitch;
++	unsigned int cpp;
++};
++
++/**
++ * vkms_plane_state - Driver specific plane state
++ * @base: base plane state
++ * @crc_data: data required for CRC computation
++ */
++struct vkms_plane_state {
++	struct drm_plane_state base;
++	struct vkms_crc_data *crc_data;
++};
++
++/**
++ * vkms_crtc_state - Driver specific CRTC state
++ * @base: base CRTC state
++ * @crc_work: work struct to compute and add CRC entries
++ * @n_frame_start: start frame number for computed CRC
++ * @n_frame_end: end frame number for computed CRC
++ */
++struct vkms_crtc_state {
++	struct drm_crtc_state base;
++	struct work_struct crc_work;
++	u64 frame_start;
++	u64 frame_end;
++};
++
+ struct vkms_output {
+ 	struct drm_crtc crtc;
+ 	struct drm_encoder encoder;
+@@ -29,6 +67,13 @@ struct vkms_output {
+ 	struct hrtimer vblank_hrtimer;
+ 	ktime_t period_ns;
+ 	struct drm_pending_vblank_event *event;
++	bool crc_enabled;
++	/* ordered wq for crc_work */
++	struct workqueue_struct *crc_workq;
++	/* protects concurrent access to crc_data */
++	spinlock_t lock;
++	/* protects concurrent access to crtc_state */
++	spinlock_t state_lock;
+ };
+ 
+ struct vkms_device {
+@@ -41,6 +86,8 @@ struct vkms_gem_object {
+ 	struct drm_gem_object gem;
+ 	struct mutex pages_lock; /* Page lock used in page fault handler */
+ 	struct page **pages;
++	unsigned int vmap_count;
++	void *vaddr;
+ };
+ 
+ #define drm_crtc_to_vkms_output(target) \
+@@ -49,6 +96,15 @@ struct vkms_gem_object {
+ #define drm_device_to_vkms_device(target) \
+ 	container_of(target, struct vkms_device, drm)
+ 
++#define drm_gem_to_vkms_gem(target)\
++	container_of(target, struct vkms_gem_object, gem)
++
++#define to_vkms_crtc_state(target)\
++	container_of(target, struct vkms_crtc_state, base)
++
++#define to_vkms_plane_state(target)\
++	container_of(target, struct vkms_plane_state, base)
++
+ /* CRTC */
+ int vkms_crtc_init(struct drm_device *dev, struct drm_crtc *crtc,
+ 		   struct drm_plane *primary, struct drm_plane *cursor);
+@@ -59,7 +115,8 @@ bool vkms_get_vblank_timestamp(struct drm_device *dev, unsigned int pipe,
+ 
+ int vkms_output_init(struct vkms_device *vkmsdev);
+ 
+-struct drm_plane *vkms_plane_init(struct vkms_device *vkmsdev);
++struct drm_plane *vkms_plane_init(struct vkms_device *vkmsdev,
++				  enum drm_plane_type type);
+ 
+ /* Gem stuff */
+ struct drm_gem_object *vkms_gem_create(struct drm_device *dev,
+@@ -67,14 +124,21 @@ struct drm_gem_object *vkms_gem_create(struct drm_device *dev,
+ 				       u32 *handle,
+ 				       u64 size);
+ 
+-int vkms_gem_fault(struct vm_fault *vmf);
++vm_fault_t vkms_gem_fault(struct vm_fault *vmf);
+ 
+ int vkms_dumb_create(struct drm_file *file, struct drm_device *dev,
+ 		     struct drm_mode_create_dumb *args);
+ 
+-int vkms_dumb_map(struct drm_file *file, struct drm_device *dev,
+-		  u32 handle, u64 *offset);
+-
+ void vkms_gem_free_object(struct drm_gem_object *obj);
+ 
++int vkms_gem_vmap(struct drm_gem_object *obj);
++
++void vkms_gem_vunmap(struct drm_gem_object *obj);
++
++/* CRC Support */
++int vkms_set_crc_source(struct drm_crtc *crtc, const char *src_name);
++int vkms_verify_crc_source(struct drm_crtc *crtc, const char *source_name,
++			   size_t *values_cnt);
++void vkms_crc_work_handle(struct work_struct *work);
++
+ #endif /* _VKMS_DRV_H_ */
+diff --git a/drivers/gpu/drm/vkms/vkms_gem.c b/drivers/gpu/drm/vkms/vkms_gem.c
+index ce394009a..69048e733 100644
+--- a/drivers/gpu/drm/vkms/vkms_gem.c
++++ b/drivers/gpu/drm/vkms/vkms_gem.c
+@@ -31,20 +31,22 @@ void vkms_gem_free_object(struct drm_gem_object *obj)
+ 	struct vkms_gem_object *gem = container_of(obj, struct vkms_gem_object,
+ 						   gem);
+ 
+-	kvfree(gem->pages);
++	WARN_ON(gem->pages);
++	WARN_ON(gem->vaddr);
++
+ 	mutex_destroy(&gem->pages_lock);
+ 	drm_gem_object_release(obj);
+ 	kfree(gem);
+ }
+ 
+-int vkms_gem_fault(struct vm_fault *vmf)
++vm_fault_t vkms_gem_fault(struct vm_fault *vmf)
+ {
+ 	struct vm_area_struct *vma = vmf->vma;
+ 	struct vkms_gem_object *obj = vma->vm_private_data;
+ 	unsigned long vaddr = vmf->address;
+ 	pgoff_t page_offset;
+ 	loff_t num_pages;
+-	int ret;
++	vm_fault_t ret = VM_FAULT_SIGBUS;
+ 
+ 	page_offset = (vaddr - vma->vm_start) >> PAGE_SHIFT;
+ 	num_pages = DIV_ROUND_UP(obj->gem.size, PAGE_SIZE);
+@@ -52,7 +54,6 @@ int vkms_gem_fault(struct vm_fault *vmf)
+ 	if (page_offset > num_pages)
+ 		return VM_FAULT_SIGBUS;
+ 
+-	ret = -ENOENT;
+ 	mutex_lock(&obj->pages_lock);
+ 	if (obj->pages) {
+ 		get_page(obj->pages[page_offset]);
+@@ -143,28 +144,76 @@ int vkms_dumb_create(struct drm_file *file, struct drm_device *dev,
+ 	return 0;
+ }
+ 
+-int vkms_dumb_map(struct drm_file *file, struct drm_device *dev,
+-		  u32 handle, u64 *offset)
++static struct page **_get_pages(struct vkms_gem_object *vkms_obj)
+ {
+-	struct drm_gem_object *obj;
+-	int ret;
++	struct drm_gem_object *gem_obj = &vkms_obj->gem;
+ 
+-	obj = drm_gem_object_lookup(file, handle);
+-	if (!obj)
+-		return -ENOENT;
++	if (!vkms_obj->pages) {
++		struct page **pages = drm_gem_get_pages(gem_obj);
++
++		if (IS_ERR(pages))
++			return pages;
+ 
+-	if (!obj->filp) {
+-		ret = -EINVAL;
+-		goto unref;
++		if (cmpxchg(&vkms_obj->pages, NULL, pages))
++			drm_gem_put_pages(gem_obj, pages, false, true);
+ 	}
+ 
+-	ret = drm_gem_create_mmap_offset(obj);
+-	if (ret)
+-		goto unref;
++	return vkms_obj->pages;
++}
++
++void vkms_gem_vunmap(struct drm_gem_object *obj)
++{
++	struct vkms_gem_object *vkms_obj = drm_gem_to_vkms_gem(obj);
++
++	mutex_lock(&vkms_obj->pages_lock);
++	if (vkms_obj->vmap_count < 1) {
++		WARN_ON(vkms_obj->vaddr);
++		WARN_ON(vkms_obj->pages);
++		mutex_unlock(&vkms_obj->pages_lock);
++		return;
++	}
++
++	vkms_obj->vmap_count--;
++
++	if (vkms_obj->vmap_count == 0) {
++		vunmap(vkms_obj->vaddr);
++		vkms_obj->vaddr = NULL;
++		drm_gem_put_pages(obj, vkms_obj->pages, false, true);
++		vkms_obj->pages = NULL;
++	}
++
++	mutex_unlock(&vkms_obj->pages_lock);
++}
++
++int vkms_gem_vmap(struct drm_gem_object *obj)
++{
++	struct vkms_gem_object *vkms_obj = drm_gem_to_vkms_gem(obj);
++	int ret = 0;
++
++	mutex_lock(&vkms_obj->pages_lock);
++
++	if (!vkms_obj->vaddr) {
++		unsigned int n_pages = obj->size >> PAGE_SHIFT;
++		struct page **pages = _get_pages(vkms_obj);
++
++		if (IS_ERR(pages)) {
++			ret = PTR_ERR(pages);
++			goto out;
++		}
++
++		vkms_obj->vaddr = vmap(pages, n_pages, VM_MAP, PAGE_KERNEL);
++		if (!vkms_obj->vaddr)
++			goto err_vmap;
++	}
+ 
+-	*offset = drm_vma_node_offset_addr(&obj->vma_node);
+-unref:
+-	drm_gem_object_put_unlocked(obj);
++	vkms_obj->vmap_count++;
++	goto out;
+ 
++err_vmap:
++	ret = -ENOMEM;
++	drm_gem_put_pages(obj, vkms_obj->pages, false, true);
++	vkms_obj->pages = NULL;
++out:
++	mutex_unlock(&vkms_obj->pages_lock);
+ 	return ret;
+ }
+diff --git a/drivers/gpu/drm/vkms/vkms_output.c b/drivers/gpu/drm/vkms/vkms_output.c
+index 5697148e0..3b162b253 100644
+--- a/drivers/gpu/drm/vkms/vkms_output.c
++++ b/drivers/gpu/drm/vkms/vkms_output.c
+@@ -1,8 +1,8 @@
+ // SPDX-License-Identifier: GPL-2.0+
+ 
+ #include "vkms_drv.h"
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_atomic_helper.h>
++#include <drm/drm_probe_helper.h>
+ 
+ static void vkms_connector_destroy(struct drm_connector *connector)
+ {
+@@ -43,14 +43,22 @@ int vkms_output_init(struct vkms_device *vkmsdev)
+ 	struct drm_connector *connector = &output->connector;
+ 	struct drm_encoder *encoder = &output->encoder;
+ 	struct drm_crtc *crtc = &output->crtc;
+-	struct drm_plane *primary;
++	struct drm_plane *primary, *cursor = NULL;
+ 	int ret;
+ 
+-	primary = vkms_plane_init(vkmsdev);
++	primary = vkms_plane_init(vkmsdev, DRM_PLANE_TYPE_PRIMARY);
+ 	if (IS_ERR(primary))
+ 		return PTR_ERR(primary);
+ 
+-	ret = vkms_crtc_init(dev, crtc, primary, NULL);
++	if (enable_cursor) {
++		cursor = vkms_plane_init(vkmsdev, DRM_PLANE_TYPE_CURSOR);
++		if (IS_ERR(cursor)) {
++			ret = PTR_ERR(cursor);
++			goto err_cursor;
++		}
++	}
++
++	ret = vkms_crtc_init(dev, crtc, primary, cursor);
+ 	if (ret)
+ 		goto err_crtc;
+ 
+@@ -100,6 +108,11 @@ int vkms_output_init(struct vkms_device *vkmsdev)
+ 	drm_crtc_cleanup(crtc);
+ 
+ err_crtc:
++	if (enable_cursor)
++		drm_plane_cleanup(cursor);
++
++err_cursor:
+ 	drm_plane_cleanup(primary);
++
+ 	return ret;
+ }
+diff --git a/drivers/gpu/drm/vkms/vkms_plane.c b/drivers/gpu/drm/vkms/vkms_plane.c
+index ce043b721..0e67d2d42 100644
+--- a/drivers/gpu/drm/vkms/vkms_plane.c
++++ b/drivers/gpu/drm/vkms/vkms_plane.c
+@@ -2,29 +2,176 @@
+ 
+ #include "vkms_drv.h"
+ #include <drm/drm_plane_helper.h>
++#include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++
++static struct drm_plane_state *
++vkms_plane_duplicate_state(struct drm_plane *plane)
++{
++	struct vkms_plane_state *vkms_state;
++	struct vkms_crc_data *crc_data;
++
++	vkms_state = kzalloc(sizeof(*vkms_state), GFP_KERNEL);
++	if (!vkms_state)
++		return NULL;
++
++	crc_data = kzalloc(sizeof(*crc_data), GFP_KERNEL);
++	if (!crc_data) {
++		DRM_DEBUG_KMS("Couldn't allocate crc_data\n");
++		kfree(vkms_state);
++		return NULL;
++	}
++
++	vkms_state->crc_data = crc_data;
++
++	__drm_atomic_helper_plane_duplicate_state(plane,
++						  &vkms_state->base);
++
++	return &vkms_state->base;
++}
++
++static void vkms_plane_destroy_state(struct drm_plane *plane,
++				     struct drm_plane_state *old_state)
++{
++	struct vkms_plane_state *vkms_state = to_vkms_plane_state(old_state);
++	struct drm_crtc *crtc = vkms_state->base.crtc;
++
++	if (crtc) {
++		/* dropping the reference we acquired in
++		 * vkms_primary_plane_update()
++		 */
++		if (drm_framebuffer_read_refcount(&vkms_state->crc_data->fb))
++			drm_framebuffer_put(&vkms_state->crc_data->fb);
++	}
++
++	kfree(vkms_state->crc_data);
++	vkms_state->crc_data = NULL;
++
++	__drm_atomic_helper_plane_destroy_state(old_state);
++	kfree(vkms_state);
++}
++
++static void vkms_plane_reset(struct drm_plane *plane)
++{
++	struct vkms_plane_state *vkms_state;
++
++	if (plane->state)
++		vkms_plane_destroy_state(plane, plane->state);
++
++	vkms_state = kzalloc(sizeof(*vkms_state), GFP_KERNEL);
++	if (!vkms_state) {
++		DRM_ERROR("Cannot allocate vkms_plane_state\n");
++		return;
++	}
++
++	plane->state = &vkms_state->base;
++	plane->state->plane = plane;
++}
+ 
+ static const struct drm_plane_funcs vkms_plane_funcs = {
+ 	.update_plane		= drm_atomic_helper_update_plane,
+ 	.disable_plane		= drm_atomic_helper_disable_plane,
+ 	.destroy		= drm_plane_cleanup,
+-	.reset			= drm_atomic_helper_plane_reset,
+-	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
+-	.atomic_destroy_state	= drm_atomic_helper_plane_destroy_state,
++	.reset			= vkms_plane_reset,
++	.atomic_duplicate_state = vkms_plane_duplicate_state,
++	.atomic_destroy_state	= vkms_plane_destroy_state,
+ };
+ 
+-static void vkms_primary_plane_update(struct drm_plane *plane,
+-				      struct drm_plane_state *old_state)
++static void vkms_plane_atomic_update(struct drm_plane *plane,
++				     struct drm_plane_state *old_state)
+ {
++	struct vkms_plane_state *vkms_plane_state;
++	struct drm_framebuffer *fb = plane->state->fb;
++	struct vkms_crc_data *crc_data;
++
++	if (!plane->state->crtc || !fb)
++		return;
++
++	vkms_plane_state = to_vkms_plane_state(plane->state);
++
++	crc_data = vkms_plane_state->crc_data;
++	memcpy(&crc_data->src, &plane->state->src, sizeof(struct drm_rect));
++	memcpy(&crc_data->dst, &plane->state->dst, sizeof(struct drm_rect));
++	memcpy(&crc_data->fb, fb, sizeof(struct drm_framebuffer));
++	drm_framebuffer_get(&crc_data->fb);
++	crc_data->offset = fb->offsets[0];
++	crc_data->pitch = fb->pitches[0];
++	crc_data->cpp = fb->format->cpp[0];
++}
++
++static int vkms_plane_atomic_check(struct drm_plane *plane,
++				   struct drm_plane_state *state)
++{
++	struct drm_crtc_state *crtc_state;
++	bool can_position = false;
++	int ret;
++
++	if (!state->fb | !state->crtc)
++		return 0;
++
++	crtc_state = drm_atomic_get_crtc_state(state->state, state->crtc);
++	if (IS_ERR(crtc_state))
++		return PTR_ERR(crtc_state);
++
++	if (plane->type == DRM_PLANE_TYPE_CURSOR)
++		can_position = true;
++
++	ret = drm_atomic_helper_check_plane_state(state, crtc_state,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  DRM_PLANE_HELPER_NO_SCALING,
++						  can_position, true);
++	if (ret != 0)
++		return ret;
++
++	/* for now primary plane must be visible and full screen */
++	if (!state->visible && !can_position)
++		return -EINVAL;
++
++	return 0;
++}
++
++static int vkms_prepare_fb(struct drm_plane *plane,
++			   struct drm_plane_state *state)
++{
++	struct drm_gem_object *gem_obj;
++	int ret;
++
++	if (!state->fb)
++		return 0;
++
++	gem_obj = drm_gem_fb_get_obj(state->fb, 0);
++	ret = vkms_gem_vmap(gem_obj);
++	if (ret)
++		DRM_ERROR("vmap failed: %d\n", ret);
++
++	return drm_gem_fb_prepare_fb(plane, state);
++}
++
++static void vkms_cleanup_fb(struct drm_plane *plane,
++			    struct drm_plane_state *old_state)
++{
++	struct drm_gem_object *gem_obj;
++
++	if (!old_state->fb)
++		return;
++
++	gem_obj = drm_gem_fb_get_obj(old_state->fb, 0);
++	vkms_gem_vunmap(gem_obj);
+ }
+ 
+ static const struct drm_plane_helper_funcs vkms_primary_helper_funcs = {
+-	.atomic_update		= vkms_primary_plane_update,
++	.atomic_update		= vkms_plane_atomic_update,
++	.atomic_check		= vkms_plane_atomic_check,
++	.prepare_fb		= vkms_prepare_fb,
++	.cleanup_fb		= vkms_cleanup_fb,
+ };
+ 
+-struct drm_plane *vkms_plane_init(struct vkms_device *vkmsdev)
++struct drm_plane *vkms_plane_init(struct vkms_device *vkmsdev,
++				  enum drm_plane_type type)
+ {
+ 	struct drm_device *dev = &vkmsdev->drm;
++	const struct drm_plane_helper_funcs *funcs;
+ 	struct drm_plane *plane;
+ 	const u32 *formats;
+ 	int ret, nformats;
+@@ -33,19 +180,26 @@ struct drm_plane *vkms_plane_init(struct vkms_device *vkmsdev)
+ 	if (!plane)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	formats = vkms_formats;
+-	nformats = ARRAY_SIZE(vkms_formats);
++	if (type == DRM_PLANE_TYPE_CURSOR) {
++		formats = vkms_cursor_formats;
++		nformats = ARRAY_SIZE(vkms_cursor_formats);
++		funcs = &vkms_primary_helper_funcs;
++	} else {
++		formats = vkms_formats;
++		nformats = ARRAY_SIZE(vkms_formats);
++		funcs = &vkms_primary_helper_funcs;
++	}
+ 
+ 	ret = drm_universal_plane_init(dev, plane, 0,
+ 				       &vkms_plane_funcs,
+ 				       formats, nformats,
+-				       NULL, DRM_PLANE_TYPE_PRIMARY, NULL);
++				       NULL, type, NULL);
+ 	if (ret) {
+ 		kfree(plane);
+ 		return ERR_PTR(ret);
+ 	}
+ 
+-	drm_plane_helper_add(plane, &vkms_primary_helper_funcs);
++	drm_plane_helper_add(plane, funcs);
+ 
+ 	return plane;
+ }

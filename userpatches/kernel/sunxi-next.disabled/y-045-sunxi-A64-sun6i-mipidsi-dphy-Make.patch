@@ -1,0 +1,40 @@
+diff --git a/drivers/phy/allwinner/Kconfig b/drivers/phy/allwinner/Kconfig
+index cf373bcee..2c363db17 100644
+--- a/drivers/phy/allwinner/Kconfig
++++ b/drivers/phy/allwinner/Kconfig
+@@ -17,6 +17,18 @@ config PHY_SUN4I_USB
+ 	  This driver controls the entire USB PHY block, both the USB OTG
+ 	  parts, as well as the 2 regular USB 2 host PHYs.
+ 
++config PHY_SUN6I_MIPI_DPHY
++	tristate "Allwinner A31 MIPI D-PHY Support"
++	depends on ARCH_SUNXI && HAS_IOMEM && OF
++	depends on RESET_CONTROLLER
++	select GENERIC_PHY
++	select GENERIC_PHY_MIPI_DPHY
++	select REGMAP_MMIO
++	help
++	  Choose this option if you have an Allwinner SoC with
++	  MIPI-DSI support. If M is selected, the module will be
++	  called sun6i_mipi_dphy.
++
+ config PHY_SUN9I_USB
+ 	tristate "Allwinner sun9i SoC USB PHY driver"
+ 	depends on ARCH_SUNXI && HAS_IOMEM && OF
+@@ -34,7 +46,6 @@ config PHY_SUN50I_USB3
+ 	tristate "Allwinner sun50i SoC USB3 PHY driver"
+ 	depends on ARCH_SUNXI && HAS_IOMEM && OF
+ 	depends on RESET_CONTROLLER
+-	depends on USB_SUPPORT
+ 	select USB_COMMON
+ 	select GENERIC_PHY
+ 	help
+diff --git a/drivers/phy/allwinner/Makefile b/drivers/phy/allwinner/Makefile
+index a8d01e907..59575a895 100644
+--- a/drivers/phy/allwinner/Makefile
++++ b/drivers/phy/allwinner/Makefile
+@@ -1,3 +1,4 @@
+ obj-$(CONFIG_PHY_SUN4I_USB)		+= phy-sun4i-usb.o
++obj-$(CONFIG_PHY_SUN6I_MIPI_DPHY)	+= phy-sun6i-mipi-dphy.o
+ obj-$(CONFIG_PHY_SUN9I_USB)		+= phy-sun9i-usb.o
+ obj-$(CONFIG_PHY_SUN50I_USB3)		+= phy-sun50i-usb3.o

@@ -1,0 +1,4072 @@
+diff --git a/drivers/gpu/drm/sun4i/sun4i_backend.c b/drivers/gpu/drm/sun4i/sun4i_backend.c
+index e30b1f5b9..4c0d51f73 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_backend.c
++++ b/drivers/gpu/drm/sun4i/sun4i_backend.c
+@@ -14,10 +14,10 @@
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_fb_cma_helper.h>
+ #include <drm/drm_gem_cma_helper.h>
+ #include <drm/drm_plane_helper.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include <linux/component.h>
+ #include <linux/list.h>
+@@ -34,6 +34,9 @@
+ struct sun4i_backend_quirks {
+ 	/* backend <-> TCON muxing selection done in backend */
+ 	bool needs_output_muxing;
++
++	/* alpha at the lowest z position is not always supported */
++	bool supports_lowest_plane_alpha;
+ };
+ 
+ static const u32 sunxi_rgb2yuv_coef[12] = {
+@@ -42,50 +45,6 @@ static const u32 sunxi_rgb2yuv_coef[12] = {
+ 	0x000001c1, 0x00003e88, 0x00003fb8, 0x00000808
+ };
+ 
+-/*
+- * These coefficients are taken from the A33 BSP from Allwinner.
+- *
+- * The formula is for each component, each coefficient being multiplied by
+- * 1024 and each constant being multiplied by 16:
+- * G = 1.164 * Y - 0.391 * U - 0.813 * V + 135
+- * R = 1.164 * Y + 1.596 * V - 222
+- * B = 1.164 * Y + 2.018 * U + 276
+- *
+- * This seems to be a conversion from Y[16:235] UV[16:240] to RGB[0:255],
+- * following the BT601 spec.
+- */
+-static const u32 sunxi_bt601_yuv2rgb_coef[12] = {
+-	0x000004a7, 0x00001e6f, 0x00001cbf, 0x00000877,
+-	0x000004a7, 0x00000000, 0x00000662, 0x00003211,
+-	0x000004a7, 0x00000812, 0x00000000, 0x00002eb1,
+-};
+-
+-static inline bool sun4i_backend_format_is_planar_yuv(uint32_t format)
+-{
+-	switch (format) {
+-	case DRM_FORMAT_YUV411:
+-	case DRM_FORMAT_YUV422:
+-	case DRM_FORMAT_YUV444:
+-		return true;
+-	default:
+-		return false;
+-	}
+-}
+-
+-static inline bool sun4i_backend_format_is_packed_yuv422(uint32_t format)
+-{
+-	switch (format) {
+-	case DRM_FORMAT_YUYV:
+-	case DRM_FORMAT_YVYU:
+-	case DRM_FORMAT_UYVY:
+-	case DRM_FORMAT_VYUY:
+-		return true;
+-
+-	default:
+-		return false;
+-	}
+-}
+-
+ static void sun4i_backend_apply_color_correction(struct sunxi_engine *engine)
+ {
+ 	int i;
+@@ -178,6 +137,35 @@ static int sun4i_backend_drm_format_to_layer(u32 format, u32 *mode)
+ 	return 0;
+ }
+ 
++static const uint32_t sun4i_backend_formats[] = {
++	DRM_FORMAT_ARGB1555,
++	DRM_FORMAT_ARGB4444,
++	DRM_FORMAT_ARGB8888,
++	DRM_FORMAT_RGB565,
++	DRM_FORMAT_RGB888,
++	DRM_FORMAT_RGBA4444,
++	DRM_FORMAT_RGBA5551,
++	DRM_FORMAT_UYVY,
++	DRM_FORMAT_VYUY,
++	DRM_FORMAT_XRGB8888,
++	DRM_FORMAT_YUYV,
++	DRM_FORMAT_YVYU,
++};
++
++bool sun4i_backend_format_is_supported(uint32_t fmt, uint64_t modifier)
++{
++	unsigned int i;
++
++	if (modifier != DRM_FORMAT_MOD_LINEAR)
++		return false;
++
++	for (i = 0; i < ARRAY_SIZE(sun4i_backend_formats); i++)
++		if (sun4i_backend_formats[i] == fmt)
++			return true;
++
++	return false;
++}
++
+ int sun4i_backend_update_layer_coord(struct sun4i_backend *backend,
+ 				     int layer, struct drm_plane *plane)
+ {
+@@ -215,7 +203,8 @@ static int sun4i_backend_update_yuv_format(struct sun4i_backend *backend,
+ {
+ 	struct drm_plane_state *state = plane->state;
+ 	struct drm_framebuffer *fb = state->fb;
+-	uint32_t format = fb->format->format;
++	const struct drm_format_info *format = fb->format;
++	const uint32_t fmt = format->format;
+ 	u32 val = SUN4I_BACKEND_IYUVCTL_EN;
+ 	int i;
+ 
+@@ -233,16 +222,17 @@ static int sun4i_backend_update_yuv_format(struct sun4i_backend *backend,
+ 			   SUN4I_BACKEND_ATTCTL_REG0_LAY_YUVEN);
+ 
+ 	/* TODO: Add support for the multi-planar YUV formats */
+-	if (sun4i_backend_format_is_packed_yuv422(format))
++	if (drm_format_info_is_yuv_packed(format) &&
++	    drm_format_info_is_yuv_sampling_422(format))
+ 		val |= SUN4I_BACKEND_IYUVCTL_FBFMT_PACKED_YUV422;
+ 	else
+-		DRM_DEBUG_DRIVER("Unsupported YUV format (0x%x)\n", format);
++		DRM_DEBUG_DRIVER("Unsupported YUV format (0x%x)\n", fmt);
+ 
+ 	/*
+ 	 * Allwinner seems to list the pixel sequence from right to left, while
+ 	 * DRM lists it from left to right.
+ 	 */
+-	switch (format) {
++	switch (fmt) {
+ 	case DRM_FORMAT_YUYV:
+ 		val |= SUN4I_BACKEND_IYUVCTL_FBPS_VYUY;
+ 		break;
+@@ -257,7 +247,7 @@ static int sun4i_backend_update_yuv_format(struct sun4i_backend *backend,
+ 		break;
+ 	default:
+ 		DRM_DEBUG_DRIVER("Unsupported YUV pixel sequence (0x%x)\n",
+-				 format);
++				 fmt);
+ 	}
+ 
+ 	regmap_write(backend->engine.regs, SUN4I_BACKEND_IYUVCTL_REG, val);
+@@ -417,6 +407,15 @@ int sun4i_backend_update_layer_zpos(struct sun4i_backend *backend, int layer,
+ 	return 0;
+ }
+ 
++void sun4i_backend_cleanup_layer(struct sun4i_backend *backend,
++				 int layer)
++{
++	regmap_update_bits(backend->engine.regs,
++			   SUN4I_BACKEND_ATTCTL_REG0(layer),
++			   SUN4I_BACKEND_ATTCTL_REG0_LAY_VDOEN |
++			   SUN4I_BACKEND_ATTCTL_REG0_LAY_YUVEN, 0);
++}
++
+ static bool sun4i_backend_plane_uses_scaler(struct drm_plane_state *state)
+ {
+ 	u16 src_h = state->src_h >> 16;
+@@ -435,11 +434,50 @@ static bool sun4i_backend_plane_uses_frontend(struct drm_plane_state *state)
+ {
+ 	struct sun4i_layer *layer = plane_to_sun4i_layer(state->plane);
+ 	struct sun4i_backend *backend = layer->backend;
++	uint32_t format = state->fb->format->format;
++	uint64_t modifier = state->fb->modifier;
+ 
+ 	if (IS_ERR(backend->frontend))
+ 		return false;
+ 
+-	return sun4i_backend_plane_uses_scaler(state);
++	if (!sun4i_frontend_format_is_supported(format, modifier))
++		return false;
++
++	if (!sun4i_backend_format_is_supported(format, modifier))
++		return true;
++
++	/*
++	 * TODO: The backend alone allows 2x and 4x integer scaling, including
++	 * support for an alpha component (which the frontend doesn't support).
++	 * Use the backend directly instead of the frontend in this case, with
++	 * another test to return false.
++	 */
++
++	if (sun4i_backend_plane_uses_scaler(state))
++		return true;
++
++	/*
++	 * Here the format is supported by both the frontend and the backend
++	 * and no frontend scaling is required, so use the backend directly.
++	 */
++	return false;
++}
++
++static bool sun4i_backend_plane_is_supported(struct drm_plane_state *state,
++					     bool *uses_frontend)
++{
++	if (sun4i_backend_plane_uses_frontend(state)) {
++		*uses_frontend = true;
++		return true;
++	}
++
++	*uses_frontend = false;
++
++	/* Scaling is not supported without the frontend. */
++	if (sun4i_backend_plane_uses_scaler(state))
++		return false;
++
++	return true;
+ }
+ 
+ static void sun4i_backend_atomic_begin(struct sunxi_engine *engine,
+@@ -457,12 +495,14 @@ static int sun4i_backend_atomic_check(struct sunxi_engine *engine,
+ 				      struct drm_crtc_state *crtc_state)
+ {
+ 	struct drm_plane_state *plane_states[SUN4I_BACKEND_NUM_LAYERS] = { 0 };
++	struct sun4i_backend *backend = engine_to_sun4i_backend(engine);
+ 	struct drm_atomic_state *state = crtc_state->state;
+ 	struct drm_device *drm = state->dev;
+ 	struct drm_plane *plane;
+ 	unsigned int num_planes = 0;
+ 	unsigned int num_alpha_planes = 0;
+ 	unsigned int num_frontend_planes = 0;
++	unsigned int num_alpha_planes_max = 1;
+ 	unsigned int num_yuv_planes = 0;
+ 	unsigned int current_pipe = 0;
+ 	unsigned int i;
+@@ -480,14 +520,19 @@ static int sun4i_backend_atomic_check(struct sunxi_engine *engine,
+ 		struct drm_framebuffer *fb = plane_state->fb;
+ 		struct drm_format_name_buf format_name;
+ 
+-		if (sun4i_backend_plane_uses_frontend(plane_state)) {
++		if (!sun4i_backend_plane_is_supported(plane_state,
++						      &layer_state->uses_frontend))
++			return -EINVAL;
++
++		if (layer_state->uses_frontend) {
+ 			DRM_DEBUG_DRIVER("Using the frontend for plane %d\n",
+ 					 plane->index);
+-
+-			layer_state->uses_frontend = true;
+ 			num_frontend_planes++;
+ 		} else {
+-			layer_state->uses_frontend = false;
++			if (fb->format->is_yuv) {
++				DRM_DEBUG_DRIVER("Plane FB format is YUV\n");
++				num_yuv_planes++;
++			}
+ 		}
+ 
+ 		DRM_DEBUG_DRIVER("Plane FB format is %s\n",
+@@ -496,11 +541,6 @@ static int sun4i_backend_atomic_check(struct sunxi_engine *engine,
+ 		if (fb->format->has_alpha || (plane_state->alpha != DRM_BLEND_ALPHA_OPAQUE))
+ 			num_alpha_planes++;
+ 
+-		if (fb->format->is_yuv) {
+-			DRM_DEBUG_DRIVER("Plane FB format is YUV\n");
+-			num_yuv_planes++;
+-		}
+-
+ 		DRM_DEBUG_DRIVER("Plane zpos is %d\n",
+ 				 plane_state->normalized_zpos);
+ 
+@@ -526,33 +566,40 @@ static int sun4i_backend_atomic_check(struct sunxi_engine *engine,
+ 	 * the layer with the highest priority.
+ 	 *
+ 	 * The second step is the actual alpha blending, that takes
+-	 * the two pipes as input, and uses the eventual alpha
++	 * the two pipes as input, and uses the potential alpha
+ 	 * component to do the transparency between the two.
+ 	 *
+-	 * This two steps scenario makes us unable to guarantee a
++	 * This two-step scenario makes us unable to guarantee a
+ 	 * robust alpha blending between the 4 layers in all
+ 	 * situations, since this means that we need to have one layer
+ 	 * with alpha at the lowest position of our two pipes.
+ 	 *
+-	 * However, we cannot even do that, since the hardware has a
+-	 * bug where the lowest plane of the lowest pipe (pipe 0,
+-	 * priority 0), if it has any alpha, will discard the pixel
+-	 * entirely and just display the pixels in the background
+-	 * color (black by default).
++	 * However, we cannot even do that on every platform, since
++	 * the hardware has a bug where the lowest plane of the lowest
++	 * pipe (pipe 0, priority 0), if it has any alpha, will
++	 * discard the pixel data entirely and just display the pixels
++	 * in the background color (black by default).
+ 	 *
+-	 * This means that we effectively have only three valid
+-	 * configurations with alpha, all of them with the alpha being
+-	 * on pipe1 with the lowest position, which can be 1, 2 or 3
+-	 * depending on the number of planes and their zpos.
++	 * This means that on the affected platforms, we effectively
++	 * have only three valid configurations with alpha, all of
++	 * them with the alpha being on pipe1 with the lowest
++	 * position, which can be 1, 2 or 3 depending on the number of
++	 * planes and their zpos.
+ 	 */
+-	if (num_alpha_planes > SUN4I_BACKEND_NUM_ALPHA_LAYERS) {
++
++	/* For platforms that are not affected by the issue described above. */
++	if (backend->quirks->supports_lowest_plane_alpha)
++		num_alpha_planes_max++;
++
++	if (num_alpha_planes > num_alpha_planes_max) {
+ 		DRM_DEBUG_DRIVER("Too many planes with alpha, rejecting...\n");
+ 		return -EINVAL;
+ 	}
+ 
+ 	/* We can't have an alpha plane at the lowest position */
+-	if (plane_states[0]->fb->format->has_alpha ||
+-	    (plane_states[0]->alpha != DRM_BLEND_ALPHA_OPAQUE))
++	if (!backend->quirks->supports_lowest_plane_alpha &&
++	    (plane_states[0]->fb->format->has_alpha ||
++	    (plane_states[0]->alpha != DRM_BLEND_ALPHA_OPAQUE)))
+ 		return -EINVAL;
+ 
+ 	for (i = 1; i < num_planes; i++) {
+@@ -877,6 +924,8 @@ static int sun4i_backend_bind(struct device *dev, struct device *master,
+ 				    : SUN4I_BACKEND_MODCTL_OUT_LCD0));
+ 	}
+ 
++	backend->quirks = quirks;
++
+ 	return 0;
+ 
+ err_disable_ram_clk:
+@@ -936,9 +985,11 @@ static const struct sun4i_backend_quirks sun6i_backend_quirks = {
+ 
+ static const struct sun4i_backend_quirks sun7i_backend_quirks = {
+ 	.needs_output_muxing = true,
++	.supports_lowest_plane_alpha = true,
+ };
+ 
+ static const struct sun4i_backend_quirks sun8i_a33_backend_quirks = {
++	.supports_lowest_plane_alpha = true,
+ };
+ 
+ static const struct sun4i_backend_quirks sun9i_backend_quirks = {
+@@ -961,6 +1012,10 @@ static const struct of_device_id sun4i_backend_of_table[] = {
+ 		.compatible = "allwinner,sun7i-a20-display-backend",
+ 		.data = &sun7i_backend_quirks,
+ 	},
++	{
++		.compatible = "allwinner,sun8i-a23-display-backend",
++		.data = &sun8i_a33_backend_quirks,
++	},
+ 	{
+ 		.compatible = "allwinner,sun8i-a33-display-backend",
+ 		.data = &sun8i_a33_backend_quirks,
+diff --git a/drivers/gpu/drm/sun4i/sun4i_backend.h b/drivers/gpu/drm/sun4i/sun4i_backend.h
+index 4caee0392..01f664632 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_backend.h
++++ b/drivers/gpu/drm/sun4i/sun4i_backend.h
+@@ -167,7 +167,6 @@
+ #define SUN4I_BACKEND_PIPE_OFF(p)		(0x5000 + (0x400 * (p)))
+ 
+ #define SUN4I_BACKEND_NUM_LAYERS		4
+-#define SUN4I_BACKEND_NUM_ALPHA_LAYERS		1
+ #define SUN4I_BACKEND_NUM_FRONTEND_LAYERS	1
+ #define SUN4I_BACKEND_NUM_YUV_PLANES		1
+ 
+@@ -187,6 +186,8 @@ struct sun4i_backend {
+ 	/* Protects against races in the frontend teardown */
+ 	spinlock_t		frontend_lock;
+ 	bool			frontend_teardown;
++
++	const struct sun4i_backend_quirks	*quirks;
+ };
+ 
+ static inline struct sun4i_backend *
+@@ -197,6 +198,7 @@ engine_to_sun4i_backend(struct sunxi_engine *engine)
+ 
+ void sun4i_backend_layer_enable(struct sun4i_backend *backend,
+ 				int layer, bool enable);
++bool sun4i_backend_format_is_supported(uint32_t fmt, uint64_t modifier);
+ int sun4i_backend_update_layer_coord(struct sun4i_backend *backend,
+ 				     int layer, struct drm_plane *plane);
+ int sun4i_backend_update_layer_formats(struct sun4i_backend *backend,
+@@ -207,5 +209,7 @@ int sun4i_backend_update_layer_frontend(struct sun4i_backend *backend,
+ 					int layer, uint32_t in_fmt);
+ int sun4i_backend_update_layer_zpos(struct sun4i_backend *backend,
+ 				    int layer, struct drm_plane *plane);
++void sun4i_backend_cleanup_layer(struct sun4i_backend *backend,
++				 int layer);
+ 
+ #endif /* _SUN4I_BACKEND_H_ */
+diff --git a/drivers/gpu/drm/sun4i/sun4i_crtc.c b/drivers/gpu/drm/sun4i/sun4i_crtc.c
+index 3eedf335a..b53eac128 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_crtc.c
++++ b/drivers/gpu/drm/sun4i/sun4i_crtc.c
+@@ -13,8 +13,8 @@
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_modes.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include <linux/clk-provider.h>
+ #include <linux/ioport.h>
+@@ -113,7 +113,7 @@ static void sun4i_crtc_atomic_disable(struct drm_crtc *crtc,
+ 
+ 	drm_crtc_vblank_off(crtc);
+ 
+-	sun4i_tcon_set_status(scrtc->tcon, encoder, false);
++	sun4i_tcon_set_status(scrtc->tcon, encoder, false, 0);
+ 
+ 	if (crtc->state->event && !crtc->state->active) {
+ 		spin_lock_irq(&crtc->dev->event_lock);
+@@ -132,7 +132,8 @@ static void sun4i_crtc_atomic_enable(struct drm_crtc *crtc,
+ 
+ 	DRM_DEBUG_DRIVER("Enabling the CRTC\n");
+ 
+-	sun4i_tcon_set_status(scrtc->tcon, encoder, true);
++	sun4i_tcon_set_status(scrtc->tcon, encoder, true,
++			      crtc->state->adjusted_mode.crtc_clock * 1000);
+ 
+ 	drm_crtc_vblank_on(crtc);
+ }
+diff --git a/drivers/gpu/drm/sun4i/sun4i_drv.c b/drivers/gpu/drm/sun4i/sun4i_drv.c
+index 36992a41f..fa5ea72f0 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_drv.c
++++ b/drivers/gpu/drm/sun4i/sun4i_drv.c
+@@ -16,11 +16,11 @@
+ #include <linux/of_reserved_mem.h>
+ 
+ #include <drm/drmP.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_fb_cma_helper.h>
+-#include <drm/drm_gem_cma_helper.h>
+ #include <drm/drm_fb_helper.h>
++#include <drm/drm_gem_cma_helper.h>
+ #include <drm/drm_of.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include <uapi/drm/sun4i_drm.h>
+ 
+@@ -30,6 +30,16 @@
+ #include "sun4i_tcon.h"
+ #include "sun8i_tcon_top.h"
+ 
++static int drm_sun4i_gem_dumb_create(struct drm_file *file_priv,
++				     struct drm_device *drm,
++				     struct drm_mode_create_dumb *args)
++{
++	/* The hardware only allows even pitches for YUV buffers. */
++	args->pitch = ALIGN(DIV_ROUND_UP(args->width * args->bpp, 8), 2);
++
++	return drm_gem_cma_dumb_create_internal(file_priv, drm, args);
++}
++
+ DEFINE_DRM_GEM_CMA_FOPS(sun4i_drv_fops);
+ 
+ static int sun4i_gem_create_ioctl(struct drm_device *drm, void *data,
+@@ -57,7 +67,6 @@ static struct drm_driver sun4i_drv_driver = {
+ 	.driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_PRIME | DRIVER_ATOMIC,
+ 
+ 	/* Generic Operations */
+-	.lastclose		= drm_fb_helper_lastclose,
+ 	.fops			= &sun4i_drv_fops,
+ 	.name			= "sun4i-drm",
+ 	.desc			= "Allwinner sun4i Display Engine",
+@@ -70,7 +79,7 @@ static struct drm_driver sun4i_drv_driver = {
+ 	.num_ioctls		= ARRAY_SIZE(sun4i_drv_ioctls),
+ 
+ 	/* GEM Operations */
+-	.dumb_create		= drm_gem_cma_dumb_create,
++	.dumb_create		= drm_sun4i_gem_dumb_create,
+ 	.gem_free_object_unlocked = drm_gem_cma_free_object,
+ 	.gem_vm_ops		= &drm_gem_cma_vm_ops,
+ 
+@@ -88,22 +97,6 @@ static struct drm_driver sun4i_drv_driver = {
+ 	/* Frame Buffer Operations */
+ };
+ 
+-static void sun4i_remove_framebuffers(void)
+-{
+-	struct apertures_struct *ap;
+-
+-	ap = alloc_apertures(1);
+-	if (!ap)
+-		return;
+-
+-	/* The framebuffer can be located anywhere in RAM */
+-	ap->ranges[0].base = 0;
+-	ap->ranges[0].size = ~0;
+-
+-	drm_fb_helper_remove_conflicting_framebuffers(ap, "sun4i-drm-fb", false);
+-	kfree(ap);
+-}
+-
+ static int sun4i_drv_bind(struct device *dev)
+ {
+ 	struct drm_device *drm;
+@@ -119,8 +112,6 @@ static int sun4i_drv_bind(struct device *dev)
+ 		ret = -ENOMEM;
+ 		goto free_drm;
+ 	}
+-
+-	dev_set_drvdata(dev, drm);
+ 	drm->dev_private = drv;
+ 	INIT_LIST_HEAD(&drv->frontend_list);
+ 	INIT_LIST_HEAD(&drv->engine_list);
+@@ -133,6 +124,7 @@ static int sun4i_drv_bind(struct device *dev)
+ 	}
+ 
+ 	drm_mode_config_init(drm);
++	drm->mode_config.allow_fb_modifiers = true;
+ 
+ 	ret = component_bind_all(drm->dev, drm);
+ 	if (ret) {
+@@ -148,14 +140,9 @@ static int sun4i_drv_bind(struct device *dev)
+ 	drm->irq_enabled = true;
+ 
+ 	/* Remove early framebuffers (ie. simplefb) */
+-	sun4i_remove_framebuffers();
++	drm_fb_helper_remove_conflicting_framebuffers(NULL, "sun4i-drm-fb", false);
+ 
+-	/* Create our framebuffer */
+-	ret = sun4i_framebuffer_init(drm);
+-	if (ret) {
+-		dev_err(drm->dev, "Couldn't create our framebuffer\n");
+-		goto cleanup_mode_config;
+-	}
++	sun4i_framebuffer_init(drm);
+ 
+ 	/* Enable connectors polling */
+ 	drm_kms_helper_poll_init(drm);
+@@ -164,11 +151,12 @@ static int sun4i_drv_bind(struct device *dev)
+ 	if (ret)
+ 		goto finish_poll;
+ 
++	drm_fbdev_generic_setup(drm, 32);
++
+ 	return 0;
+ 
+ finish_poll:
+ 	drm_kms_helper_poll_fini(drm);
+-	sun4i_framebuffer_free(drm);
+ cleanup_mode_config:
+ 	drm_mode_config_cleanup(drm);
+ 	of_reserved_mem_device_release(dev);
+@@ -183,12 +171,8 @@ static void sun4i_drv_unbind(struct device *dev)
+ 
+ 	drm_dev_unregister(drm);
+ 	drm_kms_helper_poll_fini(drm);
+-	sun4i_framebuffer_free(drm);
+ 	drm_mode_config_cleanup(drm);
+-
+-	component_unbind_all(dev, NULL);
+ 	of_reserved_mem_device_release(dev);
+-
+ 	drm_dev_put(drm);
+ }
+ 
+@@ -208,6 +192,7 @@ static bool sun4i_drv_node_is_frontend(struct device_node *node)
+ 		of_device_is_compatible(node, "allwinner,sun5i-a13-display-frontend") ||
+ 		of_device_is_compatible(node, "allwinner,sun6i-a31-display-frontend") ||
+ 		of_device_is_compatible(node, "allwinner,sun7i-a20-display-frontend") ||
++		of_device_is_compatible(node, "allwinner,sun8i-a23-display-frontend") ||
+ 		of_device_is_compatible(node, "allwinner,sun8i-a33-display-frontend") ||
+ 		of_device_is_compatible(node, "allwinner,sun9i-a80-display-frontend");
+ }
+@@ -437,8 +422,6 @@ static int sun4i_drv_probe(struct platform_device *pdev)
+ 
+ static int sun4i_drv_remove(struct platform_device *pdev)
+ {
+-	component_master_del(&pdev->dev, &sun4i_drv_master_ops);
+-
+ 	return 0;
+ }
+ 
+@@ -449,12 +432,15 @@ static const struct of_device_id sun4i_drv_of_table[] = {
+ 	{ .compatible = "allwinner,sun6i-a31-display-engine" },
+ 	{ .compatible = "allwinner,sun6i-a31s-display-engine" },
+ 	{ .compatible = "allwinner,sun7i-a20-display-engine" },
++	{ .compatible = "allwinner,sun8i-a23-display-engine" },
+ 	{ .compatible = "allwinner,sun8i-a33-display-engine" },
+ 	{ .compatible = "allwinner,sun8i-a83t-display-engine" },
+ 	{ .compatible = "allwinner,sun8i-h3-display-engine" },
++	{ .compatible = "allwinner,sun8i-r40-display-engine" },
+ 	{ .compatible = "allwinner,sun8i-v3s-display-engine" },
+ 	{ .compatible = "allwinner,sun9i-a80-display-engine" },
+ 	{ .compatible = "allwinner,sun50i-a64-display-engine" },
++	{ .compatible = "allwinner,sun50i-h6-display-engine" },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, sun4i_drv_of_table);
+diff --git a/drivers/gpu/drm/sun4i/sun4i_framebuffer.c b/drivers/gpu/drm/sun4i/sun4i_framebuffer.c
+index 5f29850ef..cb828028a 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_framebuffer.c
++++ b/drivers/gpu/drm/sun4i/sun4i_framebuffer.c
+@@ -12,8 +12,6 @@
+ 
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_fb_helper.h>
+-#include <drm/drm_fb_cma_helper.h>
+ #include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drmP.h>
+ 
+@@ -37,7 +35,6 @@ static int sun4i_de_atomic_check(struct drm_device *dev,
+ }
+ 
+ static const struct drm_mode_config_funcs sun4i_de_mode_config_funcs = {
+-	.output_poll_changed	= drm_fb_helper_output_poll_changed,
+ 	.atomic_check		= sun4i_de_atomic_check,
+ 	.atomic_commit		= drm_atomic_helper_commit,
+ 	.fb_create		= drm_gem_fb_create,
+@@ -47,7 +44,7 @@ static struct drm_mode_config_helper_funcs sun4i_de_mode_config_helpers = {
+ 	.atomic_commit_tail	= drm_atomic_helper_commit_tail_rpm,
+ };
+ 
+-int sun4i_framebuffer_init(struct drm_device *drm)
++void sun4i_framebuffer_init(struct drm_device *drm)
+ {
+ 	drm_mode_config_reset(drm);
+ 
+@@ -56,11 +53,4 @@ int sun4i_framebuffer_init(struct drm_device *drm)
+ 
+ 	drm->mode_config.funcs = &sun4i_de_mode_config_funcs;
+ 	drm->mode_config.helper_private = &sun4i_de_mode_config_helpers;
+-
+-	return drm_fb_cma_fbdev_init(drm, 32, 0);
+-}
+-
+-void sun4i_framebuffer_free(struct drm_device *drm)
+-{
+-	drm_fb_cma_fbdev_fini(drm);
+ }
+diff --git a/drivers/gpu/drm/sun4i/sun4i_framebuffer.h b/drivers/gpu/drm/sun4i/sun4i_framebuffer.h
+index 7ef0aed83..6fe5bd8c4 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_framebuffer.h
++++ b/drivers/gpu/drm/sun4i/sun4i_framebuffer.h
+@@ -13,7 +13,6 @@
+ #ifndef _SUN4I_FRAMEBUFFER_H_
+ #define _SUN4I_FRAMEBUFFER_H_
+ 
+-int sun4i_framebuffer_init(struct drm_device *drm);
+-void sun4i_framebuffer_free(struct drm_device *drm);
++void sun4i_framebuffer_init(struct drm_device *drm);
+ 
+ #endif /* _SUN4I_FRAMEBUFFER_H_ */
+diff --git a/drivers/gpu/drm/sun4i/sun4i_frontend.c b/drivers/gpu/drm/sun4i/sun4i_frontend.c
+index ddf6cfa6d..346c8071b 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_frontend.c
++++ b/drivers/gpu/drm/sun4i/sun4i_frontend.c
+@@ -10,6 +10,7 @@
+ #include <linux/clk.h>
+ #include <linux/component.h>
+ #include <linux/module.h>
++#include <linux/of_device.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
+@@ -48,10 +49,38 @@ static const u32 sun4i_frontend_horz_coef[64] = {
+ 	0x03ff0000, 0x0000fd41, 0x01ff0000, 0x0000fe42,
+ };
+ 
++/*
++ * These coefficients are taken from the A33 BSP from Allwinner.
++ *
++ * The first three values of each row are coded as 13-bit signed fixed-point
++ * numbers, with 10 bits for the fractional part. The fourth value is a
++ * constant coded as a 14-bit signed fixed-point number with 4 bits for the
++ * fractional part.
++ *
++ * The values in table order give the following colorspace translation:
++ * G = 1.164 * Y - 0.391 * U - 0.813 * V + 135
++ * R = 1.164 * Y + 1.596 * V - 222
++ * B = 1.164 * Y + 2.018 * U + 276
++ *
++ * This seems to be a conversion from Y[16:235] UV[16:240] to RGB[0:255],
++ * following the BT601 spec.
++ */
++const u32 sunxi_bt601_yuv2rgb_coef[12] = {
++	0x000004a7, 0x00001e6f, 0x00001cbf, 0x00000877,
++	0x000004a7, 0x00000000, 0x00000662, 0x00003211,
++	0x000004a7, 0x00000812, 0x00000000, 0x00002eb1,
++};
++EXPORT_SYMBOL(sunxi_bt601_yuv2rgb_coef);
++
+ static void sun4i_frontend_scaler_init(struct sun4i_frontend *frontend)
+ {
+ 	int i;
+ 
++	if (frontend->data->has_coef_access_ctrl)
++		regmap_write_bits(frontend->regs, SUN4I_FRONTEND_FRM_CTRL_REG,
++				  SUN4I_FRONTEND_FRM_CTRL_COEF_ACCESS_CTRL,
++				  SUN4I_FRONTEND_FRM_CTRL_COEF_ACCESS_CTRL);
++
+ 	for (i = 0; i < 32; i++) {
+ 		regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_HORZCOEF0_REG(i),
+ 			     sun4i_frontend_horz_coef[2 * i]);
+@@ -67,9 +96,11 @@ static void sun4i_frontend_scaler_init(struct sun4i_frontend *frontend)
+ 			     sun4i_frontend_vert_coef[i]);
+ 	}
+ 
+-	regmap_update_bits(frontend->regs, SUN4I_FRONTEND_FRM_CTRL_REG,
+-			   SUN4I_FRONTEND_FRM_CTRL_COEF_ACCESS_CTRL,
+-			   SUN4I_FRONTEND_FRM_CTRL_COEF_ACCESS_CTRL);
++	if (frontend->data->has_coef_rdy)
++		regmap_write_bits(frontend->regs,
++				  SUN4I_FRONTEND_FRM_CTRL_REG,
++				  SUN4I_FRONTEND_FRM_CTRL_COEF_RDY,
++				  SUN4I_FRONTEND_FRM_CTRL_COEF_RDY);
+ }
+ 
+ int sun4i_frontend_init(struct sun4i_frontend *frontend)
+@@ -84,31 +115,226 @@ void sun4i_frontend_exit(struct sun4i_frontend *frontend)
+ }
+ EXPORT_SYMBOL(sun4i_frontend_exit);
+ 
++static bool sun4i_frontend_format_chroma_requires_swap(uint32_t fmt)
++{
++	switch (fmt) {
++	case DRM_FORMAT_YVU411:
++	case DRM_FORMAT_YVU420:
++	case DRM_FORMAT_YVU422:
++	case DRM_FORMAT_YVU444:
++		return true;
++
++	default:
++		return false;
++	}
++}
++
++static bool sun4i_frontend_format_supports_tiling(uint32_t fmt)
++{
++	switch (fmt) {
++	case DRM_FORMAT_NV12:
++	case DRM_FORMAT_NV16:
++	case DRM_FORMAT_NV21:
++	case DRM_FORMAT_NV61:
++	case DRM_FORMAT_YUV411:
++	case DRM_FORMAT_YUV420:
++	case DRM_FORMAT_YUV422:
++	case DRM_FORMAT_YVU420:
++	case DRM_FORMAT_YVU422:
++	case DRM_FORMAT_YVU411:
++		return true;
++
++	default:
++		return false;
++	}
++}
++
+ void sun4i_frontend_update_buffer(struct sun4i_frontend *frontend,
+ 				  struct drm_plane *plane)
+ {
+ 	struct drm_plane_state *state = plane->state;
+ 	struct drm_framebuffer *fb = state->fb;
++	unsigned int strides[3] = {};
++
+ 	dma_addr_t paddr;
++	bool swap;
++
++	if (fb->modifier == DRM_FORMAT_MOD_ALLWINNER_TILED) {
++		unsigned int width = state->src_w >> 16;
++		unsigned int offset;
++
++		strides[0] = SUN4I_FRONTEND_LINESTRD_TILED(fb->pitches[0]);
++
++		/*
++		 * The X1 offset is the offset to the bottom-right point in the
++		 * end tile, which is the final pixel (at offset width - 1)
++		 * within the end tile (with a 32-byte mask).
++		 */
++		offset = (width - 1) & (32 - 1);
++
++		regmap_write(frontend->regs, SUN4I_FRONTEND_TB_OFF0_REG,
++			     SUN4I_FRONTEND_TB_OFF_X1(offset));
++
++		if (fb->format->num_planes > 1) {
++			strides[1] =
++				SUN4I_FRONTEND_LINESTRD_TILED(fb->pitches[1]);
++
++			regmap_write(frontend->regs, SUN4I_FRONTEND_TB_OFF1_REG,
++				     SUN4I_FRONTEND_TB_OFF_X1(offset));
++		}
++
++		if (fb->format->num_planes > 2) {
++			strides[2] =
++				SUN4I_FRONTEND_LINESTRD_TILED(fb->pitches[2]);
++
++			regmap_write(frontend->regs, SUN4I_FRONTEND_TB_OFF2_REG,
++				     SUN4I_FRONTEND_TB_OFF_X1(offset));
++		}
++	} else {
++		strides[0] = fb->pitches[0];
++
++		if (fb->format->num_planes > 1)
++			strides[1] = fb->pitches[1];
++
++		if (fb->format->num_planes > 2)
++			strides[2] = fb->pitches[2];
++	}
+ 
+ 	/* Set the line width */
+ 	DRM_DEBUG_DRIVER("Frontend stride: %d bytes\n", fb->pitches[0]);
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_LINESTRD0_REG,
+-		     fb->pitches[0]);
++		     strides[0]);
++
++	if (fb->format->num_planes > 1)
++		regmap_write(frontend->regs, SUN4I_FRONTEND_LINESTRD1_REG,
++			     strides[1]);
++
++	if (fb->format->num_planes > 2)
++		regmap_write(frontend->regs, SUN4I_FRONTEND_LINESTRD2_REG,
++			     strides[2]);
++
++	/* Some planar formats require chroma channel swapping by hand. */
++	swap = sun4i_frontend_format_chroma_requires_swap(fb->format->format);
+ 
+ 	/* Set the physical address of the buffer in memory */
+ 	paddr = drm_fb_cma_get_gem_addr(fb, state, 0);
+ 	paddr -= PHYS_OFFSET;
+-	DRM_DEBUG_DRIVER("Setting buffer address to %pad\n", &paddr);
++	DRM_DEBUG_DRIVER("Setting buffer #0 address to %pad\n", &paddr);
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_BUF_ADDR0_REG, paddr);
++
++	if (fb->format->num_planes > 1) {
++		paddr = drm_fb_cma_get_gem_addr(fb, state, swap ? 2 : 1);
++		paddr -= PHYS_OFFSET;
++		DRM_DEBUG_DRIVER("Setting buffer #1 address to %pad\n", &paddr);
++		regmap_write(frontend->regs, SUN4I_FRONTEND_BUF_ADDR1_REG,
++			     paddr);
++	}
++
++	if (fb->format->num_planes > 2) {
++		paddr = drm_fb_cma_get_gem_addr(fb, state, swap ? 1 : 2);
++		paddr -= PHYS_OFFSET;
++		DRM_DEBUG_DRIVER("Setting buffer #2 address to %pad\n", &paddr);
++		regmap_write(frontend->regs, SUN4I_FRONTEND_BUF_ADDR2_REG,
++			     paddr);
++	}
+ }
+ EXPORT_SYMBOL(sun4i_frontend_update_buffer);
+ 
+-static int sun4i_frontend_drm_format_to_input_fmt(uint32_t fmt, u32 *val)
++static int
++sun4i_frontend_drm_format_to_input_fmt(const struct drm_format_info *format,
++				       u32 *val)
+ {
+-	switch (fmt) {
+-	case DRM_FORMAT_ARGB8888:
+-		*val = 5;
++	if (!format->is_yuv)
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_RGB;
++	else if (drm_format_info_is_yuv_sampling_411(format))
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_YUV411;
++	else if (drm_format_info_is_yuv_sampling_420(format))
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_YUV420;
++	else if (drm_format_info_is_yuv_sampling_422(format))
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_YUV422;
++	else if (drm_format_info_is_yuv_sampling_444(format))
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_YUV444;
++	else
++		return -EINVAL;
++
++	return 0;
++}
++
++static int
++sun4i_frontend_drm_format_to_input_mode(const struct drm_format_info *format,
++					uint64_t modifier, u32 *val)
++{
++	bool tiled = (modifier == DRM_FORMAT_MOD_ALLWINNER_TILED);
++
++	switch (format->num_planes) {
++	case 1:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_PACKED;
++		return 0;
++
++	case 2:
++		*val = tiled ? SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_MB32_SEMIPLANAR
++			     : SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_SEMIPLANAR;
++		return 0;
++
++	case 3:
++		*val = tiled ? SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_MB32_PLANAR
++			     : SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_PLANAR;
++		return 0;
++
++	default:
++		return -EINVAL;
++	}
++}
++
++static int
++sun4i_frontend_drm_format_to_input_sequence(const struct drm_format_info *format,
++					    u32 *val)
++{
++	/* Planar formats have an explicit input sequence. */
++	if (drm_format_info_is_yuv_planar(format)) {
++		*val = 0;
++		return 0;
++	}
++
++	switch (format->format) {
++	case DRM_FORMAT_BGRX8888:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_BGRX;
++		return 0;
++
++	case DRM_FORMAT_NV12:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_UV;
++		return 0;
++
++	case DRM_FORMAT_NV16:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_UV;
++		return 0;
++
++	case DRM_FORMAT_NV21:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_VU;
++		return 0;
++
++	case DRM_FORMAT_NV61:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_VU;
++		return 0;
++
++	case DRM_FORMAT_UYVY:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_UYVY;
++		return 0;
++
++	case DRM_FORMAT_VYUY:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_VYUY;
++		return 0;
++
++	case DRM_FORMAT_XRGB8888:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_XRGB;
++		return 0;
++
++	case DRM_FORMAT_YUYV:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_YUYV;
++		return 0;
++
++	case DRM_FORMAT_YVYU:
++		*val = SUN4I_FRONTEND_INPUT_FMT_DATA_PS_YVYU;
+ 		return 0;
+ 
+ 	default:
+@@ -119,9 +345,12 @@ static int sun4i_frontend_drm_format_to_input_fmt(uint32_t fmt, u32 *val)
+ static int sun4i_frontend_drm_format_to_output_fmt(uint32_t fmt, u32 *val)
+ {
+ 	switch (fmt) {
++	case DRM_FORMAT_BGRX8888:
++		*val = SUN4I_FRONTEND_OUTPUT_FMT_DATA_FMT_BGRX8888;
++		return 0;
++
+ 	case DRM_FORMAT_XRGB8888:
+-	case DRM_FORMAT_ARGB8888:
+-		*val = 2;
++		*val = SUN4I_FRONTEND_OUTPUT_FMT_DATA_FMT_XRGB8888;
+ 		return 0;
+ 
+ 	default:
+@@ -129,22 +358,76 @@ static int sun4i_frontend_drm_format_to_output_fmt(uint32_t fmt, u32 *val)
+ 	}
+ }
+ 
++static const uint32_t sun4i_frontend_formats[] = {
++	DRM_FORMAT_BGRX8888,
++	DRM_FORMAT_NV12,
++	DRM_FORMAT_NV16,
++	DRM_FORMAT_NV21,
++	DRM_FORMAT_NV61,
++	DRM_FORMAT_UYVY,
++	DRM_FORMAT_VYUY,
++	DRM_FORMAT_XRGB8888,
++	DRM_FORMAT_YUV411,
++	DRM_FORMAT_YUV420,
++	DRM_FORMAT_YUV422,
++	DRM_FORMAT_YUV444,
++	DRM_FORMAT_YUYV,
++	DRM_FORMAT_YVU411,
++	DRM_FORMAT_YVU420,
++	DRM_FORMAT_YVU422,
++	DRM_FORMAT_YVU444,
++	DRM_FORMAT_YVYU,
++};
++
++bool sun4i_frontend_format_is_supported(uint32_t fmt, uint64_t modifier)
++{
++	unsigned int i;
++
++	if (modifier == DRM_FORMAT_MOD_ALLWINNER_TILED)
++		return sun4i_frontend_format_supports_tiling(fmt);
++	else if (modifier != DRM_FORMAT_MOD_LINEAR)
++		return false;
++
++	for (i = 0; i < ARRAY_SIZE(sun4i_frontend_formats); i++)
++		if (sun4i_frontend_formats[i] == fmt)
++			return true;
++
++	return false;
++}
++EXPORT_SYMBOL(sun4i_frontend_format_is_supported);
++
+ int sun4i_frontend_update_formats(struct sun4i_frontend *frontend,
+ 				  struct drm_plane *plane, uint32_t out_fmt)
+ {
+ 	struct drm_plane_state *state = plane->state;
+ 	struct drm_framebuffer *fb = state->fb;
++	const struct drm_format_info *format = fb->format;
++	uint64_t modifier = fb->modifier;
+ 	u32 out_fmt_val;
+-	u32 in_fmt_val;
++	u32 in_fmt_val, in_mod_val, in_ps_val;
++	unsigned int i;
++	u32 bypass;
+ 	int ret;
+ 
+-	ret = sun4i_frontend_drm_format_to_input_fmt(fb->format->format,
+-						     &in_fmt_val);
++	ret = sun4i_frontend_drm_format_to_input_fmt(format, &in_fmt_val);
+ 	if (ret) {
+ 		DRM_DEBUG_DRIVER("Invalid input format\n");
+ 		return ret;
+ 	}
+ 
++	ret = sun4i_frontend_drm_format_to_input_mode(format, modifier,
++						      &in_mod_val);
++	if (ret) {
++		DRM_DEBUG_DRIVER("Invalid input mode\n");
++		return ret;
++	}
++
++	ret = sun4i_frontend_drm_format_to_input_sequence(format, &in_ps_val);
++	if (ret) {
++		DRM_DEBUG_DRIVER("Invalid pixel sequence\n");
++		return ret;
++	}
++
+ 	ret = sun4i_frontend_drm_format_to_output_fmt(out_fmt, &out_fmt_val);
+ 	if (ret) {
+ 		DRM_DEBUG_DRIVER("Invalid output format\n");
+@@ -155,17 +438,42 @@ int sun4i_frontend_update_formats(struct sun4i_frontend *frontend,
+ 	 * I have no idea what this does exactly, but it seems to be
+ 	 * related to the scaler FIR filter phase parameters.
+ 	 */
+-	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_HORZPHASE_REG, 0x400);
+-	regmap_write(frontend->regs, SUN4I_FRONTEND_CH1_HORZPHASE_REG, 0x400);
+-	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_VERTPHASE0_REG, 0x400);
+-	regmap_write(frontend->regs, SUN4I_FRONTEND_CH1_VERTPHASE0_REG, 0x400);
+-	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_VERTPHASE1_REG, 0x400);
+-	regmap_write(frontend->regs, SUN4I_FRONTEND_CH1_VERTPHASE1_REG, 0x400);
++	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_HORZPHASE_REG,
++		     frontend->data->ch_phase[0].horzphase);
++	regmap_write(frontend->regs, SUN4I_FRONTEND_CH1_HORZPHASE_REG,
++		     frontend->data->ch_phase[1].horzphase);
++	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_VERTPHASE0_REG,
++		     frontend->data->ch_phase[0].vertphase[0]);
++	regmap_write(frontend->regs, SUN4I_FRONTEND_CH1_VERTPHASE0_REG,
++		     frontend->data->ch_phase[1].vertphase[0]);
++	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_VERTPHASE1_REG,
++		     frontend->data->ch_phase[0].vertphase[1]);
++	regmap_write(frontend->regs, SUN4I_FRONTEND_CH1_VERTPHASE1_REG,
++		     frontend->data->ch_phase[1].vertphase[1]);
++
++	/*
++	 * Checking the input format is sufficient since we currently only
++	 * support RGB output formats to the backend. If YUV output formats
++	 * ever get supported, an YUV input and output would require bypassing
++	 * the CSC engine too.
++	 */
++	if (format->is_yuv) {
++		/* Setup the CSC engine for YUV to RGB conversion. */
++		bypass = 0;
++
++		for (i = 0; i < ARRAY_SIZE(sunxi_bt601_yuv2rgb_coef); i++)
++			regmap_write(frontend->regs,
++				     SUN4I_FRONTEND_CSC_COEF_REG(i),
++				     sunxi_bt601_yuv2rgb_coef[i]);
++	} else {
++		bypass = SUN4I_FRONTEND_BYPASS_CSC_EN;
++	}
++
++	regmap_update_bits(frontend->regs, SUN4I_FRONTEND_BYPASS_REG,
++			   SUN4I_FRONTEND_BYPASS_CSC_EN, bypass);
+ 
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_INPUT_FMT_REG,
+-		     SUN4I_FRONTEND_INPUT_FMT_DATA_MOD(1) |
+-		     SUN4I_FRONTEND_INPUT_FMT_DATA_FMT(in_fmt_val) |
+-		     SUN4I_FRONTEND_INPUT_FMT_PS(1));
++		     in_mod_val | in_fmt_val | in_ps_val);
+ 
+ 	/*
+ 	 * TODO: It look like the A31 and A80 at least will need the
+@@ -173,7 +481,7 @@ int sun4i_frontend_update_formats(struct sun4i_frontend *frontend,
+ 	 * ARGB8888).
+ 	 */
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_OUTPUT_FMT_REG,
+-		     SUN4I_FRONTEND_OUTPUT_FMT_DATA_FMT(out_fmt_val));
++		     out_fmt_val);
+ 
+ 	return 0;
+ }
+@@ -183,16 +491,24 @@ void sun4i_frontend_update_coord(struct sun4i_frontend *frontend,
+ 				 struct drm_plane *plane)
+ {
+ 	struct drm_plane_state *state = plane->state;
++	struct drm_framebuffer *fb = state->fb;
++	uint32_t luma_width, luma_height;
++	uint32_t chroma_width, chroma_height;
+ 
+ 	/* Set height and width */
+ 	DRM_DEBUG_DRIVER("Frontend size W: %u H: %u\n",
+ 			 state->crtc_w, state->crtc_h);
++
++	luma_width = state->src_w >> 16;
++	luma_height = state->src_h >> 16;
++
++	chroma_width = DIV_ROUND_UP(luma_width, fb->format->hsub);
++	chroma_height = DIV_ROUND_UP(luma_height, fb->format->vsub);
++
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_INSIZE_REG,
+-		     SUN4I_FRONTEND_INSIZE(state->src_h >> 16,
+-					   state->src_w >> 16));
++		     SUN4I_FRONTEND_INSIZE(luma_height, luma_width));
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_CH1_INSIZE_REG,
+-		     SUN4I_FRONTEND_INSIZE(state->src_h >> 16,
+-					   state->src_w >> 16));
++		     SUN4I_FRONTEND_INSIZE(chroma_height, chroma_width));
+ 
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_OUTSIZE_REG,
+ 		     SUN4I_FRONTEND_OUTSIZE(state->crtc_h, state->crtc_w));
+@@ -200,14 +516,14 @@ void sun4i_frontend_update_coord(struct sun4i_frontend *frontend,
+ 		     SUN4I_FRONTEND_OUTSIZE(state->crtc_h, state->crtc_w));
+ 
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_HORZFACT_REG,
+-		     state->src_w / state->crtc_w);
++		     (luma_width << 16) / state->crtc_w);
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_CH1_HORZFACT_REG,
+-		     state->src_w / state->crtc_w);
++		     (chroma_width << 16) / state->crtc_w);
+ 
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_CH0_VERTFACT_REG,
+-		     state->src_h / state->crtc_h);
++		     (luma_height << 16) / state->crtc_h);
+ 	regmap_write(frontend->regs, SUN4I_FRONTEND_CH1_VERTFACT_REG,
+-		     state->src_h / state->crtc_h);
++		     (chroma_height << 16) / state->crtc_h);
+ 
+ 	regmap_write_bits(frontend->regs, SUN4I_FRONTEND_FRM_CTRL_REG,
+ 			  SUN4I_FRONTEND_FRM_CTRL_REG_RDY,
+@@ -250,6 +566,10 @@ static int sun4i_frontend_bind(struct device *dev, struct device *master,
+ 	frontend->dev = dev;
+ 	frontend->node = dev->of_node;
+ 
++	frontend->data = of_device_get_match_data(dev);
++	if (!frontend->data)
++		return -ENODEV;
++
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 	regs = devm_ioremap_resource(dev, res);
+ 	if (IS_ERR(regs))
+@@ -339,10 +659,6 @@ static int sun4i_frontend_runtime_resume(struct device *dev)
+ 			   SUN4I_FRONTEND_EN_EN,
+ 			   SUN4I_FRONTEND_EN_EN);
+ 
+-	regmap_update_bits(frontend->regs, SUN4I_FRONTEND_BYPASS_REG,
+-			   SUN4I_FRONTEND_BYPASS_CSC_EN,
+-			   SUN4I_FRONTEND_BYPASS_CSC_EN);
+-
+ 	sun4i_frontend_scaler_init(frontend);
+ 
+ 	return 0;
+@@ -366,8 +682,51 @@ static const struct dev_pm_ops sun4i_frontend_pm_ops = {
+ 	.runtime_suspend	= sun4i_frontend_runtime_suspend,
+ };
+ 
++static const struct sun4i_frontend_data sun4i_a10_frontend = {
++	.ch_phase		= {
++		{
++			.horzphase = 0,
++			.vertphase = { 0, 0 },
++		},
++		{
++			.horzphase = 0xfc000,
++			.vertphase = { 0xfc000, 0xfc000 },
++		},
++	},
++	.has_coef_rdy		= true,
++};
++
++static const struct sun4i_frontend_data sun8i_a33_frontend = {
++	.ch_phase		= {
++		{
++			.horzphase = 0x400,
++			.vertphase = { 0x400, 0x400 },
++		},
++		{
++			.horzphase = 0x400,
++			.vertphase = { 0x400, 0x400 },
++		},
++	},
++	.has_coef_access_ctrl	= true,
++};
++
+ const struct of_device_id sun4i_frontend_of_table[] = {
+-	{ .compatible = "allwinner,sun8i-a33-display-frontend" },
++	{
++		.compatible = "allwinner,sun4i-a10-display-frontend",
++		.data = &sun4i_a10_frontend
++	},
++	{
++		.compatible = "allwinner,sun7i-a20-display-frontend",
++		.data = &sun4i_a10_frontend
++	},
++	{
++		.compatible = "allwinner,sun8i-a23-display-frontend",
++		.data = &sun8i_a33_frontend
++	},
++	{
++		.compatible = "allwinner,sun8i-a33-display-frontend",
++		.data = &sun8i_a33_frontend
++	},
+ 	{ }
+ };
+ EXPORT_SYMBOL(sun4i_frontend_of_table);
+diff --git a/drivers/gpu/drm/sun4i/sun4i_frontend.h b/drivers/gpu/drm/sun4i/sun4i_frontend.h
+index 02661ce81..0c382c1dd 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_frontend.h
++++ b/drivers/gpu/drm/sun4i/sun4i_frontend.h
+@@ -22,16 +22,57 @@
+ #define SUN4I_FRONTEND_BYPASS_CSC_EN			BIT(1)
+ 
+ #define SUN4I_FRONTEND_BUF_ADDR0_REG		0x020
++#define SUN4I_FRONTEND_BUF_ADDR1_REG		0x024
++#define SUN4I_FRONTEND_BUF_ADDR2_REG		0x028
++
++#define SUN4I_FRONTEND_TB_OFF0_REG		0x030
++#define SUN4I_FRONTEND_TB_OFF1_REG		0x034
++#define SUN4I_FRONTEND_TB_OFF2_REG		0x038
++#define SUN4I_FRONTEND_TB_OFF_X1(x1)			((x1) << 16)
++#define SUN4I_FRONTEND_TB_OFF_Y0(y0)			((y0) << 8)
++#define SUN4I_FRONTEND_TB_OFF_X0(x0)			(x0)
+ 
+ #define SUN4I_FRONTEND_LINESTRD0_REG		0x040
++#define SUN4I_FRONTEND_LINESTRD1_REG		0x044
++#define SUN4I_FRONTEND_LINESTRD2_REG		0x048
++
++/*
++ * In tiled mode, the stride is defined as the distance between the start of the
++ * end line of the current tile and the start of the first line in the next
++ * vertical tile.
++ *
++ * Tiles are represented in row-major order, thus the end line of current tile
++ * starts at: 31 * 32 (31 lines of 32 cols), the next vertical tile starts at:
++ * 32-bit-aligned-width * 32 and the distance is:
++ * 32 * (32-bit-aligned-width - 31).
++ */
++#define SUN4I_FRONTEND_LINESTRD_TILED(stride)		(((stride) - 31) * 32)
+ 
+ #define SUN4I_FRONTEND_INPUT_FMT_REG		0x04c
+-#define SUN4I_FRONTEND_INPUT_FMT_DATA_MOD(mod)		((mod) << 8)
+-#define SUN4I_FRONTEND_INPUT_FMT_DATA_FMT(fmt)		((fmt) << 4)
+-#define SUN4I_FRONTEND_INPUT_FMT_PS(ps)			(ps)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_PLANAR	(0 << 8)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_PACKED	(1 << 8)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_SEMIPLANAR	(2 << 8)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_MB32_PLANAR	(4 << 8)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_MOD_MB32_SEMIPLANAR (6 << 8)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_YUV444	(0 << 4)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_YUV422	(1 << 4)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_YUV420	(2 << 4)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_YUV411	(3 << 4)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_FMT_RGB		(5 << 4)
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_PS_UYVY		0
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_PS_YUYV		1
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_PS_VYUY		2
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_PS_YVYU		3
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_PS_UV		0
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_PS_VU		1
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_PS_BGRX		0
++#define SUN4I_FRONTEND_INPUT_FMT_DATA_PS_XRGB		1
+ 
+ #define SUN4I_FRONTEND_OUTPUT_FMT_REG		0x05c
+-#define SUN4I_FRONTEND_OUTPUT_FMT_DATA_FMT(fmt)		(fmt)
++#define SUN4I_FRONTEND_OUTPUT_FMT_DATA_FMT_BGRX8888	1
++#define SUN4I_FRONTEND_OUTPUT_FMT_DATA_FMT_XRGB8888	2
++
++#define SUN4I_FRONTEND_CSC_COEF_REG(c)		(0x070 + (0x4 * (c)))
+ 
+ #define SUN4I_FRONTEND_CH0_INSIZE_REG		0x100
+ #define SUN4I_FRONTEND_INSIZE(h, w)			((((h) - 1) << 16) | (((w) - 1)))
+@@ -71,6 +112,16 @@ struct drm_plane;
+ struct regmap;
+ struct reset_control;
+ 
++struct sun4i_frontend_data {
++	bool	has_coef_access_ctrl;
++	bool	has_coef_rdy;
++
++	struct {
++		u32	horzphase;
++		u32	vertphase[2];
++	} ch_phase[2];
++};
++
+ struct sun4i_frontend {
+ 	struct list_head	list;
+ 	struct device		*dev;
+@@ -81,9 +132,12 @@ struct sun4i_frontend {
+ 	struct clk		*ram_clk;
+ 	struct regmap		*regs;
+ 	struct reset_control	*reset;
++
++	const struct sun4i_frontend_data	*data;
+ };
+ 
+ extern const struct of_device_id sun4i_frontend_of_table[];
++extern const u32 sunxi_bt601_yuv2rgb_coef[12];
+ 
+ int sun4i_frontend_init(struct sun4i_frontend *frontend);
+ void sun4i_frontend_exit(struct sun4i_frontend *frontend);
+@@ -95,5 +149,6 @@ void sun4i_frontend_update_coord(struct sun4i_frontend *frontend,
+ 				 struct drm_plane *plane);
+ int sun4i_frontend_update_formats(struct sun4i_frontend *frontend,
+ 				  struct drm_plane *plane, uint32_t out_fmt);
++bool sun4i_frontend_format_is_supported(uint32_t fmt, uint64_t modifier);
+ 
+ #endif /* _SUN4I_FRONTEND_H_ */
+diff --git a/drivers/gpu/drm/sun4i/sun4i_hdmi_enc.c b/drivers/gpu/drm/sun4i/sun4i_hdmi_enc.c
+index 416da5376..d18862629 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_hdmi_enc.c
++++ b/drivers/gpu/drm/sun4i/sun4i_hdmi_enc.c
+@@ -11,7 +11,7 @@
+ 
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
++#include <drm/drm_probe_helper.h>
+ #include <drm/drm_edid.h>
+ #include <drm/drm_encoder.h>
+ #include <drm/drm_of.h>
+@@ -52,7 +52,8 @@ static int sun4i_hdmi_setup_avi_infoframes(struct sun4i_hdmi *hdmi,
+ 	u8 buffer[17];
+ 	int i, ret;
+ 
+-	ret = drm_hdmi_avi_infoframe_from_display_mode(&frame, mode, false);
++	ret = drm_hdmi_avi_infoframe_from_display_mode(&frame,
++						       &hdmi->connector, mode);
+ 	if (ret < 0) {
+ 		DRM_ERROR("Failed to get infoframes from mode\n");
+ 		return ret;
+diff --git a/drivers/gpu/drm/sun4i/sun4i_hdmi_tmds_clk.c b/drivers/gpu/drm/sun4i/sun4i_hdmi_tmds_clk.c
+index 3ecffa52c..fb985ba1a 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_hdmi_tmds_clk.c
++++ b/drivers/gpu/drm/sun4i/sun4i_hdmi_tmds_clk.c
+@@ -35,7 +35,7 @@ static unsigned long sun4i_tmds_calc_divider(unsigned long rate,
+ {
+ 	unsigned long best_rate = 0;
+ 	u8 best_m = 0, m;
+-	bool is_double;
++	bool is_double = false;
+ 
+ 	for (m = div_offset ?: 1; m < (16 + div_offset); m++) {
+ 		u8 d;
+@@ -52,7 +52,7 @@ static unsigned long sun4i_tmds_calc_divider(unsigned long rate,
+ 			    (rate - tmp_rate) < (rate - best_rate)) {
+ 				best_rate = tmp_rate;
+ 				best_m = m;
+-				is_double = d;
++				is_double = (d == 2) ? true : false;
+ 			}
+ 		}
+ 	}
+diff --git a/drivers/gpu/drm/sun4i/sun4i_layer.c b/drivers/gpu/drm/sun4i/sun4i_layer.c
+index 750ad24de..a514fe88d 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_layer.c
++++ b/drivers/gpu/drm/sun4i/sun4i_layer.c
+@@ -12,6 +12,7 @@
+ 
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_plane_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drmP.h>
+ 
+ #include "sun4i_backend.h"
+@@ -35,9 +36,7 @@ static void sun4i_backend_layer_reset(struct drm_plane *plane)
+ 
+ 	state = kzalloc(sizeof(*state), GFP_KERNEL);
+ 	if (state) {
+-		plane->state = &state->state;
+-		plane->state->plane = plane;
+-		plane->state->alpha = DRM_BLEND_ALPHA_OPAQUE;
++		__drm_atomic_helper_plane_reset(plane, &state->state);
+ 		plane->state->zpos = layer->id;
+ 	}
+ }
+@@ -94,14 +93,16 @@ static void sun4i_backend_layer_atomic_update(struct drm_plane *plane,
+ 	struct sun4i_backend *backend = layer->backend;
+ 	struct sun4i_frontend *frontend = backend->frontend;
+ 
++	sun4i_backend_cleanup_layer(backend, layer->id);
++
+ 	if (layer_state->uses_frontend) {
+ 		sun4i_frontend_init(frontend);
+ 		sun4i_frontend_update_coord(frontend, plane);
+ 		sun4i_frontend_update_buffer(frontend, plane);
+ 		sun4i_frontend_update_formats(frontend, plane,
+-					      DRM_FORMAT_ARGB8888);
++					      DRM_FORMAT_XRGB8888);
+ 		sun4i_backend_update_layer_frontend(backend, layer->id,
+-						    DRM_FORMAT_ARGB8888);
++						    DRM_FORMAT_XRGB8888);
+ 		sun4i_frontend_enable(frontend);
+ 	} else {
+ 		sun4i_backend_update_layer_formats(backend, layer->id, plane);
+@@ -113,7 +114,20 @@ static void sun4i_backend_layer_atomic_update(struct drm_plane *plane,
+ 	sun4i_backend_layer_enable(backend, layer->id, true);
+ }
+ 
++static bool sun4i_layer_format_mod_supported(struct drm_plane *plane,
++					     uint32_t format, uint64_t modifier)
++{
++	struct sun4i_layer *layer = plane_to_sun4i_layer(plane);
++
++	if (IS_ERR_OR_NULL(layer->backend->frontend))
++		sun4i_backend_format_is_supported(format, modifier);
++
++	return sun4i_backend_format_is_supported(format, modifier) ||
++	       sun4i_frontend_format_is_supported(format, modifier);
++}
++
+ static const struct drm_plane_helper_funcs sun4i_backend_layer_helper_funcs = {
++	.prepare_fb	= drm_gem_fb_prepare_fb,
+ 	.atomic_disable	= sun4i_backend_layer_atomic_disable,
+ 	.atomic_update	= sun4i_backend_layer_atomic_update,
+ };
+@@ -125,6 +139,35 @@ static const struct drm_plane_funcs sun4i_backend_layer_funcs = {
+ 	.disable_plane		= drm_atomic_helper_disable_plane,
+ 	.reset			= sun4i_backend_layer_reset,
+ 	.update_plane		= drm_atomic_helper_update_plane,
++	.format_mod_supported	= sun4i_layer_format_mod_supported,
++};
++
++static const uint32_t sun4i_layer_formats[] = {
++	DRM_FORMAT_ARGB8888,
++	DRM_FORMAT_ARGB4444,
++	DRM_FORMAT_ARGB1555,
++	DRM_FORMAT_BGRX8888,
++	DRM_FORMAT_RGBA5551,
++	DRM_FORMAT_RGBA4444,
++	DRM_FORMAT_RGB888,
++	DRM_FORMAT_RGB565,
++	DRM_FORMAT_NV12,
++	DRM_FORMAT_NV16,
++	DRM_FORMAT_NV21,
++	DRM_FORMAT_NV61,
++	DRM_FORMAT_UYVY,
++	DRM_FORMAT_VYUY,
++	DRM_FORMAT_XRGB8888,
++	DRM_FORMAT_YUV411,
++	DRM_FORMAT_YUV420,
++	DRM_FORMAT_YUV422,
++	DRM_FORMAT_YUV444,
++	DRM_FORMAT_YUYV,
++	DRM_FORMAT_YVU411,
++	DRM_FORMAT_YVU420,
++	DRM_FORMAT_YVU422,
++	DRM_FORMAT_YVU444,
++	DRM_FORMAT_YVYU,
+ };
+ 
+ static const uint32_t sun4i_backend_layer_formats[] = {
+@@ -142,10 +185,19 @@ static const uint32_t sun4i_backend_layer_formats[] = {
+ 	DRM_FORMAT_YVYU,
+ };
+ 
++static const uint64_t sun4i_layer_modifiers[] = {
++	DRM_FORMAT_MOD_LINEAR,
++	DRM_FORMAT_MOD_ALLWINNER_TILED,
++	DRM_FORMAT_MOD_INVALID
++};
++
+ static struct sun4i_layer *sun4i_layer_init_one(struct drm_device *drm,
+ 						struct sun4i_backend *backend,
+ 						enum drm_plane_type type)
+ {
++	const uint64_t *modifiers = sun4i_layer_modifiers;
++	const uint32_t *formats = sun4i_layer_formats;
++	unsigned int formats_len = ARRAY_SIZE(sun4i_layer_formats);
+ 	struct sun4i_layer *layer;
+ 	int ret;
+ 
+@@ -153,12 +205,19 @@ static struct sun4i_layer *sun4i_layer_init_one(struct drm_device *drm,
+ 	if (!layer)
+ 		return ERR_PTR(-ENOMEM);
+ 
++	layer->backend = backend;
++
++	if (IS_ERR_OR_NULL(backend->frontend)) {
++		formats = sun4i_backend_layer_formats;
++		formats_len = ARRAY_SIZE(sun4i_backend_layer_formats);
++		modifiers = NULL;
++	}
++
+ 	/* possible crtcs are set later */
+ 	ret = drm_universal_plane_init(drm, &layer->plane, 0,
+ 				       &sun4i_backend_layer_funcs,
+-				       sun4i_backend_layer_formats,
+-				       ARRAY_SIZE(sun4i_backend_layer_formats),
+-				       NULL, type, NULL);
++				       formats, formats_len,
++				       modifiers, type, NULL);
+ 	if (ret) {
+ 		dev_err(drm->dev, "Couldn't initialize layer\n");
+ 		return ERR_PTR(ret);
+@@ -166,7 +225,6 @@ static struct sun4i_layer *sun4i_layer_init_one(struct drm_device *drm,
+ 
+ 	drm_plane_helper_add(&layer->plane,
+ 			     &sun4i_backend_layer_helper_funcs);
+-	layer->backend = backend;
+ 
+ 	drm_plane_create_alpha_property(&layer->plane);
+ 	drm_plane_create_zpos_property(&layer->plane, 0, 0,
+diff --git a/drivers/gpu/drm/sun4i/sun4i_lvds.c b/drivers/gpu/drm/sun4i/sun4i_lvds.c
+index af7dcb6da..147b97ed1 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_lvds.c
++++ b/drivers/gpu/drm/sun4i/sun4i_lvds.c
+@@ -8,9 +8,9 @@
+ 
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_of.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include "sun4i_crtc.h"
+ #include "sun4i_tcon.h"
+@@ -75,7 +75,7 @@ static void sun4i_lvds_encoder_enable(struct drm_encoder *encoder)
+ 
+ 	DRM_DEBUG_DRIVER("Enabling LVDS output\n");
+ 
+-	if (!IS_ERR(tcon->panel)) {
++	if (tcon->panel) {
+ 		drm_panel_prepare(tcon->panel);
+ 		drm_panel_enable(tcon->panel);
+ 	}
+@@ -88,7 +88,7 @@ static void sun4i_lvds_encoder_disable(struct drm_encoder *encoder)
+ 
+ 	DRM_DEBUG_DRIVER("Disabling LVDS output\n");
+ 
+-	if (!IS_ERR(tcon->panel)) {
++	if (tcon->panel) {
+ 		drm_panel_disable(tcon->panel);
+ 		drm_panel_unprepare(tcon->panel);
+ 	}
+diff --git a/drivers/gpu/drm/sun4i/sun4i_rgb.c b/drivers/gpu/drm/sun4i/sun4i_rgb.c
+index 23bdc449e..e83b5e050 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_rgb.c
++++ b/drivers/gpu/drm/sun4i/sun4i_rgb.c
+@@ -14,9 +14,9 @@
+ 
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_of.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include "sun4i_crtc.h"
+ #include "sun4i_tcon.h"
+@@ -92,17 +92,24 @@ static enum drm_mode_status sun4i_rgb_mode_valid(struct drm_encoder *crtc,
+ 
+ 	DRM_DEBUG_DRIVER("Vertical parameters OK\n");
+ 
+-	/* Check against a 5% tolerance for the dot clock */
+ 	tcon->dclk_min_div = 6;
+ 	tcon->dclk_max_div = 127;
+-	rounded_rate = clk_round_rate(tcon->dclk, rate);
+-	if (rounded_rate < rate * 19 / 20 )
+-		return MODE_CLOCK_LOW;
+-
+-	if (rounded_rate > rate * 21 / 20)
+-		return MODE_CLOCK_HIGH;
+-
+-	DRM_DEBUG_DRIVER("Clock rate OK\n");
++	switch (crtc->encoder_type) {
++	case DRM_MODE_ENCODER_LVDS:
++	case DRM_MODE_ENCODER_NONE:
++		DRM_DEBUG_DRIVER("Bypass dotclock check\n");
++		break;
++	default:
++		rounded_rate = clk_round_rate(tcon->dclk, rate);
++		if (rounded_rate < rate)
++			return MODE_CLOCK_LOW;
++
++		if (rounded_rate > rate)
++			return MODE_CLOCK_HIGH;
++
++		DRM_DEBUG_DRIVER("Clock rate OK\n");
++		break;
++	}
+ 
+ 	return MODE_OK;
+ }
+@@ -136,7 +143,7 @@ static void sun4i_rgb_encoder_enable(struct drm_encoder *encoder)
+ 
+ 	DRM_DEBUG_DRIVER("Enabling RGB output\n");
+ 
+-	if (!IS_ERR(tcon->panel)) {
++	if (tcon->panel) {
+ 		drm_panel_prepare(tcon->panel);
+ 		drm_panel_enable(tcon->panel);
+ 	}
+@@ -149,7 +156,7 @@ static void sun4i_rgb_encoder_disable(struct drm_encoder *encoder)
+ 
+ 	DRM_DEBUG_DRIVER("Disabling RGB output\n");
+ 
+-	if (!IS_ERR(tcon->panel)) {
++	if (tcon->panel) {
+ 		drm_panel_disable(tcon->panel);
+ 		drm_panel_unprepare(tcon->panel);
+ 	}
+diff --git a/drivers/gpu/drm/sun4i/sun4i_tcon.c b/drivers/gpu/drm/sun4i/sun4i_tcon.c
+index 46479de94..fefa10118 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_tcon.c
++++ b/drivers/gpu/drm/sun4i/sun4i_tcon.c
+@@ -14,11 +14,11 @@
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_connector.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_encoder.h>
+ #include <drm/drm_modes.h>
+ #include <drm/drm_of.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include <uapi/drm/drm_mode.h>
+ 
+@@ -37,6 +37,7 @@
+ #include "sun4i_rgb.h"
+ #include "sun4i_tcon.h"
+ #include "sun6i_mipi_dsi.h"
++#include "sun8i_tcon_top.h"
+ #include "sunxi_engine.h"
+ 
+ static struct drm_connector *sun4i_tcon_get_connector(const struct drm_encoder *encoder)
+@@ -81,7 +82,7 @@ static int sun4i_tcon_get_pixel_depth(const struct drm_encoder *encoder)
+ }
+ 
+ static void sun4i_tcon_channel_set_status(struct sun4i_tcon *tcon, int channel,
+-					  bool enabled)
++					  bool enabled, unsigned long dotclock)
+ {
+ 	struct clk *clk;
+ 
+@@ -106,8 +107,8 @@ static void sun4i_tcon_channel_set_status(struct sun4i_tcon *tcon, int channel,
+ 	}
+ 
+ 	if (enabled) {
++		clk_set_rate_exclusive(clk, dotclock);
+ 		clk_prepare_enable(clk);
+-		clk_rate_exclusive_get(clk);
+ 	} else {
+ 		clk_rate_exclusive_put(clk);
+ 		clk_disable_unprepare(clk);
+@@ -162,7 +163,7 @@ static void sun4i_tcon_lvds_set_status(struct sun4i_tcon *tcon,
+ 
+ void sun4i_tcon_set_status(struct sun4i_tcon *tcon,
+ 			   const struct drm_encoder *encoder,
+-			   bool enabled)
++			   bool enabled, unsigned long dotclock)
+ {
+ 	bool is_lvds = false;
+ 	int channel;
+@@ -194,7 +195,7 @@ void sun4i_tcon_set_status(struct sun4i_tcon *tcon,
+ 	if (is_lvds && enabled)
+ 		sun4i_tcon_lvds_set_status(tcon, encoder, true);
+ 
+-	sun4i_tcon_channel_set_status(tcon, channel, enabled);
++	sun4i_tcon_channel_set_status(tcon, channel, enabled, dotclock);
+ }
+ 
+ void sun4i_tcon_enable_vblank(struct sun4i_tcon *tcon, bool enable)
+@@ -269,7 +270,7 @@ static int sun4i_tcon_get_clk_delay(const struct drm_display_mode *mode,
+ static void sun4i_tcon0_mode_set_common(struct sun4i_tcon *tcon,
+ 					const struct drm_display_mode *mode)
+ {
+-	/* Configure the dot clock */
++	/* Configure the dot clock once, for DSI panels */
+ 	clk_set_rate(tcon->dclk, mode->crtc_clock * 1000);
+ 
+ 	/* Set the resolution */
+@@ -284,6 +285,10 @@ static void sun4i_tcon0_mode_set_dithering(struct sun4i_tcon *tcon,
+ 	u32 bus_format = 0;
+ 	u32 val = 0;
+ 
++	/* XXX Would this ever happen? */
++	if (!connector)
++		return;
++
+ 	/*
+ 	 * FIXME: Undocumented bits
+ 	 *
+@@ -301,15 +306,11 @@ static void sun4i_tcon0_mode_set_dithering(struct sun4i_tcon *tcon,
+ 	regmap_write(tcon->regs, SUN4I_TCON0_FRM_TBL2_REG, 0x57575555);
+ 	regmap_write(tcon->regs, SUN4I_TCON0_FRM_TBL3_REG, 0x7f7f7777);
+ 
+-	/* Do dithering if there's bridge connected */
+-	if (!connector)
+-		val |= SUN4I_TCON0_FRM_CTL_EN;
+-
+ 	/* Do dithering if panel only supports 6 bits per color */
+-	if (connector && connector->display_info.bpc == 6)
++	if (connector->display_info.bpc == 6)
+ 		val |= SUN4I_TCON0_FRM_CTL_EN;
+ 
+-	if (connector && connector->display_info.num_bus_formats == 1)
++	if (connector->display_info.num_bus_formats == 1)
+ 		bus_format = connector->display_info.bus_formats[0];
+ 
+ 	/* Check the connection format */
+@@ -341,8 +342,6 @@ static void sun4i_tcon0_mode_set_cpu(struct sun4i_tcon *tcon,
+ 	u32 block_space, start_delay;
+ 	u32 tcon_div;
+ 
+-	tcon->dclk_min_div = 4;
+-	tcon->dclk_max_div = 127;
+ 	tcon->dclk_min_div = bpp / lanes;
+ 	tcon->dclk_max_div = bpp / lanes;
+ 
+@@ -480,8 +479,11 @@ static void sun4i_tcon0_mode_set_lvds(struct sun4i_tcon *tcon,
+ }
+ 
+ static void sun4i_tcon0_mode_set_rgb(struct sun4i_tcon *tcon,
++				     const struct drm_encoder *encoder,
+ 				     const struct drm_display_mode *mode)
+ {
++	struct drm_connector *connector = sun4i_tcon_get_connector(encoder);
++	struct drm_display_info display_info = connector->display_info;
+ 	unsigned int bp, hsync, vsync;
+ 	u8 clk_delay;
+ 	u32 val = 0;
+@@ -493,10 +495,7 @@ static void sun4i_tcon0_mode_set_rgb(struct sun4i_tcon *tcon,
+ 	sun4i_tcon0_mode_set_common(tcon, mode);
+ 
+ 	/* Set dithering if needed */
+-	if (tcon->panel)
+-		sun4i_tcon0_mode_set_dithering(tcon, tcon->panel->connector);
+-	else
+-		sun4i_tcon0_mode_set_dithering(tcon, NULL);
++	sun4i_tcon0_mode_set_dithering(tcon, connector);
+ 
+ 	/* Adjust clock delay */
+ 	clk_delay = sun4i_tcon_get_clk_delay(mode, 0);
+@@ -545,8 +544,34 @@ static void sun4i_tcon0_mode_set_rgb(struct sun4i_tcon *tcon,
+ 	if (mode->flags & DRM_MODE_FLAG_PVSYNC)
+ 		val |= SUN4I_TCON0_IO_POL_VSYNC_POSITIVE;
+ 
++	if (display_info.bus_flags & DRM_BUS_FLAG_DE_LOW)
++		val |= SUN4I_TCON0_IO_POL_DE_NEGATIVE;
++
++	/*
++	 * On A20 and similar SoCs, the only way to achieve Positive Edge
++	 * (Rising Edge), is setting dclk clock phase to 2/3(240°).
++	 * By default TCON works in Negative Edge(Falling Edge),
++	 * this is why phase is set to 0 in that case.
++	 * Unfortunately there's no way to logically invert dclk through
++	 * IO_POL register.
++	 * The only acceptable way to work, triple checked with scope,
++	 * is using clock phase set to 0° for Negative Edge and set to 240°
++	 * for Positive Edge.
++	 * On A33 and similar SoCs there would be a 90° phase option,
++	 * but it divides also dclk by 2.
++	 * Following code is a way to avoid quirks all around TCON
++	 * and DOTCLOCK drivers.
++	 */
++	if (display_info.bus_flags & DRM_BUS_FLAG_PIXDATA_POSEDGE)
++		clk_set_phase(tcon->dclk, 240);
++
++	if (display_info.bus_flags & DRM_BUS_FLAG_PIXDATA_NEGEDGE)
++		clk_set_phase(tcon->dclk, 0);
++
+ 	regmap_update_bits(tcon->regs, SUN4I_TCON0_IO_POL_REG,
+-			   SUN4I_TCON0_IO_POL_HSYNC_POSITIVE | SUN4I_TCON0_IO_POL_VSYNC_POSITIVE,
++			   SUN4I_TCON0_IO_POL_HSYNC_POSITIVE |
++			   SUN4I_TCON0_IO_POL_VSYNC_POSITIVE |
++			   SUN4I_TCON0_IO_POL_DE_NEGATIVE,
+ 			   val);
+ 
+ 	/* Map output pins to channel 0 */
+@@ -567,9 +592,6 @@ static void sun4i_tcon1_mode_set(struct sun4i_tcon *tcon,
+ 
+ 	WARN_ON(!tcon->quirks->has_channel_1);
+ 
+-	/* Configure the dot clock */
+-	clk_set_rate(tcon->sclk1, mode->crtc_clock * 1000);
+-
+ 	/* Adjust clock delay */
+ 	clk_delay = sun4i_tcon_get_clk_delay(mode, 1);
+ 	regmap_update_bits(tcon->regs, SUN4I_TCON1_CTL_REG,
+@@ -661,7 +683,7 @@ void sun4i_tcon_mode_set(struct sun4i_tcon *tcon,
+ 		sun4i_tcon0_mode_set_lvds(tcon, encoder, mode);
+ 		break;
+ 	case DRM_MODE_ENCODER_NONE:
+-		sun4i_tcon0_mode_set_rgb(tcon, mode);
++		sun4i_tcon0_mode_set_rgb(tcon, encoder, mode);
+ 		sun4i_tcon_set_mux(tcon, 0, encoder);
+ 		break;
+ 	case DRM_MODE_ENCODER_TVDAC:
+@@ -947,6 +969,37 @@ static struct sunxi_engine *sun4i_tcon_get_engine_by_id(struct sun4i_drv *drv,
+ 	return ERR_PTR(-EINVAL);
+ }
+ 
++static bool sun4i_tcon_connected_to_tcon_top(struct device_node *node)
++{
++	struct device_node *remote;
++	bool ret = false;
++
++	remote = of_graph_get_remote_node(node, 0, -1);
++	if (remote) {
++		ret = !!(IS_ENABLED(CONFIG_DRM_SUN8I_TCON_TOP) &&
++			 of_match_node(sun8i_tcon_top_of_table, remote));
++		of_node_put(remote);
++	}
++
++	return ret;
++}
++
++static int sun4i_tcon_get_index(struct sun4i_drv *drv)
++{
++	struct list_head *pos;
++	int size = 0;
++
++	/*
++	 * Because TCON is added to the list at the end of the probe
++	 * (after this function is called), index of the current TCON
++	 * will be same as current TCON list size.
++	 */
++	list_for_each(pos, &drv->tcon_list)
++		++size;
++
++	return size;
++}
++
+ /*
+  * On SoCs with the old display pipeline design (Display Engine 1.0),
+  * we assumed the TCON was always tied to just one backend. However
+@@ -995,8 +1048,24 @@ static struct sunxi_engine *sun4i_tcon_find_engine(struct sun4i_drv *drv,
+ 	 * connections between the backend and TCON?
+ 	 */
+ 	if (of_get_child_count(port) > 1) {
+-		/* Get our ID directly from an upstream endpoint */
+-		int id = sun4i_tcon_of_get_id_from_port(port);
++		int id;
++
++		/*
++		 * When pipeline has the same number of TCONs and engines which
++		 * are represented by frontends/backends (DE1) or mixers (DE2),
++		 * we match them by their respective IDs. However, if pipeline
++		 * contains TCON TOP, chances are that there are either more
++		 * TCONs than engines (R40) or TCONs with non-consecutive ids.
++		 * (H6). In that case it's easier just use TCON index in list
++		 * as an id. That means that on R40, any 2 TCONs can be enabled
++		 * in DT out of 4 (there are 2 mixers). Due to the design of
++		 * TCON TOP, remaining 2 TCONs can't be connected to anything
++		 * anyway.
++		 */
++		if (sun4i_tcon_connected_to_tcon_top(node))
++			id = sun4i_tcon_get_index(drv);
++		else
++			id = sun4i_tcon_of_get_id_from_port(port);
+ 
+ 		/* Get our engine by matching our ID */
+ 		engine = sun4i_tcon_get_engine_by_id(drv, id);
+@@ -1311,6 +1380,47 @@ static int sun6i_tcon_set_mux(struct sun4i_tcon *tcon,
+ 	return 0;
+ }
+ 
++static int sun8i_r40_tcon_tv_set_mux(struct sun4i_tcon *tcon,
++				     const struct drm_encoder *encoder)
++{
++	struct device_node *port, *remote;
++	struct platform_device *pdev;
++	int id, ret;
++
++	/* find TCON TOP platform device and TCON id */
++
++	port = of_graph_get_port_by_id(tcon->dev->of_node, 0);
++	if (!port)
++		return -EINVAL;
++
++	id = sun4i_tcon_of_get_id_from_port(port);
++	of_node_put(port);
++
++	remote = of_graph_get_remote_node(tcon->dev->of_node, 0, -1);
++	if (!remote)
++		return -EINVAL;
++
++	pdev = of_find_device_by_node(remote);
++	of_node_put(remote);
++	if (!pdev)
++		return -EINVAL;
++
++	if (IS_ENABLED(CONFIG_DRM_SUN8I_TCON_TOP) &&
++	    encoder->encoder_type == DRM_MODE_ENCODER_TMDS) {
++		ret = sun8i_tcon_top_set_hdmi_src(&pdev->dev, id);
++		if (ret)
++			return ret;
++	}
++
++	if (IS_ENABLED(CONFIG_DRM_SUN8I_TCON_TOP)) {
++		ret = sun8i_tcon_top_de_config(&pdev->dev, tcon->id, id);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
+ static const struct sun4i_tcon_quirks sun4i_a10_quirks = {
+ 	.has_channel_0		= true,
+ 	.has_channel_1		= true,
+@@ -1358,6 +1468,11 @@ static const struct sun4i_tcon_quirks sun8i_a83t_tv_quirks = {
+ 	.has_channel_1		= true,
+ };
+ 
++static const struct sun4i_tcon_quirks sun8i_r40_tv_quirks = {
++	.has_channel_1		= true,
++	.set_mux		= sun8i_r40_tcon_tv_set_mux,
++};
++
+ static const struct sun4i_tcon_quirks sun8i_v3s_quirks = {
+ 	.has_channel_0		= true,
+ };
+@@ -1379,9 +1494,11 @@ const struct of_device_id sun4i_tcon_of_table[] = {
+ 	{ .compatible = "allwinner,sun6i-a31-tcon", .data = &sun6i_a31_quirks },
+ 	{ .compatible = "allwinner,sun6i-a31s-tcon", .data = &sun6i_a31s_quirks },
+ 	{ .compatible = "allwinner,sun7i-a20-tcon", .data = &sun7i_a20_quirks },
++	{ .compatible = "allwinner,sun8i-a23-tcon", .data = &sun8i_a33_quirks },
+ 	{ .compatible = "allwinner,sun8i-a33-tcon", .data = &sun8i_a33_quirks },
+ 	{ .compatible = "allwinner,sun8i-a83t-tcon-lcd", .data = &sun8i_a83t_lcd_quirks },
+ 	{ .compatible = "allwinner,sun8i-a83t-tcon-tv", .data = &sun8i_a83t_tv_quirks },
++	{ .compatible = "allwinner,sun8i-r40-tcon-tv", .data = &sun8i_r40_tv_quirks },
+ 	{ .compatible = "allwinner,sun8i-v3s-tcon", .data = &sun8i_v3s_quirks },
+ 	{ .compatible = "allwinner,sun9i-a80-tcon-lcd", .data = &sun9i_a80_tcon_lcd_quirks },
+ 	{ .compatible = "allwinner,sun9i-a80-tcon-tv", .data = &sun9i_a80_tcon_tv_quirks },
+diff --git a/drivers/gpu/drm/sun4i/sun4i_tcon.h b/drivers/gpu/drm/sun4i/sun4i_tcon.h
+index 46244322a..81a6adcc5 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_tcon.h
++++ b/drivers/gpu/drm/sun4i/sun4i_tcon.h
+@@ -116,6 +116,7 @@
+ 
+ #define SUN4I_TCON0_IO_POL_REG			0x88
+ #define SUN4I_TCON0_IO_POL_DCLK_PHASE(phase)		((phase & 3) << 28)
++#define SUN4I_TCON0_IO_POL_DE_NEGATIVE			BIT(27)
+ #define SUN4I_TCON0_IO_POL_HSYNC_POSITIVE		BIT(25)
+ #define SUN4I_TCON0_IO_POL_VSYNC_POSITIVE		BIT(24)
+ 
+@@ -272,14 +273,15 @@ struct sun4i_tcon {
+ 
+ struct drm_bridge *sun4i_tcon_find_bridge(struct device_node *node);
+ struct drm_panel *sun4i_tcon_find_panel(struct device_node *node);
+-struct sun4i_tcon *sun4i_get_tcon0(struct drm_device *drm);
+ 
++struct sun4i_tcon *sun4i_get_tcon0(struct drm_device *drm);
+ void sun4i_tcon_enable_vblank(struct sun4i_tcon *tcon, bool enable);
+ void sun4i_tcon_mode_set(struct sun4i_tcon *tcon,
+ 			 const struct drm_encoder *encoder,
+ 			 const struct drm_display_mode *mode);
+ void sun4i_tcon_set_status(struct sun4i_tcon *crtc,
+-			   const struct drm_encoder *encoder, bool enable);
++			   const struct drm_encoder *encoder, bool enable,
++			   unsigned long dotclock);
+ 
+ extern const struct of_device_id sun4i_tcon_of_table[];
+ 
+diff --git a/drivers/gpu/drm/sun4i/sun4i_tv.c b/drivers/gpu/drm/sun4i/sun4i_tv.c
+index 1a838d208..e8700a362 100644
+--- a/drivers/gpu/drm/sun4i/sun4i_tv.c
++++ b/drivers/gpu/drm/sun4i/sun4i_tv.c
+@@ -18,9 +18,9 @@
+ 
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_of.h>
+ #include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include "sun4i_crtc.h"
+ #include "sun4i_drv.h"
+diff --git a/drivers/gpu/drm/sun4i/sun6i_drc.c b/drivers/gpu/drm/sun4i/sun6i_drc.c
+index 88eb268fd..442094a4a 100644
+--- a/drivers/gpu/drm/sun4i/sun6i_drc.c
++++ b/drivers/gpu/drm/sun4i/sun6i_drc.c
+@@ -101,6 +101,7 @@ static int sun6i_drc_remove(struct platform_device *pdev)
+ static const struct of_device_id sun6i_drc_of_table[] = {
+ 	{ .compatible = "allwinner,sun6i-a31-drc" },
+ 	{ .compatible = "allwinner,sun6i-a31s-drc" },
++	{ .compatible = "allwinner,sun8i-a23-drc" },
+ 	{ .compatible = "allwinner,sun8i-a33-drc" },
+ 	{ .compatible = "allwinner,sun9i-a80-drc" },
+ 	{ }
+diff --git a/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.h b/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.h
+index 3c532e839..5c4983212 100644
+--- a/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.h
++++ b/drivers/gpu/drm/sun4i/sun6i_mipi_dsi.h
+@@ -15,13 +15,6 @@
+ 
+ #include <linux/regulator/consumer.h>
+ 
+-struct sun6i_dphy {
+-	struct clk		*bus_clk;
+-	struct clk		*mod_clk;
+-	struct regmap		*regs;
+-	struct reset_control	*reset;
+-};
+-
+ struct sun6i_dsi_variant {
+ 	bool			has_mod_clk;
+ };
+@@ -36,7 +29,7 @@ struct sun6i_dsi {
+ 	struct regmap		*regs;
+ 	struct regulator	*regulator;
+ 	struct reset_control	*reset;
+-	struct sun6i_dphy	*dphy;
++	struct phy		*dphy;
+ 
+ 	struct device		*dev;
+ 	struct sun4i_drv	*drv;
+@@ -61,12 +54,4 @@ static inline struct sun6i_dsi *encoder_to_sun6i_dsi(const struct drm_encoder *e
+ 	return container_of(encoder, struct sun6i_dsi, encoder);
+ };
+ 
+-int sun6i_dphy_probe(struct sun6i_dsi *dsi, struct device_node *node);
+-int sun6i_dphy_remove(struct sun6i_dsi *dsi);
+-
+-int sun6i_dphy_init(struct sun6i_dphy *dphy, unsigned int lanes);
+-int sun6i_dphy_power_on(struct sun6i_dphy *dphy, unsigned int lanes);
+-int sun6i_dphy_power_off(struct sun6i_dphy *dphy);
+-int sun6i_dphy_exit(struct sun6i_dphy *dphy);
+-
+ #endif /* _SUN6I_MIPI_DSI_H_ */
+diff --git a/drivers/gpu/drm/sun4i/sun8i_csc.c b/drivers/gpu/drm/sun4i/sun8i_csc.c
+index b14925b40..e7608a72f 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_csc.c
++++ b/drivers/gpu/drm/sun4i/sun8i_csc.c
+@@ -34,6 +34,41 @@ static const u32 yvu2rgb[] = {
+ 	0x000004A8, 0x00000000, 0x00000813, 0xFFFBAC4A,
+ };
+ 
++/*
++ * DE3 has a bit different CSC units. Factors are in two's complement format.
++ * First three factors in a row are multiplication factors which have 17 bits
++ * for fractional part. Fourth value in a row is comprised of two factors.
++ * Upper 16 bits represents difference, which is subtracted from the input
++ * value before multiplication and lower 16 bits represents constant, which
++ * is addes at the end.
++ *
++ * x' = c00 * (x + d0) + c01 * (y + d1) + c02 * (z + d2) + const0
++ * y' = c10 * (x + d0) + c11 * (y + d1) + c12 * (z + d2) + const1
++ * z' = c20 * (x + d0) + c21 * (y + d1) + c22 * (z + d2) + const2
++ *
++ * Please note that above formula is true only for Blender CSC. Other DE3 CSC
++ * units takes only positive value for difference. From what can be deducted
++ * from BSP driver code, those units probably automatically assume that
++ * difference has to be subtracted.
++ *
++ * Layout of factors in table:
++ * c00 c01 c02 [d0 const0]
++ * c10 c11 c12 [d1 const1]
++ * c20 c21 c22 [d2 const2]
++ */
++
++static const u32 yuv2rgb_de3[] = {
++	0x0002542a, 0x00000000, 0x0003312a, 0xffc00000,
++	0x0002542a, 0xffff376b, 0xfffe5fc3, 0xfe000000,
++	0x0002542a, 0x000408d3, 0x00000000, 0xfe000000,
++};
++
++static const u32 yvu2rgb_de3[] = {
++	0x0002542a, 0x0003312a, 0x00000000, 0xffc00000,
++	0x0002542a, 0xfffe5fc3, 0xffff376b, 0xfe000000,
++	0x0002542a, 0x00000000, 0x000408d3, 0xfe000000,
++};
++
+ static void sun8i_csc_set_coefficients(struct regmap *map, u32 base,
+ 				       enum sun8i_csc_mode mode)
+ {
+@@ -61,6 +96,28 @@ static void sun8i_csc_set_coefficients(struct regmap *map, u32 base,
+ 	}
+ }
+ 
++static void sun8i_de3_ccsc_set_coefficients(struct regmap *map, int layer,
++					    enum sun8i_csc_mode mode)
++{
++	const u32 *table;
++	u32 base_reg;
++
++	switch (mode) {
++	case SUN8I_CSC_MODE_YUV2RGB:
++		table = yuv2rgb_de3;
++		break;
++	case SUN8I_CSC_MODE_YVU2RGB:
++		table = yvu2rgb_de3;
++		break;
++	default:
++		DRM_WARN("Wrong CSC mode specified.\n");
++		return;
++	}
++
++	base_reg = SUN50I_MIXER_BLEND_CSC_COEFF(DE3_BLD_BASE, layer, 0, 0);
++	regmap_bulk_write(map, base_reg, table, 12);
++}
++
+ static void sun8i_csc_enable(struct regmap *map, u32 base, bool enable)
+ {
+ 	u32 val;
+@@ -73,11 +130,32 @@ static void sun8i_csc_enable(struct regmap *map, u32 base, bool enable)
+ 	regmap_update_bits(map, SUN8I_CSC_CTRL(base), SUN8I_CSC_CTRL_EN, val);
+ }
+ 
++static void sun8i_de3_ccsc_enable(struct regmap *map, int layer, bool enable)
++{
++	u32 val, mask;
++
++	mask = SUN50I_MIXER_BLEND_CSC_CTL_EN(layer);
++
++	if (enable)
++		val = mask;
++	else
++		val = 0;
++
++	regmap_update_bits(map, SUN50I_MIXER_BLEND_CSC_CTL(DE3_BLD_BASE),
++			   mask, val);
++}
++
+ void sun8i_csc_set_ccsc_coefficients(struct sun8i_mixer *mixer, int layer,
+ 				     enum sun8i_csc_mode mode)
+ {
+ 	u32 base;
+ 
++	if (mixer->cfg->is_de3) {
++		sun8i_de3_ccsc_set_coefficients(mixer->engine.regs,
++						layer, mode);
++		return;
++	}
++
+ 	base = ccsc_base[mixer->cfg->ccsc][layer];
+ 
+ 	sun8i_csc_set_coefficients(mixer->engine.regs, base, mode);
+@@ -87,6 +165,11 @@ void sun8i_csc_enable_ccsc(struct sun8i_mixer *mixer, int layer, bool enable)
+ {
+ 	u32 base;
+ 
++	if (mixer->cfg->is_de3) {
++		sun8i_de3_ccsc_enable(mixer->engine.regs, layer, enable);
++		return;
++	}
++
+ 	base = ccsc_base[mixer->cfg->ccsc][layer];
+ 
+ 	sun8i_csc_enable(mixer->engine.regs, base, enable);
+diff --git a/drivers/gpu/drm/sun4i/sun8i_dw_hdmi.c b/drivers/gpu/drm/sun4i/sun8i_dw_hdmi.c
+index 8eab5e719..949b16b2d 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_dw_hdmi.c
++++ b/drivers/gpu/drm/sun4i/sun8i_dw_hdmi.c
+@@ -5,6 +5,7 @@
+ 
+ #include <linux/component.h>
+ #include <linux/module.h>
++#include <linux/of_device.h>
+ #include <linux/platform_device.h>
+ 
+ #include <drm/drm_of.h>
+@@ -20,12 +21,31 @@ static void sun8i_dw_hdmi_encoder_mode_set(struct drm_encoder *encoder,
+ {
+ 	struct sun8i_dw_hdmi *hdmi = encoder_to_sun8i_dw_hdmi(encoder);
+ 
+-	clk_set_rate(hdmi->clk_tmds, mode->crtc_clock * 1000);
++	if (hdmi->quirks->set_rate)
++		hdmi->clk_tmds_freq = mode->crtc_clock * 1000;
++}
++
++static void sun8i_dw_hdmi_encoder_enable(struct drm_encoder *encoder)
++{
++	struct sun8i_dw_hdmi *hdmi = encoder_to_sun8i_dw_hdmi(encoder);
++
++	if (hdmi->quirks->set_rate)
++		clk_set_rate_exclusive(hdmi->clk_tmds, hdmi->clk_tmds_freq);
++}
++
++static void sun8i_dw_hdmi_encoder_disable(struct drm_encoder *encoder)
++{
++	struct sun8i_dw_hdmi *hdmi = encoder_to_sun8i_dw_hdmi(encoder);
++
++	if (hdmi->quirks->set_rate)
++		clk_rate_exclusive_put(hdmi->clk_tmds);
+ }
+ 
+ static const struct drm_encoder_helper_funcs
+ sun8i_dw_hdmi_encoder_helper_funcs = {
+ 	.mode_set = sun8i_dw_hdmi_encoder_mode_set,
++	.enable = sun8i_dw_hdmi_encoder_enable,
++	.disable = sun8i_dw_hdmi_encoder_disable,
+ };
+ 
+ static const struct drm_encoder_funcs sun8i_dw_hdmi_encoder_funcs = {
+@@ -33,8 +53,8 @@ static const struct drm_encoder_funcs sun8i_dw_hdmi_encoder_funcs = {
+ };
+ 
+ static enum drm_mode_status
+-sun8i_dw_hdmi_mode_valid(struct drm_connector *connector,
+-			 const struct drm_display_mode *mode)
++sun8i_dw_hdmi_mode_valid_a83t(struct drm_connector *connector,
++			      const struct drm_display_mode *mode)
+ {
+ 	if (mode->clock > 297000)
+ 		return MODE_CLOCK_HIGH;
+@@ -42,6 +62,17 @@ sun8i_dw_hdmi_mode_valid(struct drm_connector *connector,
+ 	return MODE_OK;
+ }
+ 
++static enum drm_mode_status
++sun8i_dw_hdmi_mode_valid_h6(struct drm_connector *connector,
++			    const struct drm_display_mode *mode)
++{
++	/* This is max for HDMI 2.0b (4K@60Hz) */
++	if (mode->clock > 594000)
++		return MODE_CLOCK_HIGH;
++
++	return MODE_OK;
++}
++
+ static bool sun8i_dw_hdmi_node_is_tcon_top(struct device_node *node)
+ {
+ 	return IS_ENABLED(CONFIG_DRM_SUN8I_TCON_TOP) &&
+@@ -102,6 +133,8 @@ static int sun8i_dw_hdmi_bind(struct device *dev, struct device *master,
+ 	hdmi->dev = &pdev->dev;
+ 	encoder = &hdmi->encoder;
+ 
++	hdmi->quirks = of_device_get_match_data(dev);
++
+ 	encoder->possible_crtcs =
+ 		sun8i_dw_hdmi_find_possible_crtcs(drm, dev->of_node);
+ 	/*
+@@ -168,11 +201,8 @@ static int sun8i_dw_hdmi_bind(struct device *dev, struct device *master,
+ 
+ 	sun8i_hdmi_phy_init(hdmi->phy);
+ 
+-	plat_data->auto_cts = true;
+-	plat_data->mode_valid = &sun8i_dw_hdmi_mode_valid;
+-	plat_data->phy_ops = sun8i_hdmi_phy_get_ops();
+-	plat_data->phy_name = "sun8i_dw_hdmi_phy";
+-	plat_data->phy_data = hdmi->phy;
++	plat_data->mode_valid = hdmi->quirks->mode_valid;
++	sun8i_hdmi_phy_set_ops(hdmi->phy, plat_data);
+ 
+ 	platform_set_drvdata(pdev, hdmi);
+ 
+@@ -231,8 +261,24 @@ static int sun8i_dw_hdmi_remove(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
++static const struct sun8i_dw_hdmi_quirks sun8i_a83t_quirks = {
++	.mode_valid = sun8i_dw_hdmi_mode_valid_a83t,
++	.set_rate = true,
++};
++
++static const struct sun8i_dw_hdmi_quirks sun50i_h6_quirks = {
++	.mode_valid = sun8i_dw_hdmi_mode_valid_h6,
++};
++
+ static const struct of_device_id sun8i_dw_hdmi_dt_ids[] = {
+-	{ .compatible = "allwinner,sun8i-a83t-dw-hdmi" },
++	{
++		.compatible = "allwinner,sun8i-a83t-dw-hdmi",
++		.data = &sun8i_a83t_quirks,
++	},
++	{
++		.compatible = "allwinner,sun50i-h6-dw-hdmi",
++		.data = &sun50i_h6_quirks,
++	},
+ 	{ /* sentinel */ },
+ };
+ MODULE_DEVICE_TABLE(of, sun8i_dw_hdmi_dt_ids);
+diff --git a/drivers/gpu/drm/sun4i/sun8i_dw_hdmi.h b/drivers/gpu/drm/sun4i/sun8i_dw_hdmi.h
+index 7fdc1ecd2..9b0c1ec7f 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_dw_hdmi.h
++++ b/drivers/gpu/drm/sun4i/sun8i_dw_hdmi.h
+@@ -150,6 +150,10 @@ struct sun8i_hdmi_phy;
+ struct sun8i_hdmi_phy_variant {
+ 	bool has_phy_clk;
+ 	bool has_second_pll;
++	unsigned int is_custom_phy : 1;
++	const struct dw_hdmi_curr_ctrl *cur_ctr;
++	const struct dw_hdmi_mpll_config *mpll_cfg;
++	const struct dw_hdmi_phy_config *phy_cfg;
+ 	void (*phy_init)(struct sun8i_hdmi_phy *phy);
+ 	void (*phy_disable)(struct dw_hdmi *hdmi,
+ 			    struct sun8i_hdmi_phy *phy);
+@@ -164,20 +168,29 @@ struct sun8i_hdmi_phy {
+ 	struct clk			*clk_phy;
+ 	struct clk			*clk_pll0;
+ 	struct clk			*clk_pll1;
++	bool				clk_phy_exclusive;
+ 	unsigned int			rcal;
+ 	struct regmap			*regs;
+ 	struct reset_control		*rst_phy;
+ 	struct sun8i_hdmi_phy_variant	*variant;
+ };
+ 
++struct sun8i_dw_hdmi_quirks {
++	enum drm_mode_status (*mode_valid)(struct drm_connector *connector,
++					   const struct drm_display_mode *mode);
++	unsigned int set_rate : 1;
++};
++
+ struct sun8i_dw_hdmi {
+ 	struct clk			*clk_tmds;
++	unsigned long			clk_tmds_freq;
+ 	struct device			*dev;
+ 	struct dw_hdmi			*hdmi;
+ 	struct drm_encoder		encoder;
+ 	struct sun8i_hdmi_phy		*phy;
+ 	struct dw_hdmi_plat_data	plat_data;
+ 	struct regulator		*regulator;
++	const struct sun8i_dw_hdmi_quirks *quirks;
+ 	struct reset_control		*rst_ctrl;
+ };
+ 
+@@ -191,7 +204,8 @@ int sun8i_hdmi_phy_probe(struct sun8i_dw_hdmi *hdmi, struct device_node *node);
+ void sun8i_hdmi_phy_remove(struct sun8i_dw_hdmi *hdmi);
+ 
+ void sun8i_hdmi_phy_init(struct sun8i_hdmi_phy *phy);
+-const struct dw_hdmi_phy_ops *sun8i_hdmi_phy_get_ops(void);
++void sun8i_hdmi_phy_set_ops(struct sun8i_hdmi_phy *phy,
++			    struct dw_hdmi_plat_data *plat_data);
+ 
+ int sun8i_phy_clk_create(struct sun8i_hdmi_phy *phy, struct device *dev,
+ 			 bool second_parent);
+diff --git a/drivers/gpu/drm/sun4i/sun8i_hdmi_phy.c b/drivers/gpu/drm/sun4i/sun8i_hdmi_phy.c
+index dc9b1398a..e3327567b 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_hdmi_phy.c
++++ b/drivers/gpu/drm/sun4i/sun8i_hdmi_phy.c
+@@ -14,6 +14,122 @@
+  */
+ #define I2C_ADDR	0x69
+ 
++static const struct dw_hdmi_mpll_config sun50i_h6_mpll_cfg[] = {
++	{
++		30666000, {
++			{ 0x00b3, 0x0000 },
++			{ 0x2153, 0x0000 },
++			{ 0x40f3, 0x0000 },
++		},
++	},  {
++		36800000, {
++			{ 0x00b3, 0x0000 },
++			{ 0x2153, 0x0000 },
++			{ 0x40a2, 0x0001 },
++		},
++	},  {
++		46000000, {
++			{ 0x00b3, 0x0000 },
++			{ 0x2142, 0x0001 },
++			{ 0x40a2, 0x0001 },
++		},
++	},  {
++		61333000, {
++			{ 0x0072, 0x0001 },
++			{ 0x2142, 0x0001 },
++			{ 0x40a2, 0x0001 },
++		},
++	},  {
++		73600000, {
++			{ 0x0072, 0x0001 },
++			{ 0x2142, 0x0001 },
++			{ 0x4061, 0x0002 },
++		},
++	},  {
++		92000000, {
++			{ 0x0072, 0x0001 },
++			{ 0x2145, 0x0002 },
++			{ 0x4061, 0x0002 },
++		},
++	},  {
++		122666000, {
++			{ 0x0051, 0x0002 },
++			{ 0x2145, 0x0002 },
++			{ 0x4061, 0x0002 },
++		},
++	},  {
++		147200000, {
++			{ 0x0051, 0x0002 },
++			{ 0x2145, 0x0002 },
++			{ 0x4064, 0x0003 },
++		},
++	},  {
++		184000000, {
++			{ 0x0051, 0x0002 },
++			{ 0x214c, 0x0003 },
++			{ 0x4064, 0x0003 },
++		},
++	},  {
++		226666000, {
++			{ 0x0040, 0x0003 },
++			{ 0x214c, 0x0003 },
++			{ 0x4064, 0x0003 },
++		},
++	},  {
++		272000000, {
++			{ 0x0040, 0x0003 },
++			{ 0x214c, 0x0003 },
++			{ 0x5a64, 0x0003 },
++		},
++	},  {
++		340000000, {
++			{ 0x0040, 0x0003 },
++			{ 0x3b4c, 0x0003 },
++			{ 0x5a64, 0x0003 },
++		},
++	},  {
++		594000000, {
++			{ 0x1a40, 0x0003 },
++			{ 0x3b4c, 0x0003 },
++			{ 0x5a64, 0x0003 },
++		},
++	}, {
++		~0UL, {
++			{ 0x0000, 0x0000 },
++			{ 0x0000, 0x0000 },
++			{ 0x0000, 0x0000 },
++		},
++	}
++};
++
++static const struct dw_hdmi_curr_ctrl sun50i_h6_cur_ctr[] = {
++	/* pixelclk    bpp8    bpp10   bpp12 */
++	{ 25175000,  { 0x0000, 0x0000, 0x0000 }, },
++	{ 27000000,  { 0x0012, 0x0000, 0x0000 }, },
++	{ 59400000,  { 0x0008, 0x0008, 0x0008 }, },
++	{ 72000000,  { 0x0008, 0x0008, 0x001b }, },
++	{ 74250000,  { 0x0013, 0x0013, 0x0013 }, },
++	{ 90000000,  { 0x0008, 0x001a, 0x001b }, },
++	{ 118800000, { 0x001b, 0x001a, 0x001b }, },
++	{ 144000000, { 0x001b, 0x001a, 0x0034 }, },
++	{ 180000000, { 0x001b, 0x0033, 0x0034 }, },
++	{ 216000000, { 0x0036, 0x0033, 0x0034 }, },
++	{ 237600000, { 0x0036, 0x0033, 0x001b }, },
++	{ 288000000, { 0x0036, 0x001b, 0x001b }, },
++	{ 297000000, { 0x0019, 0x001b, 0x0019 }, },
++	{ 330000000, { 0x0036, 0x001b, 0x001b }, },
++	{ 594000000, { 0x003f, 0x001b, 0x001b }, },
++	{ ~0UL,      { 0x0000, 0x0000, 0x0000 }, }
++};
++
++static const struct dw_hdmi_phy_config sun50i_h6_phy_config[] = {
++	/*pixelclk   symbol   term   vlev*/
++	{ 74250000,  0x8009, 0x0004, 0x0232},
++	{ 148500000, 0x8029, 0x0004, 0x0273},
++	{ 594000000, 0x8039, 0x0004, 0x014a},
++	{ ~0UL,	     0x0000, 0x0000, 0x0000}
++};
++
+ static int sun8i_hdmi_phy_config_a83t(struct dw_hdmi *hdmi,
+ 				      struct sun8i_hdmi_phy *phy,
+ 				      unsigned int clk_rate)
+@@ -177,8 +293,7 @@ static int sun8i_hdmi_phy_config_h3(struct dw_hdmi *hdmi,
+ 				 SUN8I_HDMI_PHY_ANA_CFG2_REG_BIGSW |
+ 				 SUN8I_HDMI_PHY_ANA_CFG2_REG_SLV(4);
+ 		ana_cfg3_init |= SUN8I_HDMI_PHY_ANA_CFG3_REG_AMPCK(9) |
+-				 SUN8I_HDMI_PHY_ANA_CFG3_REG_AMP(13) |
+-				 SUN8I_HDMI_PHY_ANA_CFG3_REG_EMP(3);
++				 SUN8I_HDMI_PHY_ANA_CFG3_REG_AMP(13);
+ 	}
+ 
+ 	regmap_update_bits(phy->regs, SUN8I_HDMI_PHY_ANA_CFG1_REG,
+@@ -239,8 +354,14 @@ static int sun8i_hdmi_phy_config(struct dw_hdmi *hdmi, void *data,
+ 	regmap_update_bits(phy->regs, SUN8I_HDMI_PHY_DBG_CTRL_REG,
+ 			   SUN8I_HDMI_PHY_DBG_CTRL_POL_MASK, val);
+ 
+-	if (phy->variant->has_phy_clk)
++	if (phy->variant->has_phy_clk) {
++		if (!phy->clk_phy_exclusive) {
++			clk_rate_exclusive_get(phy->clk_phy);
++			phy->clk_phy_exclusive = true;
++		}
++
+ 		clk_set_rate(phy->clk_phy, mode->crtc_clock * 1000);
++	}
+ 
+ 	return phy->variant->phy_config(hdmi, phy, mode->crtc_clock * 1000);
+ };
+@@ -248,6 +369,7 @@ static int sun8i_hdmi_phy_config(struct dw_hdmi *hdmi, void *data,
+ static void sun8i_hdmi_phy_disable_a83t(struct dw_hdmi *hdmi,
+ 					struct sun8i_hdmi_phy *phy)
+ {
++	/* A83T variant doesn't have PHY clock */
+ 	dw_hdmi_phy_gen2_txpwron(hdmi, 0);
+ 	dw_hdmi_phy_gen2_pddq(hdmi, 1);
+ 
+@@ -258,6 +380,12 @@ static void sun8i_hdmi_phy_disable_a83t(struct dw_hdmi *hdmi,
+ static void sun8i_hdmi_phy_disable_h3(struct dw_hdmi *hdmi,
+ 				      struct sun8i_hdmi_phy *phy)
+ {
++	/* H3 variant has PHY clock */
++	if (phy->clk_phy_exclusive) {
++		clk_rate_exclusive_put(phy->clk_phy);
++		phy->clk_phy_exclusive = false;
++	}
++
+ 	regmap_write(phy->regs, SUN8I_HDMI_PHY_ANA_CFG1_REG,
+ 		     SUN8I_HDMI_PHY_ANA_CFG1_LDOEN |
+ 		     SUN8I_HDMI_PHY_ANA_CFG1_ENVBS |
+@@ -280,8 +408,31 @@ static const struct dw_hdmi_phy_ops sun8i_hdmi_phy_ops = {
+ 	.setup_hpd = &dw_hdmi_phy_setup_hpd,
+ };
+ 
++static void sun8i_hdmi_phy_unlock(struct sun8i_hdmi_phy *phy)
++{
++	/* enable read access to HDMI controller */
++	regmap_write(phy->regs, SUN8I_HDMI_PHY_READ_EN_REG,
++		     SUN8I_HDMI_PHY_READ_EN_MAGIC);
++
++	/* unscramble register offsets */
++	regmap_write(phy->regs, SUN8I_HDMI_PHY_UNSCRAMBLE_REG,
++		     SUN8I_HDMI_PHY_UNSCRAMBLE_MAGIC);
++}
++
++static void sun50i_hdmi_phy_init_h6(struct sun8i_hdmi_phy *phy)
++{
++	regmap_update_bits(phy->regs, SUN8I_HDMI_PHY_REXT_CTRL_REG,
++			   SUN8I_HDMI_PHY_REXT_CTRL_REXT_EN,
++			   SUN8I_HDMI_PHY_REXT_CTRL_REXT_EN);
++
++	regmap_update_bits(phy->regs, SUN8I_HDMI_PHY_REXT_CTRL_REG,
++			   0xffff0000, 0x80c00000);
++}
++
+ static void sun8i_hdmi_phy_init_a83t(struct sun8i_hdmi_phy *phy)
+ {
++	sun8i_hdmi_phy_unlock(phy);
++
+ 	regmap_update_bits(phy->regs, SUN8I_HDMI_PHY_DBG_CTRL_REG,
+ 			   SUN8I_HDMI_PHY_DBG_CTRL_PX_LOCK,
+ 			   SUN8I_HDMI_PHY_DBG_CTRL_PX_LOCK);
+@@ -299,6 +450,8 @@ static void sun8i_hdmi_phy_init_h3(struct sun8i_hdmi_phy *phy)
+ {
+ 	unsigned int val;
+ 
++	sun8i_hdmi_phy_unlock(phy);
++
+ 	regmap_write(phy->regs, SUN8I_HDMI_PHY_ANA_CFG1_REG, 0);
+ 	regmap_update_bits(phy->regs, SUN8I_HDMI_PHY_ANA_CFG1_REG,
+ 			   SUN8I_HDMI_PHY_ANA_CFG1_ENBI,
+@@ -373,20 +526,23 @@ static void sun8i_hdmi_phy_init_h3(struct sun8i_hdmi_phy *phy)
+ 
+ void sun8i_hdmi_phy_init(struct sun8i_hdmi_phy *phy)
+ {
+-	/* enable read access to HDMI controller */
+-	regmap_write(phy->regs, SUN8I_HDMI_PHY_READ_EN_REG,
+-		     SUN8I_HDMI_PHY_READ_EN_MAGIC);
+-
+-	/* unscramble register offsets */
+-	regmap_write(phy->regs, SUN8I_HDMI_PHY_UNSCRAMBLE_REG,
+-		     SUN8I_HDMI_PHY_UNSCRAMBLE_MAGIC);
+-
+ 	phy->variant->phy_init(phy);
+ }
+ 
+-const struct dw_hdmi_phy_ops *sun8i_hdmi_phy_get_ops(void)
++void sun8i_hdmi_phy_set_ops(struct sun8i_hdmi_phy *phy,
++			    struct dw_hdmi_plat_data *plat_data)
+ {
+-	return &sun8i_hdmi_phy_ops;
++	struct sun8i_hdmi_phy_variant *variant = phy->variant;
++
++	if (variant->is_custom_phy) {
++		plat_data->phy_ops = &sun8i_hdmi_phy_ops;
++		plat_data->phy_name = "sun8i_dw_hdmi_phy";
++		plat_data->phy_data = phy;
++	} else {
++		plat_data->mpll_cfg = variant->mpll_cfg;
++		plat_data->cur_ctr = variant->cur_ctr;
++		plat_data->phy_config = variant->phy_cfg;
++	}
+ }
+ 
+ static struct regmap_config sun8i_hdmi_phy_regmap_config = {
+@@ -397,31 +553,46 @@ static struct regmap_config sun8i_hdmi_phy_regmap_config = {
+ 	.name		= "phy"
+ };
+ 
+-static const struct sun8i_hdmi_phy_variant sun50i_a64_hdmi_phy = {
++static const struct sun8i_hdmi_phy_variant sun8i_a83t_hdmi_phy = {
++	.is_custom_phy = true,
++	.phy_init = &sun8i_hdmi_phy_init_a83t,
++	.phy_disable = &sun8i_hdmi_phy_disable_a83t,
++	.phy_config = &sun8i_hdmi_phy_config_a83t,
++};
++
++static const struct sun8i_hdmi_phy_variant sun8i_h3_hdmi_phy = {
+ 	.has_phy_clk = true,
++	.is_custom_phy = true,
+ 	.phy_init = &sun8i_hdmi_phy_init_h3,
+ 	.phy_disable = &sun8i_hdmi_phy_disable_h3,
+ 	.phy_config = &sun8i_hdmi_phy_config_h3,
+ };
+ 
+-static const struct sun8i_hdmi_phy_variant sun8i_a83t_hdmi_phy = {
+-	.phy_init = &sun8i_hdmi_phy_init_a83t,
+-	.phy_disable = &sun8i_hdmi_phy_disable_a83t,
+-	.phy_config = &sun8i_hdmi_phy_config_a83t,
++static const struct sun8i_hdmi_phy_variant sun8i_r40_hdmi_phy = {
++	.has_phy_clk = true,
++	.has_second_pll = true,
++	.is_custom_phy = true,
++	.phy_init = &sun8i_hdmi_phy_init_h3,
++	.phy_disable = &sun8i_hdmi_phy_disable_h3,
++	.phy_config = &sun8i_hdmi_phy_config_h3,
+ };
+ 
+-static const struct sun8i_hdmi_phy_variant sun8i_h3_hdmi_phy = {
++static const struct sun8i_hdmi_phy_variant sun50i_a64_hdmi_phy = {
+ 	.has_phy_clk = true,
++	.is_custom_phy = true,
+ 	.phy_init = &sun8i_hdmi_phy_init_h3,
+ 	.phy_disable = &sun8i_hdmi_phy_disable_h3,
+ 	.phy_config = &sun8i_hdmi_phy_config_h3,
+ };
+ 
++static const struct sun8i_hdmi_phy_variant sun50i_h6_hdmi_phy = {
++	.cur_ctr  = sun50i_h6_cur_ctr,
++	.mpll_cfg = sun50i_h6_mpll_cfg,
++	.phy_cfg  = sun50i_h6_phy_config,
++	.phy_init = &sun50i_hdmi_phy_init_h6,
++};
++
+ static const struct of_device_id sun8i_hdmi_phy_of_table[] = {
+-	{
+-		.compatible = "allwinner,sun50i-a64-hdmi-phy",
+-		.data = &sun50i_a64_hdmi_phy,
+-	},
+ 	{
+ 		.compatible = "allwinner,sun8i-a83t-hdmi-phy",
+ 		.data = &sun8i_a83t_hdmi_phy,
+@@ -430,6 +601,18 @@ static const struct of_device_id sun8i_hdmi_phy_of_table[] = {
+ 		.compatible = "allwinner,sun8i-h3-hdmi-phy",
+ 		.data = &sun8i_h3_hdmi_phy,
+ 	},
++	{
++		.compatible = "allwinner,sun8i-r40-hdmi-phy",
++		.data = &sun8i_r40_hdmi_phy,
++	},
++	{
++		.compatible = "allwinner,sun50i-a64-hdmi-phy",
++		.data = &sun50i_a64_hdmi_phy,
++	},
++	{
++		.compatible = "allwinner,sun50i-h6-hdmi-phy",
++		.data = &sun50i_h6_hdmi_phy,
++	},
+ 	{ /* sentinel */ }
+ };
+ 
+@@ -502,13 +685,22 @@ int sun8i_hdmi_phy_probe(struct sun8i_dw_hdmi *hdmi, struct device_node *node)
+ 				goto err_put_clk_pll0;
+ 			}
+ 		}
++
++		ret = sun8i_phy_clk_create(phy, dev,
++					   phy->variant->has_second_pll);
++		if (ret) {
++			dev_err(dev, "Couldn't create the PHY clock\n");
++			goto err_put_clk_pll1;
++		}
++
++		clk_prepare_enable(phy->clk_phy);
+ 	}
+ 
+ 	phy->rst_phy = of_reset_control_get_shared(node, "phy");
+ 	if (IS_ERR(phy->rst_phy)) {
+ 		dev_err(dev, "Could not get phy reset control\n");
+ 		ret = PTR_ERR(phy->rst_phy);
+-		goto err_put_clk_pll1;
++		goto err_disable_clk_phy;
+ 	}
+ 
+ 	ret = reset_control_deassert(phy->rst_phy);
+@@ -529,29 +721,18 @@ int sun8i_hdmi_phy_probe(struct sun8i_dw_hdmi *hdmi, struct device_node *node)
+ 		goto err_disable_clk_bus;
+ 	}
+ 
+-	if (phy->variant->has_phy_clk) {
+-		ret = sun8i_phy_clk_create(phy, dev,
+-					   phy->variant->has_second_pll);
+-		if (ret) {
+-			dev_err(dev, "Couldn't create the PHY clock\n");
+-			goto err_disable_clk_mod;
+-		}
+-
+-		clk_prepare_enable(phy->clk_phy);
+-	}
+-
+ 	hdmi->phy = phy;
+ 
+ 	return 0;
+ 
+-err_disable_clk_mod:
+-	clk_disable_unprepare(phy->clk_mod);
+ err_disable_clk_bus:
+ 	clk_disable_unprepare(phy->clk_bus);
+ err_deassert_rst_phy:
+ 	reset_control_assert(phy->rst_phy);
+ err_put_rst_phy:
+ 	reset_control_put(phy->rst_phy);
++err_disable_clk_phy:
++	clk_disable_unprepare(phy->clk_phy);
+ err_put_clk_pll1:
+ 	clk_put(phy->clk_pll1);
+ err_put_clk_pll0:
+diff --git a/drivers/gpu/drm/sun4i/sun8i_hdmi_phy_clk.c b/drivers/gpu/drm/sun4i/sun8i_hdmi_phy_clk.c
+index a4d31fe3a..b21f74cc2 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_hdmi_phy_clk.c
++++ b/drivers/gpu/drm/sun4i/sun8i_hdmi_phy_clk.c
+@@ -20,47 +20,40 @@ static inline struct sun8i_phy_clk *hw_to_phy_clk(struct clk_hw *hw)
+ static int sun8i_phy_clk_determine_rate(struct clk_hw *hw,
+ 					struct clk_rate_request *req)
+ {
+-	unsigned long rate = req->rate;
+-	unsigned long best_rate = 0;
+-	struct clk_hw *best_parent = NULL;
+-	struct clk_hw *parent;
+-	int best_div = 1;
+-	int i, p;
++	unsigned long best_parent_rate = 0, best_rate = 0;
++	struct clk_hw *parent, *best_parent = NULL;
++	unsigned long parent_rate, rate;
++	int p;
+ 
+ 	for (p = 0; p < clk_hw_get_num_parents(hw); p++) {
+ 		parent = clk_hw_get_parent_by_index(hw, p);
+ 		if (!parent)
+ 			continue;
+ 
+-		for (i = 1; i <= 16; i++) {
+-			unsigned long ideal = rate * i;
+-			unsigned long rounded;
+-
+-			rounded = clk_hw_round_rate(parent, ideal);
+-
+-			if (rounded == ideal) {
+-				best_rate = rounded;
+-				best_div = i;
+-				best_parent = parent;
+-				break;
+-			}
+-
+-			if (!best_rate ||
+-			    abs(rate - rounded / i) <
+-			    abs(rate - best_rate / best_div)) {
+-				best_rate = rounded;
+-				best_div = i;
+-				best_parent = parent;
+-			}
++		parent_rate = clk_hw_get_rate(parent);
++
++		rate = divider_round_rate_parent(hw, parent, req->rate,
++						 &parent_rate, NULL, 4,
++						 CLK_SET_RATE_PARENT);
++
++		if (rate == req->rate) {
++			best_parent = parent;
++			best_parent_rate = parent_rate;
++			best_rate = rate;
++			goto out;
+ 		}
+ 
+-		if (best_rate / best_div == rate)
+-			break;
++		if ((req->rate - rate) < (req->rate - best_rate)) {
++			best_rate = rate;
++			best_parent_rate = parent_rate;
++			best_parent = parent;
++		}
+ 	}
+ 
+-	req->rate = best_rate / best_div;
+-	req->best_parent_rate = best_rate;
++out:
+ 	req->best_parent_hw = best_parent;
++	req->best_parent_rate = best_parent_rate;
++	req->rate = best_rate;
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/sun4i/sun8i_mixer.c b/drivers/gpu/drm/sun4i/sun8i_mixer.c
+index 57450c442..30a2eff55 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_mixer.c
++++ b/drivers/gpu/drm/sun4i/sun8i_mixer.c
+@@ -14,10 +14,10 @@
+ #include <drm/drmP.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_fb_cma_helper.h>
+ #include <drm/drm_gem_cma_helper.h>
+ #include <drm/drm_plane_helper.h>
++#include <drm/drm_probe_helper.h>
+ 
+ #include <linux/component.h>
+ #include <linux/dma-mapping.h>
+@@ -368,6 +368,7 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
+ 	struct sun8i_mixer *mixer;
+ 	struct resource *res;
+ 	void __iomem *regs;
++	unsigned int base;
+ 	int plane_cnt;
+ 	int i, ret;
+ 
+@@ -456,33 +457,60 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
+ 
+ 	list_add_tail(&mixer->engine.list, &drv->engine_list);
+ 
+-	/* Reset the registers */
+-	for (i = 0x0; i < 0x20000; i += 4)
+-		regmap_write(mixer->engine.regs, i, 0);
++	base = sun8i_blender_base(mixer);
++
++	/* Reset registers and disable unused sub-engines */
++	if (mixer->cfg->is_de3) {
++		for (i = 0; i < DE3_MIXER_UNIT_SIZE; i += 4)
++			regmap_write(mixer->engine.regs, i, 0);
++
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_FCE_EN, 0);
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_PEAK_EN, 0);
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_LCTI_EN, 0);
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_BLS_EN, 0);
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_FCC_EN, 0);
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_DNS_EN, 0);
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_DRC_EN, 0);
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_FMT_EN, 0);
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_CDC0_EN, 0);
++		regmap_write(mixer->engine.regs, SUN50I_MIXER_CDC1_EN, 0);
++	} else {
++		for (i = 0; i < DE2_MIXER_UNIT_SIZE; i += 4)
++			regmap_write(mixer->engine.regs, i, 0);
++
++		regmap_write(mixer->engine.regs, SUN8I_MIXER_FCE_EN, 0);
++		regmap_write(mixer->engine.regs, SUN8I_MIXER_BWS_EN, 0);
++		regmap_write(mixer->engine.regs, SUN8I_MIXER_LTI_EN, 0);
++		regmap_write(mixer->engine.regs, SUN8I_MIXER_PEAK_EN, 0);
++		regmap_write(mixer->engine.regs, SUN8I_MIXER_ASE_EN, 0);
++		regmap_write(mixer->engine.regs, SUN8I_MIXER_FCC_EN, 0);
++		regmap_write(mixer->engine.regs, SUN8I_MIXER_DCSC_EN, 0);
++	}
+ 
+ 	/* Enable the mixer */
+ 	regmap_write(mixer->engine.regs, SUN8I_MIXER_GLOBAL_CTL,
+ 		     SUN8I_MIXER_GLOBAL_CTL_RT_EN);
+ 
+ 	/* Set background color to black */
+-	regmap_write(mixer->engine.regs, SUN8I_MIXER_BLEND_BKCOLOR,
++	regmap_write(mixer->engine.regs, SUN8I_MIXER_BLEND_BKCOLOR(base),
+ 		     SUN8I_MIXER_BLEND_COLOR_BLACK);
+ 
+ 	/*
+ 	 * Set fill color of bottom plane to black. Generally not needed
+ 	 * except when VI plane is at bottom (zpos = 0) and enabled.
+ 	 */
+-	regmap_write(mixer->engine.regs, SUN8I_MIXER_BLEND_PIPE_CTL,
++	regmap_write(mixer->engine.regs, SUN8I_MIXER_BLEND_PIPE_CTL(base),
+ 		     SUN8I_MIXER_BLEND_PIPE_CTL_FC_EN(0));
+-	regmap_write(mixer->engine.regs, SUN8I_MIXER_BLEND_ATTR_FCOLOR(0),
++	regmap_write(mixer->engine.regs, SUN8I_MIXER_BLEND_ATTR_FCOLOR(base, 0),
+ 		     SUN8I_MIXER_BLEND_COLOR_BLACK);
+ 
+ 	plane_cnt = mixer->cfg->vi_num + mixer->cfg->ui_num;
+ 	for (i = 0; i < plane_cnt; i++)
+-		regmap_write(mixer->engine.regs, SUN8I_MIXER_BLEND_MODE(i),
++		regmap_write(mixer->engine.regs,
++			     SUN8I_MIXER_BLEND_MODE(base, i),
+ 			     SUN8I_MIXER_BLEND_MODE_DEF);
+ 
+-	regmap_update_bits(mixer->engine.regs, SUN8I_MIXER_BLEND_PIPE_CTL,
++	regmap_update_bits(mixer->engine.regs, SUN8I_MIXER_BLEND_PIPE_CTL(base),
+ 			   SUN8I_MIXER_BLEND_PIPE_CTL_EN_MSK, 0);
+ 
+ 	return 0;
+@@ -545,14 +573,22 @@ static const struct sun8i_mixer_cfg sun8i_h3_mixer0_cfg = {
+ 	.vi_num		= 1,
+ };
+ 
+-static const struct sun8i_mixer_cfg sun8i_h3_mixer1_cfg = {
+-	.ccsc		= 1,
+-	.mod_rate	= 432000000,
++static const struct sun8i_mixer_cfg sun8i_r40_mixer0_cfg = {
++	.ccsc		= 0,
++	.mod_rate	= 297000000,
+ 	.scaler_mask	= 0xf,
+ 	.ui_num		= 3,
+ 	.vi_num		= 1,
+ };
+ 
++static const struct sun8i_mixer_cfg sun8i_r40_mixer1_cfg = {
++	.ccsc		= 1,
++	.mod_rate	= 297000000,
++	.scaler_mask	= 0x3,
++	.ui_num		= 1,
++	.vi_num		= 1,
++};
++
+ static const struct sun8i_mixer_cfg sun8i_v3s_mixer_cfg = {
+ 	.vi_num = 2,
+ 	.ui_num = 1,
+@@ -577,6 +613,15 @@ static const struct sun8i_mixer_cfg sun50i_a64_mixer1_cfg = {
+ 	.vi_num		= 1,
+ };
+ 
++static const struct sun8i_mixer_cfg sun50i_h6_mixer0_cfg = {
++	.ccsc		= 0,
++	.is_de3		= true,
++	.mod_rate	= 600000000,
++	.scaler_mask	= 0xf,
++	.ui_num		= 3,
++	.vi_num		= 1,
++};
++
+ static const struct of_device_id sun8i_mixer_of_table[] = {
+ 	{
+ 		.compatible = "allwinner,sun8i-a83t-de2-mixer-0",
+@@ -591,8 +636,12 @@ static const struct of_device_id sun8i_mixer_of_table[] = {
+ 		.data = &sun8i_h3_mixer0_cfg,
+ 	},
+ 	{
+-		.compatible = "allwinner,sun8i-h3-de2-mixer-1",
+-		.data = &sun8i_h3_mixer1_cfg,
++		.compatible = "allwinner,sun8i-r40-de2-mixer-0",
++		.data = &sun8i_r40_mixer0_cfg,
++	},
++	{
++		.compatible = "allwinner,sun8i-r40-de2-mixer-1",
++		.data = &sun8i_r40_mixer1_cfg,
+ 	},
+ 	{
+ 		.compatible = "allwinner,sun8i-v3s-de2-mixer",
+@@ -606,6 +655,10 @@ static const struct of_device_id sun8i_mixer_of_table[] = {
+ 		.compatible = "allwinner,sun50i-a64-de2-mixer-1",
+ 		.data = &sun50i_a64_mixer1_cfg,
+ 	},
++	{
++		.compatible = "allwinner,sun50i-h6-de3-mixer-0",
++		.data = &sun50i_h6_mixer0_cfg,
++	},
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, sun8i_mixer_of_table);
+diff --git a/drivers/gpu/drm/sun4i/sun8i_mixer.h b/drivers/gpu/drm/sun4i/sun8i_mixer.h
+index 406c42e75..913d14ce6 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_mixer.h
++++ b/drivers/gpu/drm/sun4i/sun8i_mixer.h
+@@ -29,24 +29,41 @@
+ 
+ #define SUN8I_MIXER_GLOBAL_DBUFF_ENABLE		BIT(0)
+ 
+-#define SUN8I_MIXER_BLEND_PIPE_CTL		0x1000
+-#define SUN8I_MIXER_BLEND_ATTR_FCOLOR(x)	(0x1004 + 0x10 * (x) + 0x0)
+-#define SUN8I_MIXER_BLEND_ATTR_INSIZE(x)	(0x1004 + 0x10 * (x) + 0x4)
+-#define SUN8I_MIXER_BLEND_ATTR_COORD(x)		(0x1004 + 0x10 * (x) + 0x8)
+-#define SUN8I_MIXER_BLEND_ROUTE			0x1080
+-#define SUN8I_MIXER_BLEND_PREMULTIPLY		0x1084
+-#define SUN8I_MIXER_BLEND_BKCOLOR		0x1088
+-#define SUN8I_MIXER_BLEND_OUTSIZE		0x108c
+-#define SUN8I_MIXER_BLEND_MODE(x)		(0x1090 + 0x04 * (x))
+-#define SUN8I_MIXER_BLEND_CK_CTL		0x10b0
+-#define SUN8I_MIXER_BLEND_CK_CFG		0x10b4
+-#define SUN8I_MIXER_BLEND_CK_MAX(x)		(0x10c0 + 0x04 * (x))
+-#define SUN8I_MIXER_BLEND_CK_MIN(x)		(0x10e0 + 0x04 * (x))
+-#define SUN8I_MIXER_BLEND_OUTCTL		0x10fc
++#define DE2_MIXER_UNIT_SIZE			0x6000
++#define DE3_MIXER_UNIT_SIZE			0x3000
++
++#define DE2_BLD_BASE				0x1000
++#define DE2_CH_BASE				0x2000
++#define DE2_CH_SIZE				0x1000
++
++#define DE3_BLD_BASE				0x0800
++#define DE3_CH_BASE				0x1000
++#define DE3_CH_SIZE				0x0800
++
++#define SUN8I_MIXER_BLEND_PIPE_CTL(base)	((base) + 0)
++#define SUN8I_MIXER_BLEND_ATTR_FCOLOR(base, x)	((base) + 0x4 + 0x10 * (x))
++#define SUN8I_MIXER_BLEND_ATTR_INSIZE(base, x)	((base) + 0x8 + 0x10 * (x))
++#define SUN8I_MIXER_BLEND_ATTR_COORD(base, x)	((base) + 0xc + 0x10 * (x))
++#define SUN8I_MIXER_BLEND_ROUTE(base)		((base) + 0x80)
++#define SUN8I_MIXER_BLEND_PREMULTIPLY(base)	((base) + 0x84)
++#define SUN8I_MIXER_BLEND_BKCOLOR(base)		((base) + 0x88)
++#define SUN8I_MIXER_BLEND_OUTSIZE(base)		((base) + 0x8c)
++#define SUN8I_MIXER_BLEND_MODE(base, x)		((base) + 0x90 + 0x04 * (x))
++#define SUN8I_MIXER_BLEND_CK_CTL(base)		((base) + 0xb0)
++#define SUN8I_MIXER_BLEND_CK_CFG(base)		((base) + 0xb4)
++#define SUN8I_MIXER_BLEND_CK_MAX(base, x)	((base) + 0xc0 + 0x04 * (x))
++#define SUN8I_MIXER_BLEND_CK_MIN(base, x)	((base) + 0xe0 + 0x04 * (x))
++#define SUN8I_MIXER_BLEND_OUTCTL(base)		((base) + 0xfc)
++#define SUN50I_MIXER_BLEND_CSC_CTL(base)	((base) + 0x100)
++#define SUN50I_MIXER_BLEND_CSC_COEFF(base, layer, x, y) \
++	((base) + 0x110 + (layer) * 0x30 +  (x) * 0x10 + 4 * (y))
++#define SUN50I_MIXER_BLEND_CSC_CONST(base, layer, i) \
++	((base) + 0x110 + (layer) * 0x30 +  (i) * 0x10 + 0x0c)
+ 
+ #define SUN8I_MIXER_BLEND_PIPE_CTL_EN_MSK	GENMASK(12, 8)
+ #define SUN8I_MIXER_BLEND_PIPE_CTL_EN(pipe)	BIT(8 + pipe)
+ #define SUN8I_MIXER_BLEND_PIPE_CTL_FC_EN(pipe)	BIT(pipe)
++
+ /* colors are always in AARRGGBB format */
+ #define SUN8I_MIXER_BLEND_COLOR_BLACK		0xff000000
+ /* The following numbers are some still unknown magic numbers */
+@@ -57,6 +74,9 @@
+ 
+ #define SUN8I_MIXER_BLEND_OUTCTL_INTERLACED	BIT(1)
+ 
++#define SUN50I_MIXER_BLEND_CSC_CTL_EN(ch)	BIT(ch)
++#define SUN50I_MIXER_BLEND_CSC_CONST_VAL(d, c)	(((d) << 16) | ((c) & 0xffff))
++
+ #define SUN8I_MIXER_FBFMT_ARGB8888	0
+ #define SUN8I_MIXER_FBFMT_ABGR8888	1
+ #define SUN8I_MIXER_FBFMT_RGBA8888	2
+@@ -95,8 +115,8 @@
+ #define SUN8I_MIXER_FBFMT_YUV411	14
+ 
+ /*
+- * These sub-engines are still unknown now, the EN registers are here only to
+- * be used to disable these sub-engines.
++ * Sub-engines listed bellow are unused for now. The EN registers are here only
++ * to be used to disable these sub-engines.
+  */
+ #define SUN8I_MIXER_FCE_EN			0xa0000
+ #define SUN8I_MIXER_BWS_EN			0xa2000
+@@ -106,6 +126,17 @@
+ #define SUN8I_MIXER_FCC_EN			0xaa000
+ #define SUN8I_MIXER_DCSC_EN			0xb0000
+ 
++#define SUN50I_MIXER_FCE_EN			0x70000
++#define SUN50I_MIXER_PEAK_EN			0x70800
++#define SUN50I_MIXER_LCTI_EN			0x71000
++#define SUN50I_MIXER_BLS_EN			0x71800
++#define SUN50I_MIXER_FCC_EN			0x72000
++#define SUN50I_MIXER_DNS_EN			0x80000
++#define SUN50I_MIXER_DRC_EN			0xa0000
++#define SUN50I_MIXER_FMT_EN			0xa8000
++#define SUN50I_MIXER_CDC0_EN			0xd0000
++#define SUN50I_MIXER_CDC1_EN			0xd8000
++
+ struct de2_fmt_info {
+ 	u32			drm_fmt;
+ 	u32			de2_fmt;
+@@ -127,6 +158,7 @@ struct de2_fmt_info {
+  *	are invalid.
+  * @mod_rate: module clock rate that needs to be set in order to have
+  *	a functional block.
++ * @is_de3: true, if this is next gen display engine 3.0, false otherwise.
+  */
+ struct sun8i_mixer_cfg {
+ 	int		vi_num;
+@@ -134,6 +166,7 @@ struct sun8i_mixer_cfg {
+ 	int		scaler_mask;
+ 	int		ccsc;
+ 	unsigned long	mod_rate;
++	unsigned int	is_de3 : 1;
+ };
+ 
+ struct sun8i_mixer {
+@@ -153,5 +186,20 @@ engine_to_sun8i_mixer(struct sunxi_engine *engine)
+ 	return container_of(engine, struct sun8i_mixer, engine);
+ }
+ 
++static inline u32
++sun8i_blender_base(struct sun8i_mixer *mixer)
++{
++	return mixer->cfg->is_de3 ? DE3_BLD_BASE : DE2_BLD_BASE;
++}
++
++static inline u32
++sun8i_channel_base(struct sun8i_mixer *mixer, int channel)
++{
++	if (mixer->cfg->is_de3)
++		return DE3_CH_BASE + channel * DE3_CH_SIZE;
++	else
++		return DE2_CH_BASE + channel * DE2_CH_SIZE;
++}
++
+ const struct de2_fmt_info *sun8i_mixer_format_info(u32 format);
+ #endif /* _SUN8I_MIXER_H_ */
+diff --git a/drivers/gpu/drm/sun4i/sun8i_tcon_top.c b/drivers/gpu/drm/sun4i/sun8i_tcon_top.c
+index dfbcd1ad8..fc36e0c10 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_tcon_top.c
++++ b/drivers/gpu/drm/sun4i/sun8i_tcon_top.c
+@@ -9,11 +9,17 @@
+ #include <linux/component.h>
+ #include <linux/device.h>
+ #include <linux/module.h>
++#include <linux/of_device.h>
+ #include <linux/of_graph.h>
+ #include <linux/platform_device.h>
+ 
+ #include "sun8i_tcon_top.h"
+ 
++struct sun8i_tcon_top_quirks {
++	bool has_tcon_tv1;
++	bool has_dsi;
++};
++
+ static bool sun8i_tcon_top_node_is_tcon_top(struct device_node *node)
+ {
+ 	return !!of_match_node(sun8i_tcon_top_of_table, node);
+@@ -121,16 +127,18 @@ static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
+ 	struct platform_device *pdev = to_platform_device(dev);
+ 	struct clk_hw_onecell_data *clk_data;
+ 	struct sun8i_tcon_top *tcon_top;
++	const struct sun8i_tcon_top_quirks *quirks;
+ 	struct resource *res;
+ 	void __iomem *regs;
+ 	int ret, i;
+ 
++	quirks = of_device_get_match_data(&pdev->dev);
++
+ 	tcon_top = devm_kzalloc(dev, sizeof(*tcon_top), GFP_KERNEL);
+ 	if (!tcon_top)
+ 		return -ENOMEM;
+ 
+-	clk_data = devm_kzalloc(dev, sizeof(*clk_data) +
+-				sizeof(*clk_data->hws) * CLK_NUM,
++	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, CLK_NUM),
+ 				GFP_KERNEL);
+ 	if (!clk_data)
+ 		return -ENOMEM;
+@@ -188,15 +196,17 @@ static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
+ 					     &tcon_top->reg_lock,
+ 					     TCON_TOP_TCON_TV0_GATE, 0);
+ 
+-	clk_data->hws[CLK_TCON_TOP_TV1] =
+-		sun8i_tcon_top_register_gate(dev, "tcon-tv1", regs,
+-					     &tcon_top->reg_lock,
+-					     TCON_TOP_TCON_TV1_GATE, 1);
++	if (quirks->has_tcon_tv1)
++		clk_data->hws[CLK_TCON_TOP_TV1] =
++			sun8i_tcon_top_register_gate(dev, "tcon-tv1", regs,
++						     &tcon_top->reg_lock,
++						     TCON_TOP_TCON_TV1_GATE, 1);
+ 
+-	clk_data->hws[CLK_TCON_TOP_DSI] =
+-		sun8i_tcon_top_register_gate(dev, "dsi", regs,
+-					     &tcon_top->reg_lock,
+-					     TCON_TOP_TCON_DSI_GATE, 2);
++	if (quirks->has_dsi)
++		clk_data->hws[CLK_TCON_TOP_DSI] =
++			sun8i_tcon_top_register_gate(dev, "dsi", regs,
++						     &tcon_top->reg_lock,
++						     TCON_TOP_TCON_DSI_GATE, 2);
+ 
+ 	for (i = 0; i < CLK_NUM; i++)
+ 		if (IS_ERR(clk_data->hws[i])) {
+@@ -217,7 +227,7 @@ static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
+ 
+ err_unregister_gates:
+ 	for (i = 0; i < CLK_NUM; i++)
+-		if (!IS_ERR_OR_NULL(clk_data->hws[i]))
++		if (clk_data->hws[i])
+ 			clk_hw_unregister_gate(clk_data->hws[i]);
+ 	clk_disable_unprepare(tcon_top->bus);
+ err_assert_reset:
+@@ -235,8 +245,7 @@ static void sun8i_tcon_top_unbind(struct device *dev, struct device *master,
+ 
+ 	of_clk_del_provider(dev->of_node);
+ 	for (i = 0; i < CLK_NUM; i++)
+-		if (clk_data->hws[i])
+-			clk_hw_unregister_gate(clk_data->hws[i]);
++		clk_hw_unregister_gate(clk_data->hws[i]);
+ 
+ 	clk_disable_unprepare(tcon_top->bus);
+ 	reset_control_assert(tcon_top->rst);
+@@ -259,8 +268,25 @@ static int sun8i_tcon_top_remove(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
++const struct sun8i_tcon_top_quirks sun8i_r40_tcon_top_quirks = {
++	.has_tcon_tv1	= true,
++	.has_dsi	= true,
++};
++
++const struct sun8i_tcon_top_quirks sun50i_h6_tcon_top_quirks = {
++	/* Nothing special */
++};
++
+ /* sun4i_drv uses this list to check if a device node is a TCON TOP */
+ const struct of_device_id sun8i_tcon_top_of_table[] = {
++	{
++		.compatible = "allwinner,sun8i-r40-tcon-top",
++		.data = &sun8i_r40_tcon_top_quirks
++	},
++	{
++		.compatible = "allwinner,sun50i-h6-tcon-top",
++		.data = &sun50i_h6_tcon_top_quirks
++	},
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, sun8i_tcon_top_of_table);
+diff --git a/drivers/gpu/drm/sun4i/sun8i_ui_layer.c b/drivers/gpu/drm/sun4i/sun8i_ui_layer.c
+index 28c15c6ef..a342ec8b1 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_ui_layer.c
++++ b/drivers/gpu/drm/sun4i/sun8i_ui_layer.c
+@@ -16,10 +16,11 @@
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_fb_cma_helper.h>
+ #include <drm/drm_gem_cma_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drm_plane_helper.h>
++#include <drm/drm_probe_helper.h>
+ #include <drm/drmP.h>
+ 
+ #include "sun8i_ui_layer.h"
+@@ -30,7 +31,10 @@ static void sun8i_ui_layer_enable(struct sun8i_mixer *mixer, int channel,
+ 				  int overlay, bool enable, unsigned int zpos,
+ 				  unsigned int old_zpos)
+ {
+-	u32 val;
++	u32 val, bld_base, ch_base;
++
++	bld_base = sun8i_blender_base(mixer);
++	ch_base = sun8i_channel_base(mixer, channel);
+ 
+ 	DRM_DEBUG_DRIVER("%sabling channel %d overlay %d\n",
+ 			 enable ? "En" : "Dis", channel, overlay);
+@@ -41,17 +45,17 @@ static void sun8i_ui_layer_enable(struct sun8i_mixer *mixer, int channel,
+ 		val = 0;
+ 
+ 	regmap_update_bits(mixer->engine.regs,
+-			   SUN8I_MIXER_CHAN_UI_LAYER_ATTR(channel, overlay),
++			   SUN8I_MIXER_CHAN_UI_LAYER_ATTR(ch_base, overlay),
+ 			   SUN8I_MIXER_CHAN_UI_LAYER_ATTR_EN, val);
+ 
+ 	if (!enable || zpos != old_zpos) {
+ 		regmap_update_bits(mixer->engine.regs,
+-				   SUN8I_MIXER_BLEND_PIPE_CTL,
++				   SUN8I_MIXER_BLEND_PIPE_CTL(bld_base),
+ 				   SUN8I_MIXER_BLEND_PIPE_CTL_EN(old_zpos),
+ 				   0);
+ 
+ 		regmap_update_bits(mixer->engine.regs,
+-				   SUN8I_MIXER_BLEND_ROUTE,
++				   SUN8I_MIXER_BLEND_ROUTE(bld_base),
+ 				   SUN8I_MIXER_BLEND_ROUTE_PIPE_MSK(old_zpos),
+ 				   0);
+ 	}
+@@ -60,12 +64,13 @@ static void sun8i_ui_layer_enable(struct sun8i_mixer *mixer, int channel,
+ 		val = SUN8I_MIXER_BLEND_PIPE_CTL_EN(zpos);
+ 
+ 		regmap_update_bits(mixer->engine.regs,
+-				   SUN8I_MIXER_BLEND_PIPE_CTL, val, val);
++				   SUN8I_MIXER_BLEND_PIPE_CTL(bld_base),
++				   val, val);
+ 
+ 		val = channel << SUN8I_MIXER_BLEND_ROUTE_PIPE_SHIFT(zpos);
+ 
+ 		regmap_update_bits(mixer->engine.regs,
+-				   SUN8I_MIXER_BLEND_ROUTE,
++				   SUN8I_MIXER_BLEND_ROUTE(bld_base),
+ 				   SUN8I_MIXER_BLEND_ROUTE_PIPE_MSK(zpos),
+ 				   val);
+ 	}
+@@ -77,12 +82,16 @@ static int sun8i_ui_layer_update_coord(struct sun8i_mixer *mixer, int channel,
+ {
+ 	struct drm_plane_state *state = plane->state;
+ 	u32 src_w, src_h, dst_w, dst_h;
++	u32 bld_base, ch_base;
+ 	u32 outsize, insize;
+ 	u32 hphase, vphase;
+ 
+ 	DRM_DEBUG_DRIVER("Updating UI channel %d overlay %d\n",
+ 			 channel, overlay);
+ 
++	bld_base = sun8i_blender_base(mixer);
++	ch_base = sun8i_channel_base(mixer, channel);
++
+ 	src_w = drm_rect_width(&state->src) >> 16;
+ 	src_h = drm_rect_height(&state->src) >> 16;
+ 	dst_w = drm_rect_width(&state->dst);
+@@ -103,8 +112,8 @@ static int sun8i_ui_layer_update_coord(struct sun8i_mixer *mixer, int channel,
+ 		regmap_write(mixer->engine.regs,
+ 			     SUN8I_MIXER_GLOBAL_SIZE,
+ 			     outsize);
+-		regmap_write(mixer->engine.regs, SUN8I_MIXER_BLEND_OUTSIZE,
+-			     outsize);
++		regmap_write(mixer->engine.regs,
++			     SUN8I_MIXER_BLEND_OUTSIZE(bld_base), outsize);
+ 
+ 		if (state->crtc)
+ 			interlaced = state->crtc->state->adjusted_mode.flags
+@@ -116,7 +125,7 @@ static int sun8i_ui_layer_update_coord(struct sun8i_mixer *mixer, int channel,
+ 			val = 0;
+ 
+ 		regmap_update_bits(mixer->engine.regs,
+-				   SUN8I_MIXER_BLEND_OUTCTL,
++				   SUN8I_MIXER_BLEND_OUTCTL(bld_base),
+ 				   SUN8I_MIXER_BLEND_OUTCTL_INTERLACED,
+ 				   val);
+ 
+@@ -129,10 +138,10 @@ static int sun8i_ui_layer_update_coord(struct sun8i_mixer *mixer, int channel,
+ 			 state->src.x1 >> 16, state->src.y1 >> 16);
+ 	DRM_DEBUG_DRIVER("Layer source size W: %d H: %d\n", src_w, src_h);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_CHAN_UI_LAYER_SIZE(channel, overlay),
++		     SUN8I_MIXER_CHAN_UI_LAYER_SIZE(ch_base, overlay),
+ 		     insize);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_CHAN_UI_OVL_SIZE(channel),
++		     SUN8I_MIXER_CHAN_UI_OVL_SIZE(ch_base),
+ 		     insize);
+ 
+ 	if (insize != outsize || hphase || vphase) {
+@@ -156,10 +165,10 @@ static int sun8i_ui_layer_update_coord(struct sun8i_mixer *mixer, int channel,
+ 			 state->dst.x1, state->dst.y1);
+ 	DRM_DEBUG_DRIVER("Layer destination size W: %d H: %d\n", dst_w, dst_h);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_BLEND_ATTR_COORD(zpos),
++		     SUN8I_MIXER_BLEND_ATTR_COORD(bld_base, zpos),
+ 		     SUN8I_MIXER_COORD(state->dst.x1, state->dst.y1));
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_BLEND_ATTR_INSIZE(zpos),
++		     SUN8I_MIXER_BLEND_ATTR_INSIZE(bld_base, zpos),
+ 		     outsize);
+ 
+ 	return 0;
+@@ -170,7 +179,9 @@ static int sun8i_ui_layer_update_formats(struct sun8i_mixer *mixer, int channel,
+ {
+ 	struct drm_plane_state *state = plane->state;
+ 	const struct de2_fmt_info *fmt_info;
+-	u32 val;
++	u32 val, ch_base;
++
++	ch_base = sun8i_channel_base(mixer, channel);
+ 
+ 	fmt_info = sun8i_mixer_format_info(state->fb->format->format);
+ 	if (!fmt_info || !fmt_info->rgb) {
+@@ -180,7 +191,7 @@ static int sun8i_ui_layer_update_formats(struct sun8i_mixer *mixer, int channel,
+ 
+ 	val = fmt_info->de2_fmt << SUN8I_MIXER_CHAN_UI_LAYER_ATTR_FBFMT_OFFSET;
+ 	regmap_update_bits(mixer->engine.regs,
+-			   SUN8I_MIXER_CHAN_UI_LAYER_ATTR(channel, overlay),
++			   SUN8I_MIXER_CHAN_UI_LAYER_ATTR(ch_base, overlay),
+ 			   SUN8I_MIXER_CHAN_UI_LAYER_ATTR_FBFMT_MASK, val);
+ 
+ 	return 0;
+@@ -193,8 +204,11 @@ static int sun8i_ui_layer_update_buffer(struct sun8i_mixer *mixer, int channel,
+ 	struct drm_framebuffer *fb = state->fb;
+ 	struct drm_gem_cma_object *gem;
+ 	dma_addr_t paddr;
++	u32 ch_base;
+ 	int bpp;
+ 
++	ch_base = sun8i_channel_base(mixer, channel);
++
+ 	/* Get the physical address of the buffer in memory */
+ 	gem = drm_fb_cma_get_gem_obj(fb, 0);
+ 
+@@ -211,13 +225,13 @@ static int sun8i_ui_layer_update_buffer(struct sun8i_mixer *mixer, int channel,
+ 	/* Set the line width */
+ 	DRM_DEBUG_DRIVER("Layer line width: %d bytes\n", fb->pitches[0]);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_CHAN_UI_LAYER_PITCH(channel, overlay),
++		     SUN8I_MIXER_CHAN_UI_LAYER_PITCH(ch_base, overlay),
+ 		     fb->pitches[0]);
+ 
+ 	DRM_DEBUG_DRIVER("Setting buffer address to %pad\n", &paddr);
+ 
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_CHAN_UI_LAYER_TOP_LADDR(channel, overlay),
++		     SUN8I_MIXER_CHAN_UI_LAYER_TOP_LADDR(ch_base, overlay),
+ 		     lower_32_bits(paddr));
+ 
+ 	return 0;
+@@ -287,6 +301,7 @@ static void sun8i_ui_layer_atomic_update(struct drm_plane *plane,
+ }
+ 
+ static struct drm_plane_helper_funcs sun8i_ui_layer_helper_funcs = {
++	.prepare_fb	= drm_gem_fb_prepare_fb,
+ 	.atomic_check	= sun8i_ui_layer_atomic_check,
+ 	.atomic_disable	= sun8i_ui_layer_atomic_disable,
+ 	.atomic_update	= sun8i_ui_layer_atomic_update,
+diff --git a/drivers/gpu/drm/sun4i/sun8i_ui_layer.h b/drivers/gpu/drm/sun4i/sun8i_ui_layer.h
+index 123b15ea9..f4389cf0b 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_ui_layer.h
++++ b/drivers/gpu/drm/sun4i/sun8i_ui_layer.h
+@@ -18,23 +18,26 @@
+ 
+ #include <drm/drm_plane.h>
+ 
+-#define SUN8I_MIXER_CHAN_UI_LAYER_ATTR(ch, layer) \
+-			(0x2000 + 0x1000 * (ch) + 0x20 * (layer) + 0x0)
+-#define SUN8I_MIXER_CHAN_UI_LAYER_SIZE(ch, layer) \
+-			(0x2000 + 0x1000 * (ch) + 0x20 * (layer) + 0x4)
+-#define SUN8I_MIXER_CHAN_UI_LAYER_COORD(ch, layer) \
+-			(0x2000 + 0x1000 * (ch) + 0x20 * (layer) + 0x8)
+-#define SUN8I_MIXER_CHAN_UI_LAYER_PITCH(ch, layer) \
+-			(0x2000 + 0x1000 * (ch) + 0x20 * (layer) + 0xc)
+-#define SUN8I_MIXER_CHAN_UI_LAYER_TOP_LADDR(ch, layer) \
+-			(0x2000 + 0x1000 * (ch) + 0x20 * (layer) + 0x10)
+-#define SUN8I_MIXER_CHAN_UI_LAYER_BOT_LADDR(ch, layer) \
+-			(0x2000 + 0x1000 * (ch) + 0x20 * (layer) + 0x14)
+-#define SUN8I_MIXER_CHAN_UI_LAYER_FCOLOR(ch, layer) \
+-			(0x2000 + 0x1000 * (ch) + 0x20 * (layer) + 0x18)
+-#define SUN8I_MIXER_CHAN_UI_TOP_HADDR(ch)	(0x2000 + 0x1000 * (ch) + 0x80)
+-#define SUN8I_MIXER_CHAN_UI_BOT_HADDR(ch)	(0x2000 + 0x1000 * (ch) + 0x84)
+-#define SUN8I_MIXER_CHAN_UI_OVL_SIZE(ch)	(0x2000 + 0x1000 * (ch) + 0x88)
++#define SUN8I_MIXER_CHAN_UI_LAYER_ATTR(base, layer) \
++			((base) + 0x20 * (layer) + 0x0)
++#define SUN8I_MIXER_CHAN_UI_LAYER_SIZE(base, layer) \
++			((base) + 0x20 * (layer) + 0x4)
++#define SUN8I_MIXER_CHAN_UI_LAYER_COORD(base, layer) \
++			((base) + 0x20 * (layer) + 0x8)
++#define SUN8I_MIXER_CHAN_UI_LAYER_PITCH(base, layer) \
++			((base) + 0x20 * (layer) + 0xc)
++#define SUN8I_MIXER_CHAN_UI_LAYER_TOP_LADDR(base, layer) \
++			((base) + 0x20 * (layer) + 0x10)
++#define SUN8I_MIXER_CHAN_UI_LAYER_BOT_LADDR(base, layer) \
++			((base) + 0x20 * (layer) + 0x14)
++#define SUN8I_MIXER_CHAN_UI_LAYER_FCOLOR(base, layer) \
++			((base) + 0x20 * (layer) + 0x18)
++#define SUN8I_MIXER_CHAN_UI_TOP_HADDR(base) \
++			((base) + 0x80)
++#define SUN8I_MIXER_CHAN_UI_BOT_HADDR(base) \
++			((base) + 0x84)
++#define SUN8I_MIXER_CHAN_UI_OVL_SIZE(base) \
++			((base) + 0x88)
+ 
+ #define SUN8I_MIXER_CHAN_UI_LAYER_ATTR_EN		BIT(0)
+ #define SUN8I_MIXER_CHAN_UI_LAYER_ATTR_ALPHA_MODE_MASK	GENMASK(2, 1)
+diff --git a/drivers/gpu/drm/sun4i/sun8i_ui_scaler.c b/drivers/gpu/drm/sun4i/sun8i_ui_scaler.c
+index 6bb2aa164..ae0806bcc 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_ui_scaler.c
++++ b/drivers/gpu/drm/sun4i/sun8i_ui_scaler.c
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include "sun8i_ui_scaler.h"
++#include "sun8i_vi_scaler.h"
+ 
+ static const u32 lan2coefftab16[240] = {
+ 	0x00004000, 0x00033ffe, 0x00063efc, 0x000a3bfb,
+@@ -88,6 +89,20 @@ static const u32 lan2coefftab16[240] = {
+ 	0x0b1c1603, 0x0d1c1502, 0x0e1d1401, 0x0f1d1301,
+ };
+ 
++static u32 sun8i_ui_scaler_base(struct sun8i_mixer *mixer, int channel)
++{
++	int vi_num = mixer->cfg->vi_num;
++
++	if (mixer->cfg->is_de3)
++		return DE3_VI_SCALER_UNIT_BASE +
++		       DE3_VI_SCALER_UNIT_SIZE * vi_num +
++		       DE3_UI_SCALER_UNIT_SIZE * (channel - vi_num);
++	else
++		return DE2_VI_SCALER_UNIT_BASE +
++		       DE2_VI_SCALER_UNIT_SIZE * vi_num +
++		       DE2_UI_SCALER_UNIT_SIZE * (channel - vi_num);
++}
++
+ static int sun8i_ui_scaler_coef_index(unsigned int step)
+ {
+ 	unsigned int scale, int_part, float_part;
+@@ -114,33 +129,35 @@ static int sun8i_ui_scaler_coef_index(unsigned int step)
+ 
+ void sun8i_ui_scaler_enable(struct sun8i_mixer *mixer, int layer, bool enable)
+ {
+-	int vi_cnt = mixer->cfg->vi_num;
+-	u32 val;
++	u32 val, base;
+ 
+-	if (WARN_ON(layer < vi_cnt))
++	if (WARN_ON(layer < mixer->cfg->vi_num))
+ 		return;
+ 
++	base = sun8i_ui_scaler_base(mixer, layer);
++
+ 	if (enable)
+ 		val = SUN8I_SCALER_GSU_CTRL_EN |
+ 		      SUN8I_SCALER_GSU_CTRL_COEFF_RDY;
+ 	else
+ 		val = 0;
+ 
+-	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_GSU_CTRL(vi_cnt, layer - vi_cnt), val);
++	regmap_write(mixer->engine.regs, SUN8I_SCALER_GSU_CTRL(base), val);
+ }
+ 
+ void sun8i_ui_scaler_setup(struct sun8i_mixer *mixer, int layer,
+ 			   u32 src_w, u32 src_h, u32 dst_w, u32 dst_h,
+ 			   u32 hscale, u32 vscale, u32 hphase, u32 vphase)
+ {
+-	int vi_cnt = mixer->cfg->vi_num;
+ 	u32 insize, outsize;
+ 	int i, offset;
++	u32 base;
+ 
+-	if (WARN_ON(layer < vi_cnt))
++	if (WARN_ON(layer < mixer->cfg->vi_num))
+ 		return;
+ 
++	base = sun8i_ui_scaler_base(mixer, layer);
++
+ 	hphase <<= SUN8I_UI_SCALER_PHASE_FRAC - 16;
+ 	vphase <<= SUN8I_UI_SCALER_PHASE_FRAC - 16;
+ 	hscale <<= SUN8I_UI_SCALER_SCALE_FRAC - 16;
+@@ -149,24 +166,22 @@ void sun8i_ui_scaler_setup(struct sun8i_mixer *mixer, int layer,
+ 	insize = SUN8I_UI_SCALER_SIZE(src_w, src_h);
+ 	outsize = SUN8I_UI_SCALER_SIZE(dst_w, dst_h);
+ 
+-	layer -= vi_cnt;
+-
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_GSU_OUTSIZE(vi_cnt, layer), outsize);
++		     SUN8I_SCALER_GSU_OUTSIZE(base), outsize);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_GSU_INSIZE(vi_cnt, layer), insize);
++		     SUN8I_SCALER_GSU_INSIZE(base), insize);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_GSU_HSTEP(vi_cnt, layer), hscale);
++		     SUN8I_SCALER_GSU_HSTEP(base), hscale);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_GSU_VSTEP(vi_cnt, layer), vscale);
++		     SUN8I_SCALER_GSU_VSTEP(base), vscale);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_GSU_HPHASE(vi_cnt, layer), hphase);
++		     SUN8I_SCALER_GSU_HPHASE(base), hphase);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_GSU_VPHASE(vi_cnt, layer), vphase);
++		     SUN8I_SCALER_GSU_VPHASE(base), vphase);
+ 	offset = sun8i_ui_scaler_coef_index(hscale) *
+ 			SUN8I_UI_SCALER_COEFF_COUNT;
+ 	for (i = 0; i < SUN8I_UI_SCALER_COEFF_COUNT; i++)
+ 		regmap_write(mixer->engine.regs,
+-			     SUN8I_SCALER_GSU_HCOEFF(vi_cnt, layer, i),
++			     SUN8I_SCALER_GSU_HCOEFF(base, i),
+ 			     lan2coefftab16[offset + i]);
+ }
+diff --git a/drivers/gpu/drm/sun4i/sun8i_ui_scaler.h b/drivers/gpu/drm/sun4i/sun8i_ui_scaler.h
+index 86295be8b..1ef4bd6f2 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_ui_scaler.h
++++ b/drivers/gpu/drm/sun4i/sun8i_ui_scaler.h
+@@ -11,6 +11,9 @@
+ 
+ #include "sun8i_mixer.h"
+ 
++#define DE2_UI_SCALER_UNIT_SIZE 0x10000
++#define DE3_UI_SCALER_UNIT_SIZE 0x08000
++
+ /* this two macros assumes 16 fractional bits which is standard in DRM */
+ #define SUN8I_UI_SCALER_SCALE_MIN		1
+ #define SUN8I_UI_SCALER_SCALE_MAX		((1UL << 20) - 1)
+@@ -20,23 +23,14 @@
+ #define SUN8I_UI_SCALER_COEFF_COUNT		16
+ #define SUN8I_UI_SCALER_SIZE(w, h)		(((h) - 1) << 16 | ((w) - 1))
+ 
+-#define SUN8I_SCALER_GSU_CTRL(vi_cnt, ui_idx) \
+-	(0x20000 + 0x20000 * (vi_cnt) + 0x10000 * (ui_idx) + 0x0)
+-#define SUN8I_SCALER_GSU_OUTSIZE(vi_cnt, ui_idx) \
+-	(0x20000 + 0x20000 * (vi_cnt) + 0x10000 * (ui_idx) + 0x40)
+-#define SUN8I_SCALER_GSU_INSIZE(vi_cnt, ui_idx) \
+-	(0x20000 + 0x20000 * (vi_cnt) + 0x10000 * (ui_idx) + 0x80)
+-#define SUN8I_SCALER_GSU_HSTEP(vi_cnt, ui_idx) \
+-	(0x20000 + 0x20000 * (vi_cnt) + 0x10000 * (ui_idx) + 0x88)
+-#define SUN8I_SCALER_GSU_VSTEP(vi_cnt, ui_idx) \
+-	(0x20000 + 0x20000 * (vi_cnt) + 0x10000 * (ui_idx) + 0x8c)
+-#define SUN8I_SCALER_GSU_HPHASE(vi_cnt, ui_idx) \
+-	(0x20000 + 0x20000 * (vi_cnt) + 0x10000 * (ui_idx) + 0x90)
+-#define SUN8I_SCALER_GSU_VPHASE(vi_cnt, ui_idx) \
+-	(0x20000 + 0x20000 * (vi_cnt) + 0x10000 * (ui_idx) + 0x98)
+-#define SUN8I_SCALER_GSU_HCOEFF(vi_cnt, ui_idx, index) \
+-	(0x20000 + 0x20000 * (vi_cnt) + 0x10000 * (ui_idx) + 0x200 + \
+-	0x4 * (index))
++#define SUN8I_SCALER_GSU_CTRL(base)		((base) + 0x0)
++#define SUN8I_SCALER_GSU_OUTSIZE(base)		((base) + 0x40)
++#define SUN8I_SCALER_GSU_INSIZE(base)		((base) + 0x80)
++#define SUN8I_SCALER_GSU_HSTEP(base)		((base) + 0x88)
++#define SUN8I_SCALER_GSU_VSTEP(base)		((base) + 0x8c)
++#define SUN8I_SCALER_GSU_HPHASE(base)		((base) + 0x90)
++#define SUN8I_SCALER_GSU_VPHASE(base)		((base) + 0x98)
++#define SUN8I_SCALER_GSU_HCOEFF(base, index)	((base) + 0x200 + 0x4 * (index))
+ 
+ #define SUN8I_SCALER_GSU_CTRL_EN		BIT(0)
+ #define SUN8I_SCALER_GSU_CTRL_COEFF_RDY		BIT(4)
+diff --git a/drivers/gpu/drm/sun4i/sun8i_vi_layer.c b/drivers/gpu/drm/sun4i/sun8i_vi_layer.c
+index f4fe97813..8a0616238 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_vi_layer.c
++++ b/drivers/gpu/drm/sun4i/sun8i_vi_layer.c
+@@ -10,10 +10,11 @@
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc.h>
+-#include <drm/drm_crtc_helper.h>
+ #include <drm/drm_fb_cma_helper.h>
+ #include <drm/drm_gem_cma_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drm_plane_helper.h>
++#include <drm/drm_probe_helper.h>
+ #include <drm/drmP.h>
+ 
+ #include "sun8i_vi_layer.h"
+@@ -24,7 +25,10 @@ static void sun8i_vi_layer_enable(struct sun8i_mixer *mixer, int channel,
+ 				  int overlay, bool enable, unsigned int zpos,
+ 				  unsigned int old_zpos)
+ {
+-	u32 val;
++	u32 val, bld_base, ch_base;
++
++	bld_base = sun8i_blender_base(mixer);
++	ch_base = sun8i_channel_base(mixer, channel);
+ 
+ 	DRM_DEBUG_DRIVER("%sabling VI channel %d overlay %d\n",
+ 			 enable ? "En" : "Dis", channel, overlay);
+@@ -35,17 +39,17 @@ static void sun8i_vi_layer_enable(struct sun8i_mixer *mixer, int channel,
+ 		val = 0;
+ 
+ 	regmap_update_bits(mixer->engine.regs,
+-			   SUN8I_MIXER_CHAN_VI_LAYER_ATTR(channel, overlay),
++			   SUN8I_MIXER_CHAN_VI_LAYER_ATTR(ch_base, overlay),
+ 			   SUN8I_MIXER_CHAN_VI_LAYER_ATTR_EN, val);
+ 
+ 	if (!enable || zpos != old_zpos) {
+ 		regmap_update_bits(mixer->engine.regs,
+-				   SUN8I_MIXER_BLEND_PIPE_CTL,
++				   SUN8I_MIXER_BLEND_PIPE_CTL(bld_base),
+ 				   SUN8I_MIXER_BLEND_PIPE_CTL_EN(old_zpos),
+ 				   0);
+ 
+ 		regmap_update_bits(mixer->engine.regs,
+-				   SUN8I_MIXER_BLEND_ROUTE,
++				   SUN8I_MIXER_BLEND_ROUTE(bld_base),
+ 				   SUN8I_MIXER_BLEND_ROUTE_PIPE_MSK(old_zpos),
+ 				   0);
+ 	}
+@@ -54,12 +58,13 @@ static void sun8i_vi_layer_enable(struct sun8i_mixer *mixer, int channel,
+ 		val = SUN8I_MIXER_BLEND_PIPE_CTL_EN(zpos);
+ 
+ 		regmap_update_bits(mixer->engine.regs,
+-				   SUN8I_MIXER_BLEND_PIPE_CTL, val, val);
++				   SUN8I_MIXER_BLEND_PIPE_CTL(bld_base),
++				   val, val);
+ 
+ 		val = channel << SUN8I_MIXER_BLEND_ROUTE_PIPE_SHIFT(zpos);
+ 
+ 		regmap_update_bits(mixer->engine.regs,
+-				   SUN8I_MIXER_BLEND_ROUTE,
++				   SUN8I_MIXER_BLEND_ROUTE(bld_base),
+ 				   SUN8I_MIXER_BLEND_ROUTE_PIPE_MSK(zpos),
+ 				   val);
+ 	}
+@@ -72,6 +77,7 @@ static int sun8i_vi_layer_update_coord(struct sun8i_mixer *mixer, int channel,
+ 	struct drm_plane_state *state = plane->state;
+ 	const struct drm_format_info *format = state->fb->format;
+ 	u32 src_w, src_h, dst_w, dst_h;
++	u32 bld_base, ch_base;
+ 	u32 outsize, insize;
+ 	u32 hphase, vphase;
+ 	bool subsampled;
+@@ -79,6 +85,9 @@ static int sun8i_vi_layer_update_coord(struct sun8i_mixer *mixer, int channel,
+ 	DRM_DEBUG_DRIVER("Updating VI channel %d overlay %d\n",
+ 			 channel, overlay);
+ 
++	bld_base = sun8i_blender_base(mixer);
++	ch_base = sun8i_channel_base(mixer, channel);
++
+ 	src_w = drm_rect_width(&state->src) >> 16;
+ 	src_h = drm_rect_height(&state->src) >> 16;
+ 	dst_w = drm_rect_width(&state->dst);
+@@ -115,10 +124,10 @@ static int sun8i_vi_layer_update_coord(struct sun8i_mixer *mixer, int channel,
+ 			 (state->src.y1 >> 16) & ~(format->vsub - 1));
+ 	DRM_DEBUG_DRIVER("Layer source size W: %d H: %d\n", src_w, src_h);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_CHAN_VI_LAYER_SIZE(channel, overlay),
++		     SUN8I_MIXER_CHAN_VI_LAYER_SIZE(ch_base, overlay),
+ 		     insize);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_CHAN_VI_OVL_SIZE(channel),
++		     SUN8I_MIXER_CHAN_VI_OVL_SIZE(ch_base),
+ 		     insize);
+ 
+ 	/*
+@@ -149,10 +158,10 @@ static int sun8i_vi_layer_update_coord(struct sun8i_mixer *mixer, int channel,
+ 			 state->dst.x1, state->dst.y1);
+ 	DRM_DEBUG_DRIVER("Layer destination size W: %d H: %d\n", dst_w, dst_h);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_BLEND_ATTR_COORD(zpos),
++		     SUN8I_MIXER_BLEND_ATTR_COORD(bld_base, zpos),
+ 		     SUN8I_MIXER_COORD(state->dst.x1, state->dst.y1));
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_MIXER_BLEND_ATTR_INSIZE(zpos),
++		     SUN8I_MIXER_BLEND_ATTR_INSIZE(bld_base, zpos),
+ 		     outsize);
+ 
+ 	return 0;
+@@ -163,7 +172,9 @@ static int sun8i_vi_layer_update_formats(struct sun8i_mixer *mixer, int channel,
+ {
+ 	struct drm_plane_state *state = plane->state;
+ 	const struct de2_fmt_info *fmt_info;
+-	u32 val;
++	u32 val, ch_base;
++
++	ch_base = sun8i_channel_base(mixer, channel);
+ 
+ 	fmt_info = sun8i_mixer_format_info(state->fb->format->format);
+ 	if (!fmt_info) {
+@@ -173,7 +184,7 @@ static int sun8i_vi_layer_update_formats(struct sun8i_mixer *mixer, int channel,
+ 
+ 	val = fmt_info->de2_fmt << SUN8I_MIXER_CHAN_VI_LAYER_ATTR_FBFMT_OFFSET;
+ 	regmap_update_bits(mixer->engine.regs,
+-			   SUN8I_MIXER_CHAN_VI_LAYER_ATTR(channel, overlay),
++			   SUN8I_MIXER_CHAN_VI_LAYER_ATTR(ch_base, overlay),
+ 			   SUN8I_MIXER_CHAN_VI_LAYER_ATTR_FBFMT_MASK, val);
+ 
+ 	if (fmt_info->csc != SUN8I_CSC_MODE_OFF) {
+@@ -189,9 +200,17 @@ static int sun8i_vi_layer_update_formats(struct sun8i_mixer *mixer, int channel,
+ 		val = 0;
+ 
+ 	regmap_update_bits(mixer->engine.regs,
+-			   SUN8I_MIXER_CHAN_VI_LAYER_ATTR(channel, overlay),
++			   SUN8I_MIXER_CHAN_VI_LAYER_ATTR(ch_base, overlay),
+ 			   SUN8I_MIXER_CHAN_VI_LAYER_ATTR_RGB_MODE, val);
+ 
++	/* It seems that YUV formats use global alpha setting. */
++	if (mixer->cfg->is_de3)
++		regmap_update_bits(mixer->engine.regs,
++				   SUN8I_MIXER_CHAN_VI_LAYER_ATTR(ch_base,
++								  overlay),
++				   SUN50I_MIXER_CHAN_VI_LAYER_ATTR_ALPHA_MASK,
++				   SUN50I_MIXER_CHAN_VI_LAYER_ATTR_ALPHA(0xff));
++
+ 	return 0;
+ }
+ 
+@@ -204,8 +223,11 @@ static int sun8i_vi_layer_update_buffer(struct sun8i_mixer *mixer, int channel,
+ 	struct drm_gem_cma_object *gem;
+ 	u32 dx, dy, src_x, src_y;
+ 	dma_addr_t paddr;
++	u32 ch_base;
+ 	int i;
+ 
++	ch_base = sun8i_channel_base(mixer, channel);
++
+ 	/* Adjust x and y to be dividable by subsampling factor */
+ 	src_x = (state->src.x1 >> 16) & ~(format->hsub - 1);
+ 	src_y = (state->src.y1 >> 16) & ~(format->vsub - 1);
+@@ -235,17 +257,17 @@ static int sun8i_vi_layer_update_buffer(struct sun8i_mixer *mixer, int channel,
+ 		DRM_DEBUG_DRIVER("Layer %d. line width: %d bytes\n",
+ 				 i + 1, fb->pitches[i]);
+ 		regmap_write(mixer->engine.regs,
+-			     SUN8I_MIXER_CHAN_VI_LAYER_PITCH(channel,
++			     SUN8I_MIXER_CHAN_VI_LAYER_PITCH(ch_base,
+ 							     overlay, i),
+-	       fb->pitches[i]);
++			     fb->pitches[i]);
+ 
+ 		DRM_DEBUG_DRIVER("Setting %d. buffer address to %pad\n",
+ 				 i + 1, &paddr);
+ 
+ 		regmap_write(mixer->engine.regs,
+-			     SUN8I_MIXER_CHAN_VI_LAYER_TOP_LADDR(channel,
++			     SUN8I_MIXER_CHAN_VI_LAYER_TOP_LADDR(ch_base,
+ 								 overlay, i),
+-	       lower_32_bits(paddr));
++			     lower_32_bits(paddr));
+ 	}
+ 
+ 	return 0;
+@@ -315,6 +337,7 @@ static void sun8i_vi_layer_atomic_update(struct drm_plane *plane,
+ }
+ 
+ static struct drm_plane_helper_funcs sun8i_vi_layer_helper_funcs = {
++	.prepare_fb	= drm_gem_fb_prepare_fb,
+ 	.atomic_check	= sun8i_vi_layer_atomic_check,
+ 	.atomic_disable	= sun8i_vi_layer_atomic_disable,
+ 	.atomic_update	= sun8i_vi_layer_atomic_update,
+diff --git a/drivers/gpu/drm/sun4i/sun8i_vi_layer.h b/drivers/gpu/drm/sun4i/sun8i_vi_layer.h
+index 6996627a0..8a5e6d01c 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_vi_layer.h
++++ b/drivers/gpu/drm/sun4i/sun8i_vi_layer.h
+@@ -12,23 +12,26 @@
+ 
+ #include <drm/drm_plane.h>
+ 
+-#define SUN8I_MIXER_CHAN_VI_LAYER_ATTR(ch, layer) \
+-		(0x2000 + 0x1000 * (ch) + 0x30 * (layer) + 0x0)
+-#define SUN8I_MIXER_CHAN_VI_LAYER_SIZE(ch, layer) \
+-		(0x2000 + 0x1000 * (ch) + 0x30 * (layer) + 0x4)
+-#define SUN8I_MIXER_CHAN_VI_LAYER_COORD(ch, layer) \
+-		(0x2000 + 0x1000 * (ch) + 0x30 * (layer) + 0x8)
+-#define SUN8I_MIXER_CHAN_VI_LAYER_PITCH(ch, layer, plane) \
+-		(0x2000 + 0x1000 * (ch) + 0x30 * (layer) + 0xc + 4 * (plane))
+-#define SUN8I_MIXER_CHAN_VI_LAYER_TOP_LADDR(ch, layer, plane) \
+-		(0x2000 + 0x1000 * (ch) + 0x30 * (layer) + 0x18 + 4 * (plane))
+-#define SUN8I_MIXER_CHAN_VI_OVL_SIZE(ch)	(0x2000 + 0x1000 * (ch) + 0xe8)
++#define SUN8I_MIXER_CHAN_VI_LAYER_ATTR(base, layer) \
++		((base) + 0x30 * (layer) + 0x0)
++#define SUN8I_MIXER_CHAN_VI_LAYER_SIZE(base, layer) \
++		((base) + 0x30 * (layer) + 0x4)
++#define SUN8I_MIXER_CHAN_VI_LAYER_COORD(base, layer) \
++		((base) + 0x30 * (layer) + 0x8)
++#define SUN8I_MIXER_CHAN_VI_LAYER_PITCH(base, layer, plane) \
++		((base) + 0x30 * (layer) + 0xc + 4 * (plane))
++#define SUN8I_MIXER_CHAN_VI_LAYER_TOP_LADDR(base, layer, plane) \
++		((base) + 0x30 * (layer) + 0x18 + 4 * (plane))
++#define SUN8I_MIXER_CHAN_VI_OVL_SIZE(base) \
++		((base) + 0xe8)
+ 
+ #define SUN8I_MIXER_CHAN_VI_LAYER_ATTR_EN		BIT(0)
+ /* RGB mode should be set for RGB formats and cleared for YCbCr */
+ #define SUN8I_MIXER_CHAN_VI_LAYER_ATTR_RGB_MODE		BIT(15)
+ #define SUN8I_MIXER_CHAN_VI_LAYER_ATTR_FBFMT_OFFSET	8
+ #define SUN8I_MIXER_CHAN_VI_LAYER_ATTR_FBFMT_MASK	GENMASK(12, 8)
++#define SUN50I_MIXER_CHAN_VI_LAYER_ATTR_ALPHA_MASK	GENMASK(31, 24)
++#define SUN50I_MIXER_CHAN_VI_LAYER_ATTR_ALPHA(x)	((x) << 24)
+ 
+ struct sun8i_mixer;
+ 
+diff --git a/drivers/gpu/drm/sun4i/sun8i_vi_scaler.c b/drivers/gpu/drm/sun4i/sun8i_vi_scaler.c
+index d3f1acb23..7ba75011a 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_vi_scaler.c
++++ b/drivers/gpu/drm/sun4i/sun8i_vi_scaler.c
+@@ -833,6 +833,16 @@ static const u32 bicubic4coefftab32[480] = {
+ 	0x1012110d, 0x1012110d, 0x1013110c, 0x1013110c,
+ };
+ 
++static u32 sun8i_vi_scaler_base(struct sun8i_mixer *mixer, int channel)
++{
++	if (mixer->cfg->is_de3)
++		return DE3_VI_SCALER_UNIT_BASE +
++		       DE3_VI_SCALER_UNIT_SIZE * channel;
++	else
++		return DE2_VI_SCALER_UNIT_BASE +
++		       DE2_VI_SCALER_UNIT_SIZE * channel;
++}
++
+ static int sun8i_vi_scaler_coef_index(unsigned int step)
+ {
+ 	unsigned int scale, int_part, float_part;
+@@ -857,7 +867,7 @@ static int sun8i_vi_scaler_coef_index(unsigned int step)
+ 	}
+ }
+ 
+-static void sun8i_vi_scaler_set_coeff(struct regmap *map, int layer,
++static void sun8i_vi_scaler_set_coeff(struct regmap *map, u32 base,
+ 				      u32 hstep, u32 vstep,
+ 				      const struct drm_format_info *format)
+ {
+@@ -877,29 +887,31 @@ static void sun8i_vi_scaler_set_coeff(struct regmap *map, int layer,
+ 	offset = sun8i_vi_scaler_coef_index(hstep) *
+ 			SUN8I_VI_SCALER_COEFF_COUNT;
+ 	for (i = 0; i < SUN8I_VI_SCALER_COEFF_COUNT; i++) {
+-		regmap_write(map, SUN8I_SCALER_VSU_YHCOEFF0(layer, i),
++		regmap_write(map, SUN8I_SCALER_VSU_YHCOEFF0(base, i),
+ 			     lan3coefftab32_left[offset + i]);
+-		regmap_write(map, SUN8I_SCALER_VSU_YHCOEFF1(layer, i),
++		regmap_write(map, SUN8I_SCALER_VSU_YHCOEFF1(base, i),
+ 			     lan3coefftab32_right[offset + i]);
+-		regmap_write(map, SUN8I_SCALER_VSU_CHCOEFF0(layer, i),
++		regmap_write(map, SUN8I_SCALER_VSU_CHCOEFF0(base, i),
+ 			     ch_left[offset + i]);
+-		regmap_write(map, SUN8I_SCALER_VSU_CHCOEFF1(layer, i),
++		regmap_write(map, SUN8I_SCALER_VSU_CHCOEFF1(base, i),
+ 			     ch_right[offset + i]);
+ 	}
+ 
+ 	offset = sun8i_vi_scaler_coef_index(hstep) *
+ 			SUN8I_VI_SCALER_COEFF_COUNT;
+ 	for (i = 0; i < SUN8I_VI_SCALER_COEFF_COUNT; i++) {
+-		regmap_write(map, SUN8I_SCALER_VSU_YVCOEFF(layer, i),
++		regmap_write(map, SUN8I_SCALER_VSU_YVCOEFF(base, i),
+ 			     lan2coefftab32[offset + i]);
+-		regmap_write(map, SUN8I_SCALER_VSU_CVCOEFF(layer, i),
++		regmap_write(map, SUN8I_SCALER_VSU_CVCOEFF(base, i),
+ 			     cy[offset + i]);
+ 	}
+ }
+ 
+ void sun8i_vi_scaler_enable(struct sun8i_mixer *mixer, int layer, bool enable)
+ {
+-	u32 val;
++	u32 val, base;
++
++	base = sun8i_vi_scaler_base(mixer, layer);
+ 
+ 	if (enable)
+ 		val = SUN8I_SCALER_VSU_CTRL_EN |
+@@ -907,7 +919,8 @@ void sun8i_vi_scaler_enable(struct sun8i_mixer *mixer, int layer, bool enable)
+ 	else
+ 		val = 0;
+ 
+-	regmap_write(mixer->engine.regs, SUN8I_SCALER_VSU_CTRL(layer), val);
++	regmap_write(mixer->engine.regs,
++		     SUN8I_SCALER_VSU_CTRL(base), val);
+ }
+ 
+ void sun8i_vi_scaler_setup(struct sun8i_mixer *mixer, int layer,
+@@ -917,6 +930,9 @@ void sun8i_vi_scaler_setup(struct sun8i_mixer *mixer, int layer,
+ {
+ 	u32 chphase, cvphase;
+ 	u32 insize, outsize;
++	u32 base;
++
++	base = sun8i_vi_scaler_base(mixer, layer);
+ 
+ 	hphase <<= SUN8I_VI_SCALER_PHASE_FRAC - 16;
+ 	vphase <<= SUN8I_VI_SCALER_PHASE_FRAC - 16;
+@@ -940,32 +956,44 @@ void sun8i_vi_scaler_setup(struct sun8i_mixer *mixer, int layer,
+ 		cvphase = vphase;
+ 	}
+ 
++	if (mixer->cfg->is_de3) {
++		u32 val;
++
++		if (format->hsub == 1 && format->vsub == 1)
++			val = SUN50I_SCALER_VSU_SCALE_MODE_UI;
++		else
++			val = SUN50I_SCALER_VSU_SCALE_MODE_NORMAL;
++
++		regmap_write(mixer->engine.regs,
++			     SUN50I_SCALER_VSU_SCALE_MODE(base), val);
++	}
++
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_OUTSIZE(layer), outsize);
++		     SUN8I_SCALER_VSU_OUTSIZE(base), outsize);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_YINSIZE(layer), insize);
++		     SUN8I_SCALER_VSU_YINSIZE(base), insize);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_YHSTEP(layer), hscale);
++		     SUN8I_SCALER_VSU_YHSTEP(base), hscale);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_YVSTEP(layer), vscale);
++		     SUN8I_SCALER_VSU_YVSTEP(base), vscale);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_YHPHASE(layer), hphase);
++		     SUN8I_SCALER_VSU_YHPHASE(base), hphase);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_YVPHASE(layer), vphase);
++		     SUN8I_SCALER_VSU_YVPHASE(base), vphase);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_CINSIZE(layer),
++		     SUN8I_SCALER_VSU_CINSIZE(base),
+ 		     SUN8I_VI_SCALER_SIZE(src_w / format->hsub,
+ 					  src_h / format->vsub));
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_CHSTEP(layer),
++		     SUN8I_SCALER_VSU_CHSTEP(base),
+ 		     hscale / format->hsub);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_CVSTEP(layer),
++		     SUN8I_SCALER_VSU_CVSTEP(base),
+ 		     vscale / format->vsub);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_CHPHASE(layer), chphase);
++		     SUN8I_SCALER_VSU_CHPHASE(base), chphase);
+ 	regmap_write(mixer->engine.regs,
+-		     SUN8I_SCALER_VSU_CVPHASE(layer), cvphase);
+-	sun8i_vi_scaler_set_coeff(mixer->engine.regs, layer,
++		     SUN8I_SCALER_VSU_CVPHASE(base), cvphase);
++	sun8i_vi_scaler_set_coeff(mixer->engine.regs, base,
+ 				  hscale, vscale, format);
+ }
+diff --git a/drivers/gpu/drm/sun4i/sun8i_vi_scaler.h b/drivers/gpu/drm/sun4i/sun8i_vi_scaler.h
+index a595ab643..68f6593b3 100644
+--- a/drivers/gpu/drm/sun4i/sun8i_vi_scaler.h
++++ b/drivers/gpu/drm/sun4i/sun8i_vi_scaler.h
+@@ -12,6 +12,12 @@
+ #include <drm/drm_fourcc.h>
+ #include "sun8i_mixer.h"
+ 
++#define DE2_VI_SCALER_UNIT_BASE 0x20000
++#define DE2_VI_SCALER_UNIT_SIZE 0x20000
++
++#define DE3_VI_SCALER_UNIT_BASE 0x20000
++#define DE3_VI_SCALER_UNIT_SIZE 0x08000
++
+ /* this two macros assumes 16 fractional bits which is standard in DRM */
+ #define SUN8I_VI_SCALER_SCALE_MIN		1
+ #define SUN8I_VI_SCALER_SCALE_MAX		((1UL << 20) - 1)
+@@ -21,34 +27,48 @@
+ #define SUN8I_VI_SCALER_COEFF_COUNT		32
+ #define SUN8I_VI_SCALER_SIZE(w, h)		(((h) - 1) << 16 | ((w) - 1))
+ 
+-#define SUN8I_SCALER_VSU_CTRL(ch)	(0x20000 + 0x20000 * (ch) + 0x0)
+-#define SUN8I_SCALER_VSU_OUTSIZE(ch)	(0x20000 + 0x20000 * (ch) + 0x40)
+-#define SUN8I_SCALER_VSU_YINSIZE(ch)	(0x20000 + 0x20000 * (ch) + 0x80)
+-#define SUN8I_SCALER_VSU_YHSTEP(ch)	(0x20000 + 0x20000 * (ch) + 0x88)
+-#define SUN8I_SCALER_VSU_YVSTEP(ch)	(0x20000 + 0x20000 * (ch) + 0x8c)
+-#define SUN8I_SCALER_VSU_YHPHASE(ch)	(0x20000 + 0x20000 * (ch) + 0x90)
+-#define SUN8I_SCALER_VSU_YVPHASE(ch)	(0x20000 + 0x20000 * (ch) + 0x98)
+-#define SUN8I_SCALER_VSU_CINSIZE(ch)	(0x20000 + 0x20000 * (ch) + 0xc0)
+-#define SUN8I_SCALER_VSU_CHSTEP(ch)	(0x20000 + 0x20000 * (ch) + 0xc8)
+-#define SUN8I_SCALER_VSU_CVSTEP(ch)	(0x20000 + 0x20000 * (ch) + 0xcc)
+-#define SUN8I_SCALER_VSU_CHPHASE(ch)	(0x20000 + 0x20000 * (ch) + 0xd0)
+-#define SUN8I_SCALER_VSU_CVPHASE(ch)	(0x20000 + 0x20000 * (ch) + 0xd8)
+-#define SUN8I_SCALER_VSU_YHCOEFF0(ch, i) \
+-	(0x20000 + 0x20000 * (ch) + 0x200 + 0x4 * (i))
+-#define SUN8I_SCALER_VSU_YHCOEFF1(ch, i) \
+-	(0x20000 + 0x20000 * (ch) + 0x300 + 0x4 * (i))
+-#define SUN8I_SCALER_VSU_YVCOEFF(ch, i) \
+-	(0x20000 + 0x20000 * (ch) + 0x400 + 0x4 * (i))
+-#define SUN8I_SCALER_VSU_CHCOEFF0(ch, i) \
+-	(0x20000 + 0x20000 * (ch) + 0x600 + 0x4 * (i))
+-#define SUN8I_SCALER_VSU_CHCOEFF1(ch, i) \
+-	(0x20000 + 0x20000 * (ch) + 0x700 + 0x4 * (i))
+-#define SUN8I_SCALER_VSU_CVCOEFF(ch, i) \
+-	(0x20000 + 0x20000 * (ch) + 0x800 + 0x4 * (i))
++#define SUN8I_SCALER_VSU_CTRL(base)		((base) + 0x0)
++#define SUN50I_SCALER_VSU_SCALE_MODE(base)		((base) + 0x10)
++#define SUN50I_SCALER_VSU_DIR_THR(base)		((base) + 0x20)
++#define SUN50I_SCALER_VSU_EDGE_THR(base)		((base) + 0x24)
++#define SUN50I_SCALER_VSU_EDSCL_CTRL(base)		((base) + 0x28)
++#define SUN50I_SCALER_VSU_ANGLE_THR(base)		((base) + 0x2c)
++#define SUN8I_SCALER_VSU_OUTSIZE(base)		((base) + 0x40)
++#define SUN8I_SCALER_VSU_YINSIZE(base)		((base) + 0x80)
++#define SUN8I_SCALER_VSU_YHSTEP(base)		((base) + 0x88)
++#define SUN8I_SCALER_VSU_YVSTEP(base)		((base) + 0x8c)
++#define SUN8I_SCALER_VSU_YHPHASE(base)		((base) + 0x90)
++#define SUN8I_SCALER_VSU_YVPHASE(base)		((base) + 0x98)
++#define SUN8I_SCALER_VSU_CINSIZE(base)		((base) + 0xc0)
++#define SUN8I_SCALER_VSU_CHSTEP(base)		((base) + 0xc8)
++#define SUN8I_SCALER_VSU_CVSTEP(base)		((base) + 0xcc)
++#define SUN8I_SCALER_VSU_CHPHASE(base)		((base) + 0xd0)
++#define SUN8I_SCALER_VSU_CVPHASE(base)		((base) + 0xd8)
++#define SUN8I_SCALER_VSU_YHCOEFF0(base, i)	((base) + 0x200 + 0x4 * (i))
++#define SUN8I_SCALER_VSU_YHCOEFF1(base, i)	((base) + 0x300 + 0x4 * (i))
++#define SUN8I_SCALER_VSU_YVCOEFF(base, i)	((base) + 0x400 + 0x4 * (i))
++#define SUN8I_SCALER_VSU_CHCOEFF0(base, i)	((base) + 0x600 + 0x4 * (i))
++#define SUN8I_SCALER_VSU_CHCOEFF1(base, i)	((base) + 0x700 + 0x4 * (i))
++#define SUN8I_SCALER_VSU_CVCOEFF(base, i)	((base) + 0x800 + 0x4 * (i))
+ 
+ #define SUN8I_SCALER_VSU_CTRL_EN		BIT(0)
+ #define SUN8I_SCALER_VSU_CTRL_COEFF_RDY		BIT(4)
+ 
++#define SUN50I_SCALER_VSU_SUB_ZERO_DIR_THR(x)	(((x) << 24) & 0xFF)
++#define SUN50I_SCALER_VSU_ZERO_DIR_THR(x)		(((x) << 16) & 0xFF)
++#define SUN50I_SCALER_VSU_HORZ_DIR_THR(x)		(((x) << 8) & 0xFF)
++#define SUN50I_SCALER_VSU_VERT_DIR_THR(x)		((x) & 0xFF)
++
++#define SUN50I_SCALER_VSU_SCALE_MODE_UI		0
++#define SUN50I_SCALER_VSU_SCALE_MODE_NORMAL	1
++#define SUN50I_SCALER_VSU_SCALE_MODE_ED_SCALE	2
++
++#define SUN50I_SCALER_VSU_EDGE_SHIFT(x)		(((x) << 16) & 0xF)
++#define SUN50I_SCALER_VSU_EDGE_OFFSET(x)		((x) & 0xFF)
++
++#define SUN50I_SCALER_VSU_ANGLE_SHIFT(x)		(((x) << 16) & 0xF)
++#define SUN50I_SCALER_VSU_ANGLE_OFFSET(x)		((x) & 0xFF)
++
+ void sun8i_vi_scaler_enable(struct sun8i_mixer *mixer, int layer, bool enable);
+ void sun8i_vi_scaler_setup(struct sun8i_mixer *mixer, int layer,
+ 			   u32 src_w, u32 src_h, u32 dst_w, u32 dst_h,

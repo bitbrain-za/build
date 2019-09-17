@@ -1,0 +1,61 @@
+diff --git a/include/linux/compiler-gcc.h b/include/linux/compiler-gcc.h
+index 22cd123f2..d2fa16335 100644
+--- a/include/linux/compiler-gcc.h
++++ b/include/linux/compiler-gcc.h
+@@ -182,11 +182,6 @@
+ #endif
+ 
+ #if GCC_VERSION >= 50100
+-/*
+- * Mark structures as requiring designated initializers.
+- * https://gcc.gnu.org/onlinedocs/gcc/Designated-Inits.html
+- */
+-#define __designated_init __attribute__((designated_init))
+ #define COMPILER_HAS_GENERIC_BUILTIN_OVERFLOW 1
+ #endif
+ 
+diff --git a/include/linux/compiler_types.h b/include/linux/compiler_types.h
+index accb98e86..390fa2410 100644
+--- a/include/linux/compiler_types.h
++++ b/include/linux/compiler_types.h
+@@ -240,40 +240,14 @@ struct ftrace_likely_data {
+ #define __diag_error(compiler, version, option, comment) \
+ 	__diag_ ## compiler(version, error, option)
+ 
+-#ifdef CONFIG_ENABLE_MUST_CHECK
+-#define __must_check		__attribute__((warn_unused_result))
+-#else
+-#define __must_check
+-#endif
+-
+ #if defined(CC_USING_HOTPATCH) && !defined(__CHECKER__)
+ #define notrace			__attribute__((hotpatch(0, 0)))
+ #else
+ #define notrace			__attribute__((no_instrument_function))
+ #endif
+ 
+-/*
+- * it doesn't make sense on ARM (currently the only user of __naked)
+- * to trace naked functions because then mcount is called without
+- * stack and frame pointer being set up and there is no chance to
+- * restore the lr register to the value before mcount was called.
+- */
+-#define __naked			__attribute__((naked)) notrace
+-
+ #define __compiler_offsetof(a, b)	__builtin_offsetof(a, b)
+ 
+-/*
+- * Feature detection for gnu_inline (gnu89 extern inline semantics). Either
+- * __GNUC_STDC_INLINE__ is defined (not using gnu89 extern inline semantics,
+- * and we opt in to the gnu89 semantics), or __GNUC_STDC_INLINE__ is not
+- * defined so the gnu89 semantics are the default.
+- */
+-#ifdef __GNUC_STDC_INLINE__
+-# define __gnu_inline	__attribute__((gnu_inline))
+-#else
+-# define __gnu_inline
+-#endif
+-
+ /*
+  * Force always-inline if the user requests it so via the .config.
+  * GCC does not warn about unused static inline functions for

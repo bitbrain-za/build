@@ -1,0 +1,35 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts
+index f4b294a36..ca693fccc 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts
+@@ -84,10 +84,10 @@
+ 	status = "okay";
+ };
+ 
+-&codec_analog {
++/*&codec_analog {
+ 	hpvcc-supply = <&reg_eldo1>;
+ 	status = "okay";
+-};
++};*/
+ 
+ &dai {
+ 	status = "okay";
+@@ -300,7 +300,7 @@
+ 	vcc-hdmi-supply = <&reg_dldo1>;
+ };
+ 
+-&sound {
++/*&sound {
+ 	simple-audio-card,aux-devs = <&codec_analog>;
+ 	simple-audio-card,widgets = "Microphone", "Microphone Jack",
+ 				    "Headphone", "Headphone Jack";
+@@ -312,7 +312,7 @@
+ 			"AIF1 Slot 0 Right ADC", "Right ADC",
+ 			"MIC2", "Microphone Jack";
+ 	status = "okay";
+-};
++};*/
+ 
+ /* On Euler connector */
+ &spdif {

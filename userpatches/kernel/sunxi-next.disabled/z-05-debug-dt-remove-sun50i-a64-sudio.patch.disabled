@@ -1,0 +1,36 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi b/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
+index 9c0d06302..e24f1986a 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
+@@ -199,7 +199,7 @@
+ 		method = "smc";
+ 	};
+ 
+-	sound: sound {
++/*	sound: sound {
+ 		compatible = "simple-audio-card";
+ 		simple-audio-card,name = "sun50i-a64-audio";
+ 		simple-audio-card,format = "i2s";
+@@ -221,7 +221,7 @@
+ 		link_codec: simple-audio-card,codec {
+ 			sound-dai = <&codec>;
+ 		};
+-	};
++	};*/
+ 
+ 	sound_spdif {
+ 		compatible = "simple-audio-card";
+@@ -1132,11 +1132,11 @@
+ 			#reset-cells = <1>;
+ 		};
+ 
+-		codec_analog: codec-analog@1f015c0 {
++/*		codec_analog: codec-analog@1f015c0 {
+ 			compatible = "allwinner,sun50i-a64-codec-analog";
+ 			reg = <0x01f015c0 0x4>;
+ 			status = "disabled";
+-		};
++		};*/
+ 
+ 		r_i2c: i2c@1f02400 {
+ 			compatible = "allwinner,sun50i-a64-i2c",
