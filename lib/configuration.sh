@@ -138,7 +138,7 @@ PACKAGE_LIST="bc bridge-utils build-essential cpufrequtils device-tree-compiler 
 	wireless-regdb ncurses-term python3-apt sysfsutils toilet u-boot-tools unattended-upgrades \
 	usbutils wireless-tools console-setup unicode-data openssh-server initramfs-tools \
 	ca-certificates resolvconf expect iptables automake nocache debconf-utils html2text \
-	bison flex libwrap0-dev libssl-dev libnl-3-dev libnl-genl-3-dev"
+	bison flex libwrap0-dev libssl-dev libnl-3-dev libnl-genl-3-dev strace"
 
 
 # Non-essential packages

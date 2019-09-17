@@ -29,6 +29,7 @@ case $BRANCH in
 
 	next)
 
+		display_alert "Configuring kernel for next branch" "" ""
 		ATFSOURCE='https://github.com/ARM-software/arm-trusted-firmware'
 		ATFDIR='arm-trusted-firmware-sunxi-mainline'
 		ATFBRANCH='branch:master'
@@ -52,8 +53,10 @@ case $BRANCH in
 		ATF_TARGET_MAP="PLAT=$ATF_PLAT DEBUG=1 bl31;;build/$ATF_PLAT/debug/bl31.bin"
 
 		#KERNELSOURCE=$MAINLINE_KERNEL_SOURCE
-		KERNELSOURCE="https://github.com/megous/linux"
-		KERNELBRANCH="branch:orange-pi-5.3"
+		#KERNELSOURCE="https://github.com/megous/linux"
+		#KERNELBRANCH="branch:orange-pi-5.3"
+		KERNELSOURCE="https://github.com/icenowy/linux"
+		KERNELBRANCH="branch:aosc-sunxi64-5.1-rc4-pinetab"
 		KERNELDIR=$MAINLINE_KERNEL_DIR
 		KERNELPATCHDIR='sunxi-dev'
 		KERNEL_USE_GCC='> 7.0'

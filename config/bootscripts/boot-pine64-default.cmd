@@ -12,7 +12,7 @@ setenv disp_mem_reserves "off"
 setenv disp_mode "720p60"
 setenv rootfstype "ext4"
 setenv camera_type "none"
-setenv pine64_lcd "off"
+setenv pine64_lcd "on"
 
 if test -e mmc ${boot_part} ${prefix}armbianEnv.txt; then
 	load mmc ${boot_part} ${load_addr} ${prefix}armbianEnv.txt
