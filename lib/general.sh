@@ -325,6 +325,10 @@ display_alert()
 		echo -e "[\e[0;32m o.k. \x1B[0m] $1 $tmp"
 		;;
 
+		dbg)
+		echo -e "[\e[0;34m DEBUG \x1B[0m] $1 $tmp"
+		;;
+
 		*)
 		echo -e "[\e[0;32m .... \x1B[0m] $1 $tmp"
 		;;
