@@ -130,8 +130,10 @@ install_common()
 	# NOTE: this needs to be executed before family_tweaks
 	local bootscript_src=${BOOTSCRIPT%%:*}
 	local bootscript_dst=${BOOTSCRIPT##*:}
+	display_alert "bootscript_src = ${bootscript_src}" "" "dbg"
 	cp "${SRC}/config/bootscripts/${bootscript_src}" "${SDCARD}/boot/${bootscript_dst}"
 
+	display_alert "BOOTENV_FILE = ${BOTTENV_FILE}" "" "dbg"
 	if [[ -n $BOOTENV_FILE ]]; then
 		if [[ -f $USERPATCHES_PATH/bootenv/$BOOTENV_FILE ]]; then
 			cp "$USERPATCHES_PATH/bootenv/${BOOTENV_FILE}" "${SDCARD}"/boot/armbianEnv.txt
@@ -151,6 +153,7 @@ install_common()
 		fi
 	fi
 
+	display_alert "OVERLAY_PREFIX = ${OVERLAY_PREFIX}" "" "dbg"
 	[[ -n $OVERLAY_PREFIX && -f $SDCARD/boot/armbianEnv.txt ]] && \
 		echo "overlay_prefix=$OVERLAY_PREFIX" >> "${SDCARD}"/boot/armbianEnv.txt
 
@@ -172,10 +175,15 @@ install_common()
 	ff02::2     ip6-allrouters
 	EOF
 
+	display_alert "CHOSEN_KERNEL = ${CHOSEN_KERNEL}" "" "dbg"
+	display_alert "REVISION = ${REVISION}" "" "dbg"
+	display_alert "ARCH = ${SRCH}" "" "dbg"
 	# install kernel and u-boot packages
 	install_deb_chroot "$DEST/debs/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb"
 	install_deb_chroot "$DEST/debs/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb"
 
+	display_alert "Pause Point" "" "dbg"
+	read
 
 	if [[ $BUILD_DESKTOP == yes ]]; then
 		install_deb_chroot "$DEST/debs/$RELEASE/armbian-${RELEASE}-desktop_${REVISION}_all.deb"

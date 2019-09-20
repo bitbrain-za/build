@@ -35,10 +35,10 @@ case $BRANCH in
 		ATF_USE_GCC='> 6.3'
 		ATF_TARGET_MAP="PLAT=$ATF_PLAT DEBUG=1 bl31;;build/$ATF_PLAT/debug/bl31.bin"
 
-#		KERNELSOURCE=$MAINLINE_KERNEL_SOURCE
-#		KERNELBRANCH='branch:linux-4.19.y'
-		KERNELSOURCE='https://github.com/icenowy/linux'
-		KERNELBRANCH='branch:aosc-sunxi64-5.1-rc4-pinetab'
+		KERNELSOURCE=$MAINLINE_KERNEL_SOURCE
+		KERNELBRANCH='branch:linux-4.19.y'
+#		KERNELSOURCE='https://github.com/icenowy/linux'
+#		KERNELBRANCH='branch:aosc-sunxi64-5.1-rc4-pinetab'
 		KERNELDIR=$MAINLINE_KERNEL_DIR
 		KERNELPATCHDIR='sunxi-next'
 		KERNEL_USE_GCC='> 7.0'

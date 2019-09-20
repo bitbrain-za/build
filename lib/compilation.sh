@@ -333,6 +333,8 @@ compile_kernel()
 
 	# hack for deb builder. To pack what's missing in headers pack.
 	cp $SRC/patch/misc/headers-debian-byteshift.patch /tmp
+	currentdir="$(pwd)"
+	display_alert "currentdir = ${currentdir}" "" "dbg"
 
 	if [[ $KERNEL_CONFIGURE != yes ]]; then
 		if [[ $BRANCH == default ]]; then
@@ -360,6 +362,8 @@ compile_kernel()
 	fi
 
 	xz < .config > $sources_pkg_dir/usr/src/${LINUXCONFIG}_${version}_${REVISION}_config.xz
+	currentdir="$(pwd)"
+	display_alert "currentdir1 = ${currentdir}" "" "dbg"
 
 	echo -e "\n\t== kernel ==\n" >>$DEST/debug/compilation.log
 	eval CCACHE_BASEDIR="$(pwd)" env PATH=$toolchain:$PATH \
@@ -372,6 +376,8 @@ compile_kernel()
 		${OUTPUT_DIALOG:+' | dialog --backtitle "$backtitle" \
 		--progressbox "Compiling kernel..." $TTY_Y $TTY_X'} \
 		${OUTPUT_VERYSILENT:+' >/dev/null 2>/dev/null'}
+	currentdir="$(pwd)"
+	display_alert "currentdir2 = ${currentdir}" "" "dbg"
 
 	if [[ ${PIPESTATUS[0]} -ne 0 || ! -f arch/$ARCHITECTURE/boot/$KERNEL_IMAGE_TYPE ]]; then
 		exit_with_error "Kernel was not built" "@host"
@@ -385,6 +391,8 @@ compile_kernel()
 	fi
 
 	display_alert "Creating packages"
+	currentdir="$(pwd)"
+	display_alert "currentdir3 = ${currentdir}" "" "dbg"
 
 	# produce deb packages: image, headers, firmware, dtb
 	echo -e "\n\t== deb packages: image, headers, firmware, dtb ==\n" >>$DEST/debug/compilation.log
@@ -401,6 +409,9 @@ compile_kernel()
 		${OUTPUT_DIALOG:+' | dialog --backtitle "$backtitle" --progressbox "Creating kernel packages..." $TTY_Y $TTY_X'} \
 		${OUTPUT_VERYSILENT:+' >/dev/null 2>/dev/null'}
 
+	currentdir="$(pwd)"
+	display_alert "currentdir4 = ${currentdir}" "" "dbg"
+	display_alert "sources_pkg_dir = ${sources_pkg_dir}" "" "dbg"
 	cat <<-EOF > $sources_pkg_dir/DEBIAN/control
 	Package: linux-source-${version}-${BRANCH}-${LINUXFAMILY}
 	Version: ${version}-${BRANCH}-${LINUXFAMILY}+${REVISION}
@@ -414,6 +425,7 @@ compile_kernel()
 	Description: This package provides the source code for the Linux kernel $version
 	EOF
 
+	display_alert "KSRC Marker" "" "dbg"
 	if [[ $BUILD_KSRC != no ]]; then
 		fakeroot dpkg-deb -z0 -b $sources_pkg_dir ${sources_pkg_dir}.deb
 		mv ${sources_pkg_dir}.deb $DEST/debs/
@@ -421,9 +433,12 @@ compile_kernel()
 	rm -rf $sources_pkg_dir
 
 	cd ..
+	currentdir="$(pwd)"
+	display_alert "currentdir5 = ${currentdir}" "" "dbg"
 	# remove firmare image packages here - easier than patching ~40 packaging scripts at once
 	rm -f linux-firmware-image-*.deb
 	mv *.deb $DEST/debs/ || exit_with_error "Failed moving kernel DEBs"
+	display_alert "Create packages done" "" "dbg"
 }
 
 compile_sunxi_tools()
