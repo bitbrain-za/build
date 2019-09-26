@@ -381,7 +381,7 @@ compile_kernel()
 	currentdir="$(pwd)"
 	display_alert "currentdir1 = ${currentdir}" "" "dbg"
 	display_alert "Paused" "" "dbg"
-	read
+#	read
 
 	echo -e "\n\t== kernel ==\n" >>$DEST/debug/compilation.log
 	eval CCACHE_BASEDIR="$(pwd)" env PATH=$toolchain:$PATH \
@@ -397,7 +397,7 @@ compile_kernel()
 	currentdir="$(pwd)"
 	display_alert "currentdir2 = ${currentdir}" "" "dbg"
 	display_alert "Paused" "" "dbg"
-	read
+#	read
 
 	if [[ ${PIPESTATUS[0]} -ne 0 || ! -f arch/$ARCHITECTURE/boot/$KERNEL_IMAGE_TYPE ]]; then
 		exit_with_error "Kernel was not built" "@host"
@@ -414,10 +414,13 @@ compile_kernel()
 	currentdir="$(pwd)"
 	display_alert "currentdir3 = ${currentdir}" "" "dbg"
 	display_alert "Paused" "" "dbg"
-	read
+#	read
 
 	# produce deb packages: image, headers, firmware, dtb
 	echo -e "\n\t== deb packages: image, headers, firmware, dtb ==\n" >>$DEST/debug/compilation.log
+	display_alert "kernel_packing = ${kernel_packing}" "" "dbg"
+	display_alert "Paused" "" "dbg"
+	read
 	eval CCACHE_BASEDIR="$(pwd)" env PATH=$toolchain:$PATH \
 		'make -j1 $kernel_packing \
 		KDEB_PKGVERSION=$REVISION \
@@ -435,7 +438,7 @@ compile_kernel()
 	display_alert "currentdir4 = ${currentdir}" "" "dbg"
 	display_alert "sources_pkg_dir = ${sources_pkg_dir}" "" "dbg"
 	display_alert "Paused" "" "dbg"
-	read
+#	read
 
 	cat <<-EOF > $sources_pkg_dir/DEBIAN/control
 	Package: linux-source-${version}-${BRANCH}-${LINUXFAMILY}
@@ -452,7 +455,7 @@ compile_kernel()
 
 	display_alert "KSRC Marker" "" "dbg"
 	display_alert "Paused" "" "dbg"
-	read
+#	read
 
 	if [[ $BUILD_KSRC != no ]]; then
 		fakeroot dpkg-deb -z0 -b $sources_pkg_dir ${sources_pkg_dir}.deb
@@ -464,16 +467,13 @@ compile_kernel()
 	currentdir="$(pwd)"
 	display_alert "currentdir5 = ${currentdir}" "" "dbg"
 	display_alert "Paused" "" "dbg"
-	read
+#	read
 
 	# remove firmare image packages here - easier than patching ~40 packaging scripts at once
 	rm -f linux-firmware-image-*.deb
-	display_alert "Paused" "" "dbg"
-	read
 
 	mv *.deb $DEST/debs/ || exit_with_error "Failed moving kernel DEBs"
-	display_alert "Paused" "" "dbg"
-	read
+	mv $DEST/debs/linux-image-5.1.0-rc4-sunxi64_5.93_arm64.deb $DEST/debs/linux-image-next-sunxi64_5.93_arm64.deb
 
 	display_alert "Create packages done" "" "dbg"
 	display_alert "Paused" "" "dbg"
