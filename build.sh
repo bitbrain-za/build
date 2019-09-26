@@ -1,4 +1,5 @@
 sudo rm -f output/debs/linux-image*.deb
-sudo rm -rf /output/images
+sudo rm -rf output/patch
+sudo rm -rf output/images
 ./compile.sh
 

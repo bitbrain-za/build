@@ -1,0 +1,13 @@
+diff --git a/scripts/Makefile b/scripts/Makefile
+index 9d442ee05..dae6ca33f 100644
+--- a/scripts/Makefile
++++ b/scripts/Makefile
+@@ -39,6 +39,7 @@ build_unifdef: $(obj)/unifdef
+ subdir-$(CONFIG_GCC_PLUGINS) += gcc-plugins
+ subdir-$(CONFIG_MODVERSIONS) += genksyms
+ subdir-$(CONFIG_SECURITY_SELINUX) += selinux
++subdir-$(CONFIG_DTC)         += dtc
+ 
+ # Let clean descend into subdirs
+-subdir-	+= basic dtc gdb kconfig mod package
++subdir-	+= basic gdb kconfig mod package
