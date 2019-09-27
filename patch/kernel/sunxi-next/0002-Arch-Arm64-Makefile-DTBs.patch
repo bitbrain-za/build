@@ -1,0 +1,59 @@
+diff --git a/arch/arm64/Makefile b/arch/arm64/Makefile
+index b025304bd..80746ea62 100644
+--- a/arch/arm64/Makefile
++++ b/arch/arm64/Makefile
+@@ -131,10 +131,10 @@ core-$(CONFIG_EFI_STUB) += $(objtree)/drivers/firmware/efi/libstub/lib.a
+ 
+ # Default target when executing plain make
+ boot		:= arch/arm64/boot
+-KBUILD_IMAGE	:= $(boot)/Image.gz
+-
+-all:	Image.gz
++KBUILD_IMAGE	:= $(boot)/Image
++KBUILD_DTBS	:= dtbs
+ 
++all:	Image.gz $(KBUILD_DTBS)
+ 
+ Image: vmlinux
+ 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+@@ -145,6 +145,23 @@ Image.%: Image
+ zinstall install:
+ 	$(Q)$(MAKE) $(build)=$(boot) $@
+ 
++%.dtb: scripts
++	$(Q)$(MAKE) $(build)=$(boot)/dts $(boot)/dts/$@
++
++%.dtbo: | scripts
++	$(Q)$(MAKE) $(build)=$(boot)/dts MACHINE=$(MACHINE) $(boot)/dts/$@
++
++%.scr: | scripts
++	$(Q)$(MAKE) $(build)=$(boot)/dts ARCH=$(ARCH) $(boot)/dts/$@
++
++PHONY += dtbs dtbs_install
++
++dtbs: prepare scripts
++	$(Q)$(MAKE) $(build)=$(boot)/dts
++
++dtbs_install:
++	$(Q)$(MAKE) $(dtbinst)=$(boot)/dts
++
+ PHONY += vdso_install
+ vdso_install:
+ 	$(Q)$(MAKE) $(build)=arch/arm64/kernel/vdso $@
+@@ -152,6 +169,7 @@ vdso_install:
+ # We use MRPROPER_FILES and CLEAN_FILES now
+ archclean:
+ 	$(Q)$(MAKE) $(clean)=$(boot)
++	$(Q)$(MAKE) $(clean)=$(boot)/dts
+ 
+ ifeq ($(KBUILD_EXTMOD),)
+ # We need to generate vdso-offsets.h before compiling certain files in kernel/.
+@@ -168,6 +186,8 @@ endif
+ define archhelp
+   echo  '* Image.gz      - Compressed kernel image (arch/$(ARCH)/boot/Image.gz)'
+   echo  '  Image         - Uncompressed kernel image (arch/$(ARCH)/boot/Image)'
++  echo  '* dtbs          - Build device tree blobs for enabled boards'
++  echo  '  dtbs_install  - Install dtbs to $(INSTALL_DTBS_PATH)'
+   echo  '  install       - Install uncompressed kernel'
+   echo  '  zinstall      - Install compressed kernel'
+   echo  '                  Install using (your) ~/bin/installkernel or'
