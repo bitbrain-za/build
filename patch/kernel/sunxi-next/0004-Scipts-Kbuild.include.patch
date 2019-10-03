@@ -1,0 +1,13 @@
+diff --git a/scripts/Kbuild.include b/scripts/Kbuild.include
+index 7484b9d82..1087fc596 100644
+--- a/scripts/Kbuild.include
++++ b/scripts/Kbuild.include
+@@ -178,7 +178,7 @@ modbuiltin := -f $(srctree)/scripts/Makefile.modbuiltin obj
+ # Shorthand for $(Q)$(MAKE) -f scripts/Makefile.dtbinst obj=
+ # Usage:
+ # $(Q)$(MAKE) $(dtbinst)=dir
+-dtbinst := -f $(srctree)/scripts/Makefile.dtbinst obj
++dtbinst := -f $(if $(KBUILD_SRC),$(srctree)/)scripts/Makefile.dtbinst obj
+ 
+ ###
+ # Shorthand for $(Q)$(MAKE) -f scripts/Makefile.clean obj=

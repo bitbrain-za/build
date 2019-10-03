@@ -290,15 +290,8 @@ compile_kernel()
 
 	# create linux-source package - with already patched sources
 	local sources_pkg_dir=$SRC/.tmp/${CHOSEN_KSRC}_${REVISION}_all
-	display_alert "sources_pkg_dir = ${sources_pkg_dir}" "" "dbg"
-	display_alert "Paused" "" "dbg"
-	#read
 	rm -rf ${sources_pkg_dir}
-	display_alert "Paused" "" "dbg"
-	#read
 	mkdir -p $sources_pkg_dir/usr/src/ $sources_pkg_dir/usr/share/doc/linux-source-${version}-${LINUXFAMILY} $sources_pkg_dir/DEBIAN
-	display_alert "Paused" "" "dbg"
-	#read
 	
 
 	if [[ $BUILD_KSRC != no ]]; then
@@ -313,8 +306,6 @@ compile_kernel()
 	[[ $CREATE_PATCHES == yes ]] && userpatch_create "kernel"
 
 	display_alert "Compiling $BRANCH kernel" "$version" "info"
-	display_alert "Paused" "" "dbg"
-	#read
 
 	local toolchain=$(find_toolchain "$KERNEL_COMPILER" "$KERNEL_USE_GCC")
 	[[ -z $toolchain ]] && exit_with_error "Could not find required toolchain" "${KERNEL_COMPILER}gcc $KERNEL_USE_GCC"
@@ -334,23 +325,15 @@ compile_kernel()
 #			cp $SRC/config/kernel/$LINUXCONFIG.config .config
 #		fi
 #	fi
-	display_alert "Paused" "" "dbg"
-	#read
 
 	# hack for OdroidXU4. Copy firmare files
 	if [[ $BOARD == odroidxu4 ]]; then
 		mkdir -p $SRC/cache/sources/$LINUXSOURCEDIR/firmware/edid
 		cp $SRC/packages/blobs/odroidxu4/*.bin $SRC/cache/sources/$LINUXSOURCEDIR/firmware/edid
 	fi
-	display_alert "Paused" "" "dbg"
-	#read
 
 	# hack for deb builder. To pack what's missing in headers pack.
 	cp $SRC/patch/misc/headers-debian-byteshift.patch /tmp
-	currentdir="$(pwd)"
-	display_alert "currentdir = ${currentdir}" "" "dbg"
-	display_alert "Paused" "" "dbg"
-	#read
 
 	if [[ $KERNEL_CONFIGURE != yes ]]; then
 		if [[ $BRANCH == default ]]; then
@@ -378,10 +361,6 @@ compile_kernel()
 	fi
 
 	xz < .config > $sources_pkg_dir/usr/src/${LINUXCONFIG}_${version}_${REVISION}_config.xz
-	currentdir="$(pwd)"
-	display_alert "currentdir1 = ${currentdir}" "" "dbg"
-	display_alert "Paused" "" "dbg"
-#	read
 
 	echo -e "\n\t== kernel ==\n" >>$DEST/debug/compilation.log
 	eval CCACHE_BASEDIR="$(pwd)" env PATH=$toolchain:$PATH \
@@ -394,10 +373,6 @@ compile_kernel()
 		${OUTPUT_DIALOG:+' | dialog --backtitle "$backtitle" \
 		--progressbox "Compiling kernel..." $TTY_Y $TTY_X'} \
 		${OUTPUT_VERYSILENT:+' >/dev/null 2>/dev/null'}
-	currentdir="$(pwd)"
-	display_alert "currentdir2 = ${currentdir}" "" "dbg"
-	display_alert "Paused" "" "dbg"
-#	read
 
 	if [[ ${PIPESTATUS[0]} -ne 0 || ! -f arch/$ARCHITECTURE/boot/$KERNEL_IMAGE_TYPE ]]; then
 		exit_with_error "Kernel was not built" "@host"
@@ -411,16 +386,9 @@ compile_kernel()
 	fi
 
 	display_alert "Creating packages"
-	currentdir="$(pwd)"
-	display_alert "currentdir3 = ${currentdir}" "" "dbg"
-	display_alert "Paused" "" "dbg"
-#	read
 
 	# produce deb packages: image, headers, firmware, dtb
 	echo -e "\n\t== deb packages: image, headers, firmware, dtb ==\n" >>$DEST/debug/compilation.log
-	display_alert "kernel_packing = ${kernel_packing}" "" "dbg"
-	display_alert "Paused" "" "dbg"
-	read
 	eval CCACHE_BASEDIR="$(pwd)" env PATH=$toolchain:$PATH \
 		'make -j1 $kernel_packing \
 		KDEB_PKGVERSION=$REVISION \
@@ -433,12 +401,6 @@ compile_kernel()
 		${PROGRESS_LOG_TO_FILE:+' | tee -a $DEST/debug/compilation.log'} \
 		${OUTPUT_DIALOG:+' | dialog --backtitle "$backtitle" --progressbox "Creating kernel packages..." $TTY_Y $TTY_X'} \
 		${OUTPUT_VERYSILENT:+' >/dev/null 2>/dev/null'}
-
-	currentdir="$(pwd)"
-	display_alert "currentdir4 = ${currentdir}" "" "dbg"
-	display_alert "sources_pkg_dir = ${sources_pkg_dir}" "" "dbg"
-	display_alert "Paused" "" "dbg"
-#	read
 
 	cat <<-EOF > $sources_pkg_dir/DEBIAN/control
 	Package: linux-source-${version}-${BRANCH}-${LINUXFAMILY}
@@ -453,21 +415,13 @@ compile_kernel()
 	Description: This package provides the source code for the Linux kernel $version
 	EOF
 
-	display_alert "KSRC Marker" "" "dbg"
-	display_alert "Paused" "" "dbg"
-#	read
-
 	if [[ $BUILD_KSRC != no ]]; then
 		fakeroot dpkg-deb -z0 -b $sources_pkg_dir ${sources_pkg_dir}.deb
-		mv ${sources_pkg_dir}.deb $DEST/debs/
+		mv ${sources_pkg_dir}.deb $DEST/debs/pinn 1.1
 	fi
 	rm -rf $sources_pkg_dir
 
 	cd ..
-	currentdir="$(pwd)"
-	display_alert "currentdir5 = ${currentdir}" "" "dbg"
-	display_alert "Paused" "" "dbg"
-#	read
 
 	# remove firmare image packages here - easier than patching ~40 packaging scripts at once
 	rm -f linux-firmware-image-*.deb
