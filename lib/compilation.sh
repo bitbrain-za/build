@@ -430,8 +430,6 @@ compile_kernel()
 	mv $DEST/debs/linux-image-5.1.0-rc4-sunxi64_5.93_arm64.deb $DEST/debs/linux-image-next-sunxi64_5.93_arm64.deb
 
 	display_alert "Create packages done" "" "dbg"
-	display_alert "Paused" "" "dbg"
-	read
 }
 
 compile_sunxi_tools()

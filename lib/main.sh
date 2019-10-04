@@ -356,16 +356,8 @@ fi
 overlayfs_wrapper "cleanup"
 
 # extract kernel version from .deb package
-display_alert "DEST = ${DEST}" "" "dbg"
-display_alert "CHOSEN_KERNE = ${CHOSEN_KERNEL}" "" "dbg"
-display_alert "REVISION = ${REVISION}" "" "dbg"
-display_alert "ARCH = ${ARCH}" "" "dbg"
 VER=$(dpkg --info "${DEST}/debs/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
-display_alert "VER = ${VER}" "" "dbg"
 VER="${VER/-$LINUXFAMILY/}"
-display_alert "VER = ${VER}" "" "dbg"
-display_alert "Paused" "" "dbg"
-read
 
 UBOOT_VER=$(dpkg --info "${DEST}/debs/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
 
@@ -381,9 +373,6 @@ display_alert "Checking to create_desktop_package" "" "dbg"
 display_alert "Checking to chroot_build_packages" "" "dbg"
 [[ $EXTERNAL_NEW == compile ]] && chroot_build_packages
 
-display_alert "Goin to debootstrap" "" "dbg"
-display_alert "Paused" "" "dbg"
-read
 if [[ $KERNEL_ONLY != yes ]]; then
 	debootstrap_ng
 else

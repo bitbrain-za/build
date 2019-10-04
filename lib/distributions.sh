@@ -182,9 +182,6 @@ install_common()
 	install_deb_chroot "$DEST/debs/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb"
 	install_deb_chroot "$DEST/debs/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb"
 
-	display_alert "Pause Point" "" "dbg"
-	read
-
 	if [[ $BUILD_DESKTOP == yes ]]; then
 		install_deb_chroot "$DEST/debs/$RELEASE/armbian-${RELEASE}-desktop_${REVISION}_all.deb"
 		# install display manager
