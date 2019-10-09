@@ -49,8 +49,14 @@ debootstrap_ng()
 	# stage: install kernel and u-boot packages
 	# install distribution and board specific applications
 
+	display_alert "Paused before Kernel install" "" "dbg"
+	read
 	install_distribution_specific
+	display_alert "Pause check 1" "" "dbg"
+	read
 	install_common
+	display_alert "Pause check 2" "" "dbg"
+	read
 
 	# install additional applications
 	[[ $EXTERNAL == yes ]] && install_external_applications

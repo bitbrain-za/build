@@ -120,7 +120,9 @@ chroot_build_packages()
 {
 	local built_ok=()
 	local failed=()
-
+	
+	display_alert "Entering" "chroot_build_packages" "dbg"
+	
 	if [[ $IMAGE_TYPE == user-built ]]; then
 		# if user-built image compile only for selected arch/release
 		target_release="$RELEASE"
@@ -131,6 +133,7 @@ chroot_build_packages()
 		target_arch="armhf arm64"
 	fi
 
+	display_alert "target_release =" "$target_release" "dbg"
 	for release in $target_release; do
 		for arch in $target_arch; do
 			display_alert "Starting package building process" "$release/$arch" "info"
@@ -281,6 +284,9 @@ chroot_build_packages()
 			display_alert "$p"
 		done
 	fi
+	display_alert "Exiting" "chroot_build_packages" "dbg"
+	display_alert "Paused" "" "dbg"
+	read
 } #############################################################################
 
 # chroot_installpackages_local

@@ -331,6 +331,7 @@ DEB_BRANCH=${BRANCH//default}
 DEB_BRANCH=${DEB_BRANCH:+${DEB_BRANCH}-}
 CHOSEN_UBOOT=linux-u-boot-${DEB_BRANCH}${BOARD}
 CHOSEN_KERNEL=linux-image-${DEB_BRANCH}${LINUXFAMILY}
+
 CHOSEN_ROOTFS=linux-${RELEASE}-root-${DEB_BRANCH}${BOARD}
 CHOSEN_DESKTOP=armbian-${RELEASE}-desktop
 CHOSEN_KSRC=linux-source-${BRANCH}-${LINUXFAMILY}
@@ -353,11 +354,24 @@ if [[ ! -f ${DEST}/debs/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb ]]; then
 	compile_kernel
 fi
 
+#display_alert "version =" "$version" "dbg"
+#display_alert " =" "" "dbg"
+#display_alert "Stopped" "" "dbg"
+#exit
+
+
 overlayfs_wrapper "cleanup"
 
 # extract kernel version from .deb package
+display_alert "CHOSEN_KERNEL =" "${CHOSEN_KERNEL}" "dbg"
+display_alert "REVISION =" "${REVISION}" "dbg"
+display_alert "ARCH =" "${ARCH}" "dbg"
+display_alert "LINUXFAMILY =" "${LINUXFAMILY}" "sbg"
 VER=$(dpkg --info "${DEST}/debs/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
 VER="${VER/-$LINUXFAMILY/}"
+display_alert "VER =" "${VER}" "dbg"
+display_alert "Paused" "" "dbg"
+read
 
 UBOOT_VER=$(dpkg --info "${DEST}/debs/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
 
