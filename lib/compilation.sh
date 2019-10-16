@@ -283,8 +283,8 @@ compile_kernel()
 	rm -f localversion
 
 	# read kernel version
-	#local version=$(grab_version "$kerneldir")
-	local version=''
+	local version=$(grab_version "$kerneldir")
+	#local version=''
 	display_alert "version =" "$version" "dbg"
 	
 
