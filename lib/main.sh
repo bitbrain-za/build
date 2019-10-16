@@ -309,6 +309,8 @@ if [[ $IGNORE_UPDATES != yes ]]; then
 	fetch_from_repo "https://github.com/armbian/odroidc2-blobs" "odroidc2-blobs" "branch:master"
 	fetch_from_repo "https://github.com/armbian/testings" "testing-reports" "branch:master"
 fi
+display_alert "Paused" "" "dbg"
+read
 
 if [[ $BETA == yes ]]; then
 	IMAGE_TYPE=nightly
