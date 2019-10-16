@@ -314,7 +314,9 @@ compile_kernel()
 
 	# create patch for manual source changes in debug mode
 	[[ $CREATE_PATCHES == yes ]] && userpatch_create "kernel"
-
+	display_alert "Paused" "" "dbg"
+	read
+	
 	display_alert "Compiling $BRANCH kernel" "$version" "info"
 
 	local toolchain=$(find_toolchain "$KERNEL_COMPILER" "$KERNEL_USE_GCC")
