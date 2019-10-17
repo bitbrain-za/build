@@ -285,7 +285,7 @@ compile_kernel()
 	# read kernel version
 	local version=$(grab_version "$kerneldir")
 	#local version=''
-	display_alert "version =" "$version" "dbg"
+#	display_alert "version =" "$version" "dbg"
 	
 
 	# build 3rd party drivers
@@ -293,12 +293,12 @@ compile_kernel()
 
 	# create linux-source package - with already patched sources
 	local sources_pkg_dir=$SRC/.tmp/${CHOSEN_KSRC}_${REVISION}_all
-	display_alert "souces_pkg_dir =" "$sources_pkg_dir" "dbg"
-	display_alert "CHOSEN_KSRC =" "$CHOSEN_KSRC" "dbg"
-	display_alert "REVISION =" "REVISION" "dbg"
-	display_alert "LINUXFAMILY =" "$LINUXFAMILY" "dbg"
+#	display_alert "souces_pkg_dir =" "$sources_pkg_dir" "dbg"
+#	display_alert "CHOSEN_KSRC =" "$CHOSEN_KSRC" "dbg"
+#	display_alert "REVISION =" "REVISION" "dbg"
+#	display_alert "LINUXFAMILY =" "$LINUXFAMILY" "dbg"
 	
-	display_alert "Paused" "" "dbg"
+#	display_alert "Paused" "" "dbg"
 #	read
 	
 	rm -rf ${sources_pkg_dir}
@@ -314,8 +314,8 @@ compile_kernel()
 
 	# create patch for manual source changes in debug mode
 	[[ $CREATE_PATCHES == yes ]] && userpatch_create "kernel"
-	display_alert "Paused" "" "dbg"
-	read
+#	display_alert "Paused" "" "dbg"
+#	read
 	
 	display_alert "Compiling $BRANCH kernel" "$version" "info"
 
