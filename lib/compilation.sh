@@ -409,7 +409,7 @@ compile_kernel()
 	display_alert "CCACHE =" "${CCACHE}" "dbg"
 	display_alert "KERNEL_COMPILER =" "${KERNEL}" "dbg"
 	display_alert "Paused" "" "dbg"
-#	read
+	read
 
 	eval CCACHE_BASEDIR="$(pwd)" env PATH=$toolchain:$PATH \
 		'make -j1 $kernel_packing \
@@ -425,7 +425,7 @@ compile_kernel()
 		${OUTPUT_VERYSILENT:+' >/dev/null 2>/dev/null'}
 
 	display_alert "Paused" "" "dbg"
-#	read
+	read
 
 	display_alert "Creating control file" "" "dbg"
 	display_alert "version =" "${version}" "dbg"
