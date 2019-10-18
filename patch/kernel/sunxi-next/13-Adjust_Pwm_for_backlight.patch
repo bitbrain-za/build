@@ -1,0 +1,93 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-amarula-relic.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-amarula-relic.dts
+index a98f9396d..1dbc028df 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-amarula-relic.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-amarula-relic.dts
+@@ -19,13 +19,13 @@
+ 		serial0 = &uart0;
+ 	};
+ 
+-	backlight: backlight {
++/*	backlight: backlight {
+ 		compatible = "pwm-backlight";
+ 		pwms = <&pwm 0 50000 PWM_POLARITY_INVERTED>;
+ 		brightness-levels = <1 2 4 8 16 32 64 128 512>;
+ 		default-brightness-level = <2>;
+ 		enable-gpios = <&pio 3 23 GPIO_ACTIVE_HIGH>; /* LCD-BL-EN: PD23 */
+-	};
++/*	};*/
+ 
+ 	chosen {
+ 		stdout-path = "serial0:115200n8";
+@@ -47,7 +47,7 @@
+ 	status = "okay";
+ };
+ 
+-&dsi {
++/*&dsi {
+ 	vcc-dsi-supply = <&reg_dldo1>;
+ 	status = "okay";
+ 
+@@ -57,9 +57,9 @@
+ 		avdd-supply = <&reg_dc1sw>;
+ 		dvdd-supply = <&reg_dldo2>;
+ 		reset-gpios = <&pio 3 24 GPIO_ACTIVE_HIGH>; /* LCD-RST: PD24 */
+-		backlight = <&backlight>;
++/*		backlight = <&backlight>;
+ 	};
+-};
++};*/
+ 
+ &ehci0 {
+ 	status = "okay";
+@@ -124,11 +124,11 @@
+ 	status = "okay";
+ };
+ 
+-&pwm {
++/*&pwm {
+ 	pinctrl-names = "default";
+ 	pinctrl-0 = <&pwm_pin>;
+ 	status = "okay";
+-};
++};*/
+ 
+ &r_rsb {
+ 	status = "okay";
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts
+index c077b6c1f..bd9e5a94c 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-pine64.dts
+@@ -94,7 +94,6 @@
+ 	phy-handle = <&ext_rmii_phy1>;
+ 	phy-supply = <&reg_dc1sw>;
+ 	status = "okay";
+-
+ };
+ 
+ &hdmi {
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
+index 90eaf4965..9c3cddb5f 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
+@@ -61,10 +61,10 @@
+ 
+ 	backlight: backlight {
+ 		compatible = "pwm-backlight";
+-		pwms = <&pwm 0 50000 PWM_POLARITY_INVERTED>;
++		pwms = <&r_pwm 0 50000 PWM_POLARITY_INVERTED>;
+ 		brightness-levels = <0 10 20 30 40 50 60 70 80 90 100>;
+ 		default-brightness-level = <8>;
+-		enable-gpios = <&pio 3 23 GPIO_ACTIVE_HIGH>; /* PD23 */
++		enable-gpios = <&pio 7 10 GPIO_ACTIVE_HIGH>; /* PH10 */
+ 		power-supply = <&vdd_bl>;
+ 	};
+ 
+@@ -197,7 +197,7 @@
+ 	status = "okay";
+ };
+ 
+-&pwm {
++&r_pwm {
+ 	status = "okay";
+ };
+ 
