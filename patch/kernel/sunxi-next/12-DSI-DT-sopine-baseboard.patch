@@ -1,0 +1,321 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
+index 53fcc9098..90eaf4965 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
+@@ -47,6 +47,8 @@
+ 
+ #include "sun50i-a64-sopine.dtsi"
+ 
++#include <dt-bindings/pwm/pwm.h>
++
+ / {
+ 	model = "SoPine with baseboard";
+ 	compatible = "pine64,sopine-baseboard", "pine64,sopine",
+@@ -57,6 +59,15 @@
+ 		serial0 = &uart0;
+ 	};
+ 
++	backlight: backlight {
++		compatible = "pwm-backlight";
++		pwms = <&pwm 0 50000 PWM_POLARITY_INVERTED>;
++		brightness-levels = <0 10 20 30 40 50 60 70 80 90 100>;
++		default-brightness-level = <8>;
++		enable-gpios = <&pio 3 23 GPIO_ACTIVE_HIGH>; /* PD23 */
++		power-supply = <&vdd_bl>;
++	};
++
+ 	chosen {
+ 		stdout-path = "serial0:115200n8";
+ 	};
+@@ -78,12 +89,46 @@
+ 		regulator-min-microvolt = <1800000>;
+ 		regulator-max-microvolt = <1800000>;
+ 	};
++
++	vdd_bl: regulator@0 {
++		compatible = "regulator-fixed";
++		regulator-name = "bl-3v3";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		gpio = <&pio 7 6 GPIO_ACTIVE_HIGH>; /* PH6 */
++		enable-active-high;
++	};
++};
++
++&cpu0 {
++	cpu-supply = <&reg_dcdc2>;
+ };
+ 
+ &de {
+ 	status = "okay";
+ };
+ 
++&dphy {
++	status = "okay";
++};
++
++&dsi {
++	vcc-dsi-supply = <&reg_dldo1>;
++	#address-cells = <1>;
++	#size-cells = <0>;
++	status = "okay";
++
++	panel@0 {
++		compatible = "feixin,k101-im2ba02";
++		reg = <0>;
++		avdd-supply = <&reg_dc1sw>;
++		dvdd-supply = <&reg_dc1sw>;
++		cvdd-supply = <&reg_ldo_io1>;
++		reset-gpios = <&pio 3 24 GPIO_ACTIVE_HIGH>; /* PD24 */
++		backlight = <&backlight>;
++	};
++};
++
+ &ehci0 {
+ 	status = "okay";
+ };
+@@ -92,6 +137,20 @@
+ 	status = "okay";
+ };
+ 
++&i2c0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c0_pins>;
++	status = "okay";
++
++	touchscreen@5d {
++		compatible = "goodix,gt9271";
++		reg = <0x5d>;
++		interrupt-parent = <&pio>;
++		interrupts = <7 4 IRQ_TYPE_LEVEL_HIGH>; /* PH4 */
++		reset-gpios = <&pio 7 8 IRQ_TYPE_LEVEL_HIGH>; /* PH8 */
++	};
++};
++
+ &emac {
+ 	pinctrl-names = "default";
+ 	pinctrl-0 = <&rgmii_pins>;
+@@ -138,20 +197,75 @@
+ 	status = "okay";
+ };
+ 
++&pwm {
++	status = "okay";
++};
++
++&reg_aldo1 {
++	regulator-min-microvolt = <2800000>;
++	regulator-max-microvolt = <2800000>;
++	regulator-name = "dovdd-csi";
++};
++
++&reg_aldo2 {
++	regulator-always-on;
++	regulator-min-microvolt = <1800000>;
++	regulator-max-microvolt = <3300000>;
++	regulator-name = "vcc-pl";
++};
++
++&reg_aldo3 {
++	regulator-always-on;
++	regulator-min-microvolt = <2700000>;
++	regulator-max-microvolt = <3300000>;
++	regulator-name = "vcc-pll-avcc";
++};
++
+ &reg_dc1sw {
+-	regulator-name = "vcc-phy";
++	regulator-name = "vcc-lcd";
+ };
+ 
+-&reg_dldo1 {
++&reg_dcdc1 {
++	regulator-always-on;
+ 	regulator-min-microvolt = <3300000>;
+ 	regulator-max-microvolt = <3300000>;
+-	regulator-name = "vcc-hdmi";
++	regulator-name = "vcc-3v3";
++};
++
++&reg_dcdc2 {
++	regulator-always-on;
++	regulator-min-microvolt = <1000000>;
++	regulator-max-microvolt = <1300000>;
++	regulator-name = "vdd-cpux";
++};
++
++/* DCDC3 is polyphased with DCDC2 */
++
++&reg_dcdc5 {
++	regulator-always-on;
++	regulator-min-microvolt = <1200000>;
++	regulator-max-microvolt = <1200000>;
++	regulator-name = "vcc-dram";
++};
++
++&reg_dcdc6 {
++	regulator-always-on;
++	regulator-min-microvolt = <1100000>;
++	regulator-max-microvolt = <1100000>;
++	regulator-name = "vdd-sys";
+ };
+ 
+-&reg_dldo2 {
++&reg_dldo1 {
++	regulator-always-on;
+ 	regulator-min-microvolt = <3300000>;
+ 	regulator-max-microvolt = <3300000>;
+-	regulator-name = "vcc-mipi";
++	regulator-name = "vcc-hdmi-dsi-sensor";
++};
++
++&reg_dldo3 {
++	regulator-min-microvolt = <2800000>;
++	regulator-max-microvolt = <2800000>;
++	regulator-name = "avdd-csi";
+ };
+ 
+ &reg_dldo4 {
+@@ -160,8 +274,56 @@
+ 	regulator-name = "vcc-wifi";
+ };
+ 
+-&simplefb_hdmi {
+-	vcc-hdmi-supply = <&reg_dldo1>;
++&reg_drivevbus {
++	regulator-name = "usb0-vbus";
++	status = "okay";
++};
++
++&reg_eldo1 {
++	regulator-always-on;
++	regulator-min-microvolt = <1800000>;
++	regulator-max-microvolt = <1800000>;
++	regulator-name = "cpvdd";
++};
++
++&reg_eldo2 {
++	regulator-min-microvolt = <1800000>;
++	regulator-max-microvolt = <1800000>;
++	regulator-name = "vcca-1v8";
++};
++
++&reg_eldo3 {
++	regulator-min-microvolt = <1800000>;
++	regulator-max-microvolt = <1800000>;
++	regulator-name = "dvdd-1v8-csi";
++};
++
++&reg_fldo1 {
++	regulator-min-microvolt = <1200000>;
++	regulator-max-microvolt = <1200000>;
++	regulator-name = "vcc-1v2-hsic";
++};
++
++&reg_fldo2 {
++	regulator-always-on;
++	regulator-min-microvolt = <1100000>;
++	regulator-max-microvolt = <1100000>;
++	regulator-name = "vdd-cpus";
++};
++
++&reg_ldo_io0 {
++	regulator-min-microvolt = <3300000>;
++	regulator-max-microvolt = <3300000>;
++	regulator-name = "vcc-usb";
++	status = "okay";
++};
++
++&reg_ldo_io1 {
++	regulator-always-on;
++	regulator-min-microvolt = <3300000>;
++	regulator-max-microvolt = <3300000>;
++	regulator-name = "vcc-touchscreen";
++	status = "okay";
+ };
+ 
+ &uart0 {
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi
+index 6723b8695..72afcbd47 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi
+@@ -47,6 +47,10 @@
+ 
+ #include <dt-bindings/gpio/gpio.h>
+ 
++&cpu0 {
++	cpu-supply = <&reg_dcdc2>;
++};
++
+ &mmc0 {
+ 	pinctrl-names = "default";
+ 	pinctrl-0 = <&mmc0_pins>;
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi b/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
+index 6a48447c0..7976532d4 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64.dtsi
+@@ -123,7 +123,8 @@
+ 
+ 	de: display-engine {
+ 		compatible = "allwinner,sun50i-a64-display-engine";
+-		allwinner,pipelines = <&mixer0>;
++		allwinner,pipelines = <&mixer0>,
++				      <&mixer1>;
+ 		status = "disabled";
+ 	};
+ 
+@@ -276,6 +277,20 @@
+ 					reg = <0x0000 0x28000>;
+ 				};
+ 			};
++
++			sram_c1: sram@1d00000 {
++				compatible = "mmio-sram";
++				reg = <0x01d00000 0x40000>;
++				#address-cells = <1>;
++				#size-cells = <1>;
++				ranges = <0 0x01d00000 0x40000>;
++
++				ve_sram: sram-section@0 {
++					compatible = "allwinner,sun50i-a64-sram-c1",
++						     "allwinner,sun4i-a10-sram-c1";
++					reg = <0x000000 0x40000>;
++				};
++			};
+ 		};
+ 
+ 		dma: dma-controller@1c02000 {
+@@ -364,6 +379,17 @@
+ 			};
+ 		};
+ 
++		video-codec@1c0e000 {
++			compatible = "allwinner,sun50i-a64-video-engine";
++			reg = <0x01c0e000 0x1000>;
++			clocks = <&ccu CLK_BUS_VE>, <&ccu CLK_VE>,
++				 <&ccu CLK_DRAM_VE>;
++			clock-names = "ahb", "mod", "ram";
++			resets = <&ccu RST_BUS_VE>;
++			interrupts = <GIC_SPI 58 IRQ_TYPE_LEVEL_HIGH>;
++			allwinner,sram = <&ve_sram 1>;
++		};
++
+ 		mmc0: mmc@1c0f000 {
+ 			compatible = "allwinner,sun50i-a64-mmc";
+ 			reg = <0x01c0f000 0x1000>;
+@@ -525,6 +551,15 @@
+ 				bias-pull-up;
+ 			};
+ 
++			lcd_rgb666_pins: lcd-rgb666 {
++				pins = "PD0", "PD1", "PD2", "PD3", "PD4",
++				       "PD5", "PD6", "PD7", "PD8", "PD9",
++				       "PD10", "PD11", "PD12", "PD13",
++				       "PD14", "PD15", "PD16", "PD17",
++				       "PD18", "PD19", "PD20", "PD21";
++				function = "lcd0";
++			};
++
+ 			mmc0_pins: mmc0-pins {
+ 				pins = "PF0", "PF1", "PF2", "PF3",
+ 				       "PF4", "PF5";
