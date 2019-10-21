@@ -1,0 +1,44 @@
+diff --git a/drivers/of/property.c b/drivers/of/property.c
+index f46828e3b..063d02e9c 100644
+--- a/drivers/of/property.c
++++ b/drivers/of/property.c
+@@ -25,6 +25,7 @@
+ #include <linux/of_device.h>
+ #include <linux/of_graph.h>
+ #include <linux/string.h>
++#include <linux/printk.h>
+ 
+ #include "of_private.h"
+ 
+@@ -790,10 +791,13 @@ struct device_node *of_graph_get_remote_node(const struct device_node *node,
+ {
+ 	struct device_node *endpoint_node, *remote;
+ 
++	printk("DEBUG - of_graph_get_remote_node - Entering.\n");
+ 	endpoint_node = of_graph_get_endpoint_by_regs(node, port, endpoint);
+ 	if (!endpoint_node) {
+ 		pr_debug("no valid endpoint (%d, %d) for node %pOF\n",
+ 			 port, endpoint, node);
++		printk("DEBUG - no valid endpoint (%d, %d) for node %pOF\n",
++			 port, endpoint, node);
+ 		return NULL;
+ 	}
+ 
+@@ -801,14 +805,16 @@ struct device_node *of_graph_get_remote_node(const struct device_node *node,
+ 	of_node_put(endpoint_node);
+ 	if (!remote) {
+ 		pr_debug("no valid remote node\n");
++		printk("DEBUG - no valid remote node\n");
+ 		return NULL;
+ 	}
+ 
+ 	if (!of_device_is_available(remote)) {
+ 		pr_debug("not available for remote node\n");
++		printk("DEBUG - not available for remote node\n");
+ 		return NULL;
+ 	}
+-
++	printk("DEBUG - of_graph_get_remote_node - Exiting.\n");
+ 	return remote;
+ }
+ EXPORT_SYMBOL(of_graph_get_remote_node);
