@@ -1,0 +1,23 @@
+diff --git a/scripts/package/mkdebian b/scripts/package/mkdebian
+index edcad61fe..54508aec4 100755
+--- a/scripts/package/mkdebian
++++ b/scripts/package/mkdebian
+@@ -96,6 +96,7 @@ fi
+ sourcename=$KDEB_SOURCENAME
+ packagename=linux-image-$version
+ kernel_headers_packagename=linux-headers-$version
++dtb_packagename=linux-dtb-$version
+ dbg_packagename=$packagename-dbg
+ debarch=
+ set_debarch
+@@ -202,6 +203,10 @@ Description: Linux kernel debugging symbols for $version
+  all the necessary debug symbols for the kernel and its modules.
+ EOF
+ 
++Package: $dtb_packagename
++Architecture: $debarch
++Description: Linux DTB, version $version
++ This package contains device blobs from the Linux kernel, version $version
+ cat <<EOF > debian/rules
+ #!$(command -v $MAKE) -f
+ 

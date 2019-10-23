@@ -1,0 +1,15 @@
+diff --git a/scripts/package/mkdebian b/scripts/package/mkdebian
+index 8f9b0414a..80b465f37 100755
+--- a/scripts/package/mkdebian
++++ b/scripts/package/mkdebian
+@@ -100,6 +100,10 @@ dtb_packagename=linux-dtb-$version
+ dbg_packagename=$packagename-dbg
+ debarch=
+ image_name=
++echo "version = $version"
++echo "LOCALVERSION = $LOCALVERSION"
++echo "Pausing for checks"
++read
+ set_debarch
+ 
+ if [ "$ARCH" = "um" ] ; then

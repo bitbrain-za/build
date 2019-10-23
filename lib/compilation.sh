@@ -468,7 +468,8 @@ compile_kernel()
 	rm -f linux-firmware-image-*.deb
 	mv *.deb $DEST/debs/ || exit_with_error "Failed moving kernel DEBs"
 #	mv $DEST/debs/linux-image-4.19.0-rc8-next-20181016-sunxi64_5.93_arm64.deb $DEST/debs/linux-image-next-sunxi64_5.93_arm64.deb
-#	display_alert "Exiting compile routine" "" "dbg"
+	display_alert "Kernel built and packaged" "" "dbg"
+	exit
 }
 
 compile_sunxi_tools()

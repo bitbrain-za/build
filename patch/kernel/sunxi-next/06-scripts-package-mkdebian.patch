@@ -1,0 +1,35 @@
+diff --git a/scripts/package/builddeb b/scripts/package/builddeb
+index c0319f5fe..4b84b2417 100755
+--- a/scripts/package/builddeb
++++ b/scripts/package/builddeb
+@@ -268,7 +268,8 @@ rm -f "$objtree/debian/hdrsrcfiles" "$objtree/debian/hdrobjfiles"
+ 
+ if [ "$ARCH" != "um" ]; then
+ 	create_package "$kernel_headers_packagename" "$kernel_headers_dir"
+-	create_package "$libc_headers_packagename" "$libc_headers_dir"
++	# create_package "$libc_headers_packagename" "$libc_headers_dir"
++	create_package "$dtb_packagename" "$dtb_dir"
+ fi
+ 
+ create_package "$packagename" "$tmpdir"
+diff --git a/scripts/package/mkdebian b/scripts/package/mkdebian
+index 54508aec4..8f9b0414a 100755
+--- a/scripts/package/mkdebian
++++ b/scripts/package/mkdebian
+@@ -99,6 +99,7 @@ kernel_headers_packagename=linux-headers-$version
+ dtb_packagename=linux-dtb-$version
+ dbg_packagename=$packagename-dbg
+ debarch=
++image_name=
+ set_debarch
+ 
+ if [ "$ARCH" = "um" ] ; then
+@@ -207,6 +208,8 @@ Package: $dtb_packagename
+ Architecture: $debarch
+ Description: Linux DTB, version $version
+  This package contains device blobs from the Linux kernel, version $version
++EOF
++
+ cat <<EOF > debian/rules
+ #!$(command -v $MAKE) -f
+ 

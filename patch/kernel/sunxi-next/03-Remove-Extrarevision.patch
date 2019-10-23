@@ -1,0 +1,13 @@
+diff --git a/Makefile b/Makefile
+index 96c5335e7..d5713e7b1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@
+ VERSION = 5
+ PATCHLEVEL = 0
+ SUBLEVEL = 0
+-EXTRAVERSION = -rc7
++EXTRAVERSION =
+ NAME = Shy Crocodile
+ 
+ # *DOCUMENTATION*
