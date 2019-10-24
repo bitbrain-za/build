@@ -284,22 +284,12 @@ compile_kernel()
 
 	# read kernel version
 	local version=$(grab_version "$kerneldir")
-	#local version=''
-#	display_alert "version =" "$version" "dbg"
-	
 
 	# build 3rd party drivers
-#	compilation_prepare
+	compilation_prepare
 
 	# create linux-source package - with already patched sources
 	local sources_pkg_dir=$SRC/.tmp/${CHOSEN_KSRC}_${REVISION}_all
-#	display_alert "souces_pkg_dir =" "$sources_pkg_dir" "dbg"
-#	display_alert "CHOSEN_KSRC =" "$CHOSEN_KSRC" "dbg"
-#	display_alert "REVISION =" "REVISION" "dbg"
-#	display_alert "LINUXFAMILY =" "$LINUXFAMILY" "dbg"
-	
-#	display_alert "Paused" "" "dbg"
-#	read
 	
 	rm -rf ${sources_pkg_dir}
 	mkdir -p $sources_pkg_dir/usr/src/ $sources_pkg_dir/usr/share/doc/linux-source-${version}-${LINUXFAMILY} $sources_pkg_dir/DEBIAN
@@ -314,8 +304,6 @@ compile_kernel()
 
 	# create patch for manual source changes in debug mode
 	[[ $CREATE_PATCHES == yes ]] && userpatch_create "kernel"
-#	display_alert "Paused" "" "dbg"
-#	read
 	
 	display_alert "Compiling $BRANCH kernel" "$version" "info"
 
@@ -402,16 +390,6 @@ compile_kernel()
 	# produce deb packages: image, headers, firmware, dtb
 	echo -e "\n\t== deb packages: image, headers, firmware, dtb ==\n" >>$DEST/debug/compilation.log
 	
-#	display_alert "kernel_packing =" "${kernel_packing}" "dbg"
-#	display_alert "REVISION =" "${REVISION}" "dbg"
-#	display_alert "LINUXFAMILY =" "${LINUXFAMILY}" "dbg"
-#	display_alert "ARCH =" "${ARCH}" "dbg"
-#	display_alert "ARCHITECTURE =" "${ARCHITECTURE}" "dbg"
-#	display_alert "CCACHE =" "${CCACHE}" "dbg"
-#	display_alert "KERNEL_COMPILER =" "${KERNEL}" "dbg"
-#	display_alert "Paused" "" "dbg"
-#	read
-
 	eval CCACHE_BASEDIR="$(pwd)" env PATH=$toolchain:$PATH \
 		'make -j1 $kernel_packing \
 		KDEB_PKGVERSION=$REVISION \
@@ -425,15 +403,6 @@ compile_kernel()
 		${OUTPUT_DIALOG:+' | dialog --backtitle "$backtitle" --progressbox "Creating kernel packages..." $TTY_Y $TTY_X'} \
 		${OUTPUT_VERYSILENT:+' >/dev/null 2>/dev/null'}
 
-#	display_alert "Paused" "" "dbg"
-#	read
-
-#	display_alert "Creating control file" "" "dbg"
-#	display_alert "version =" "${version}" "dbg"
-#	display_alert "BRANCH =" "${BRANCH}" "dbg"
-#	display_alert "LINUXFAMILY =" "${LINUXFAMILY}" "dbg"
-#	display_alert "REVISION =" "${REVISION}" "dbg"
-	
 	cat <<-EOF > $sources_pkg_dir/DEBIAN/control
 	Package: linux-source-${version}-${BRANCH}-${LINUXFAMILY}
 	Version: ${version}-${BRANCH}-${LINUXFAMILY}+${REVISION}
@@ -447,29 +416,18 @@ compile_kernel()
 	Description: This package provides the source code for the Linux kernel $version
 	EOF
 
-#	display_alert "Paused" "" "dbg"
-#	read
-
-#	display_alert "Creating deb" "" "dbg"
-#	display_alert "sources_pkg_dir =" "${sources_pkg_dir}" "dbg"
-	
 	if [[ $BUILD_KSRC != no ]]; then
 		fakeroot dpkg-deb -z0 -b $sources_pkg_dir ${sources_pkg_dir}.deb
 		mv ${sources_pkg_dir}.deb $DEST/debs/
 	fi
-	
-#	display_alert "Paused" "" "dbg"
-#	read
-	
+
 	rm -rf $sources_pkg_dir
 
 	cd ..
 	# remove firmare image packages here - easier than patching ~40 packaging scripts at once
 	rm -f linux-firmware-image-*.deb
 	mv *.deb $DEST/debs/ || exit_with_error "Failed moving kernel DEBs"
-#	mv $DEST/debs/linux-image-4.19.0-rc8-next-20181016-sunxi64_5.93_arm64.deb $DEST/debs/linux-image-next-sunxi64_5.93_arm64.deb
 	display_alert "Kernel built and packaged" "" "dbg"
-	exit
 }
 
 compile_sunxi_tools()

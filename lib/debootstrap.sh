@@ -67,19 +67,6 @@ debootstrap_ng()
 	# install from apt.armbian.com
 	[[ $EXTERNAL_NEW == prebuilt ]] && chroot_installpackages "yes"
 
-	# Hack to get boot scripts and DTC onto board
-#	display_alert "Hack to get DTC and boot scripts onto board" "" "dbg"
-#	display_alert "DEST = ${DEST}" "" "dbg"
-#	display_alert "SRC = ${SRC}" "" "dbg"
-#	display_alert "SDCARD = ${SDCARD}" "" "dbg"
-#	mkdir $SDCARD/boot/dtb
-#	mkdir $SDCARD/boot/dtb/allwinner
-#	mkdir $SDCARD/boot/dtb/allwinner/overlay
-#	cp $SRC/cache/sources/linux-mainline/WIP-A64-DSI/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dtb $SDCARD/boot/dtb/allwinner
-	cp $SRC/cache/sources/linux-mainline/WIP-A64-DSI/arch/arm64/boot/dts/allwinner/overlay/sun50i-a64-fixup.scr $SDCARD/boot/dtb/allwinner/overlay
-	cp $SRC/cache/sources/linux-mainline/WIP-A64-DSI/arch/arm64/boot/dts/allwinner/overlay/sun50i-a64-fixup.scr-cmd $SDCARD/boot/dtb/allwinner/overlay
-	display_alert "Paused - Need to fix ^^^" "" "dbg"
-	read
 	mkimage -C none -A arm -T script -d $SDCARD/boot/boot.cmd $SDCARD/boot/boot.scr
 	touch $SDCARD/boot/boot.env
 
