@@ -1,0 +1,17 @@
+diff --git a/scripts/package/mkdebian b/scripts/package/mkdebian
+index 178ebf703..6332a3323 100755
+--- a/scripts/package/mkdebian
++++ b/scripts/package/mkdebian
+@@ -94,9 +94,9 @@ else
+ 	packageversion=$version-$revision
+ fi
+ sourcename=$KDEB_SOURCENAME
+-packagename=linux-image-$version
+-kernel_headers_packagename=linux-headers-$version
+-dtb_packagename=linux-dtb-$version
++packagename=linux-image-next$LOCALVERSION
++kernel_headers_packagename=linux-headers-next$LOCALVERSION
++dtb_packagename=linux-dtb-next$LOCALVERSION
+ dbg_packagename=$packagename-dbg
+ debarch=
+ image_name=
