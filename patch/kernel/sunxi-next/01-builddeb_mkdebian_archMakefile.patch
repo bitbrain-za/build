@@ -1,0 +1,437 @@
+diff --git a/arch/arm64/Makefile b/arch/arm64/Makefile
+index b025304bd..cf02dfd1d 100644
+--- a/arch/arm64/Makefile
++++ b/arch/arm64/Makefile
+@@ -51,6 +51,7 @@ endif
+ 
+ KBUILD_CFLAGS	+= -mgeneral-regs-only $(lseinstr) $(brokengasinst)
+ KBUILD_CFLAGS	+= -fno-asynchronous-unwind-tables
++KBUILD_CFLAGS	+= $(call cc-disable-warning, psabi)
+ KBUILD_AFLAGS	+= $(lseinstr) $(brokengasinst)
+ 
+ KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
+@@ -114,6 +115,7 @@ KBUILD_AFLAGS += -DKASAN_SHADOW_SCALE_SHIFT=$(KASAN_SHADOW_SCALE_SHIFT)
+ # KASAN_SHADOW_OFFSET = VA_START + (1 << (VA_BITS - KASAN_SHADOW_SCALE_SHIFT))
+ #				 - (1 << (64 - KASAN_SHADOW_SCALE_SHIFT))
+ # in 32-bit arithmetic
++KASAN_SHADOW_SCALE_SHIFT := 3
+ KASAN_SHADOW_OFFSET := $(shell printf "0x%08x00000000\n" $$(( \
+ 	(0xffffffff & (-1 << ($(CONFIG_ARM64_VA_BITS) - 32))) \
+ 	+ (1 << ($(CONFIG_ARM64_VA_BITS) - 32 - $(KASAN_SHADOW_SCALE_SHIFT))) \
+@@ -131,9 +133,10 @@ core-$(CONFIG_EFI_STUB) += $(objtree)/drivers/firmware/efi/libstub/lib.a
+ 
+ # Default target when executing plain make
+ boot		:= arch/arm64/boot
+-KBUILD_IMAGE	:= $(boot)/Image.gz
++KBUILD_IMAGE	:= $(boot)/Image
++KBUILD_DTBS	:= dtbs
+ 
+-all:	Image.gz
++all:	Image.gz $(KBUILD_DTBS)
+ 
+ 
+ Image: vmlinux
+@@ -145,6 +148,23 @@ Image.%: Image
+ zinstall install:
+ 	$(Q)$(MAKE) $(build)=$(boot) $@
+ 
++%.dtb: scripts
++	$(Q)$(MAKE) $(build)=$(boot)/dts $(boot)/dts/$@
++
++%.dtbo: | scripts
++	$(Q)$(MAKE) $(build)=$(boot)/dts MACHINE=$(MACHINE) $(boot)/dts/$@
++
++%.scr: | scripts
++	$(Q)$(MAKE) $(build)=$(boot)/dts ARCH=$(ARCH) $(boot)/dts/$@
++
++PHONY += dtbs dtbs_install
++
++dtbs: prepare scripts
++	$(Q)$(MAKE) $(build)=$(boot)/dts
++
++dtbs_install:
++	$(Q)$(MAKE) $(dtbinst)=$(boot)/dts
++
+ PHONY += vdso_install
+ vdso_install:
+ 	$(Q)$(MAKE) $(build)=arch/arm64/kernel/vdso $@
+@@ -152,6 +172,7 @@ vdso_install:
+ # We use MRPROPER_FILES and CLEAN_FILES now
+ archclean:
+ 	$(Q)$(MAKE) $(clean)=$(boot)
++	$(Q)$(MAKE) $(clean)=$(boot)/dts
+ 
+ ifeq ($(KBUILD_EXTMOD),)
+ # We need to generate vdso-offsets.h before compiling certain files in kernel/.
+@@ -168,6 +189,8 @@ endif
+ define archhelp
+   echo  '* Image.gz      - Compressed kernel image (arch/$(ARCH)/boot/Image.gz)'
+   echo  '  Image         - Uncompressed kernel image (arch/$(ARCH)/boot/Image)'
++  echo  '* dtbs          - Build device tree blobs for enabled boards'
++  echo  '  dtbs_install  - Install dtbs to $(INSTALL_DTBS_PATH)'
+   echo  '  install       - Install uncompressed kernel'
+   echo  '  zinstall      - Install compressed kernel'
+   echo  '                  Install using (your) ~/bin/installkernel or'
+diff --git a/scripts/package/builddeb b/scripts/package/builddeb
+index b03dd56a4..926834d77 100755
+--- a/scripts/package/builddeb
++++ b/scripts/package/builddeb
+@@ -41,6 +41,27 @@ create_package() {
+ 	# in case we are in a restrictive umask environment like 0077
+ 	chmod -R a+rX "$pdir"
+ 
++	# Create preinstall and post install script to remove dtb
++	if [[ "$1" == *dtb* ]]; then
++		echo "if [ -d /boot/dtb-$version ]; then mv /boot/dtb-$version /boot/dtb-$version.old; fi" >> $pdir/DEBIAN/preinst
++		echo "if [ -d /boot/dtb.old ]; then rm -rf /boot/dtb.old; fi" >> $pdir/DEBIAN/preinst
++		echo "if [ -d /boot/dtb ]; then mv /boot/dtb /boot/dtb.old; fi" >> $pdir/DEBIAN/preinst
++		echo "exit 0" >> $pdir/DEBIAN/preinst
++		chmod 775 $pdir/DEBIAN/preinst
++
++		echo "if [ -d /boot/dtb-$version.old ]; then rm -rf /boot/dtb-$version.old; fi" >> $pdir/DEBIAN/postinst
++		echo "ln -sf dtb-$version /boot/dtb > /dev/null 2>&1 || mv /boot/dtb-$version /boot/dtb" >> $pdir/DEBIAN/postinst
++		echo "exit 0" >> $pdir/DEBIAN/postinst
++		chmod 775 $pdir/DEBIAN/postinst
++	fi
++
++	# Create postinstall script for headers
++	if [[ "$1" == *headers* ]]; then
++		echo "cd /usr/src/linux-headers-$version; echo \"Compiling headers - please wait ...\"; find -type f -exec touch {} +;make -s scripts >/dev/null 2>&1" >> $pdir/DEBIAN/postinst
++		echo "exit 0" >> $pdir/DEBIAN/postinst
++		chmod 775 $pdir/DEBIAN/postinst
++	fi
++
+ 	# Create the package
+ 	dpkg-gencontrol -p$pname -P"$pdir"
+ 	dpkg --build "$pdir" ..
+@@ -51,8 +72,10 @@ tmpdir="$objtree/debian/tmp"
+ kernel_headers_dir="$objtree/debian/hdrtmp"
+ libc_headers_dir="$objtree/debian/headertmp"
+ dbg_dir="$objtree/debian/dbgtmp"
++dtb_dir="$objtree/debian/dtbtmp"
+ packagename=linux-image-$version
+ kernel_headers_packagename=linux-headers-$version
++dtb_packagename=linux-dtb-$version
+ libc_headers_packagename=linux-libc-dev
+ dbg_packagename=$packagename-dbg
+ 
+@@ -64,6 +87,15 @@ fi
+ # XXX: have each arch Makefile export a variable of the canonical image install
+ # path instead
+ case $ARCH in
++aarch64|arm64)
++	image_name=Image
++	installed_image_path="boot/vmlinuz-$version"
++
++	;;
++arm*)
++	image_name=zImage
++	installed_image_path="boot/vmlinuz-$version"
++	;;
+ um)
+ 	installed_image_path="usr/bin/linux-$version"
+ 	;;
+@@ -74,10 +106,12 @@ parisc|mips|powerpc)
+ 	installed_image_path="boot/vmlinuz-$version"
+ esac
+ 
+-BUILD_DEBUG=$(if_enabled_echo CONFIG_DEBUG_INFO Yes)
++BUILD_DEBUG="$(grep -s '^CONFIG_DEBUG_INFO=y' $KCONFIG_CONFIG || true)"
+ 
+ # Setup the directory structure
+-rm -rf "$tmpdir" "$kernel_headers_dir" "$libc_headers_dir" "$dbg_dir" $objtree/debian/files
++rm -rf "$tmpdir" "$kernel_headers_dir" "$libc_headers_dir" "$dbg_dir" "$dtb_dir" $objtree/debian/files
++mkdir -m 755 -p "$dtb_dir/DEBIAN"
++mkdir -p "$dtb_dir/boot/dtb-$version" "$dtb_dir/usr/share/doc/$dtb_packagename"
+ mkdir -m 755 -p "$tmpdir/DEBIAN"
+ mkdir -p "$tmpdir/lib" "$tmpdir/boot"
+ mkdir -p "$kernel_headers_dir/lib/modules/$version/"
+@@ -95,15 +129,15 @@ else
+ fi
+ cp "$($MAKE -s -f $srctree/Makefile image_name)" "$tmpdir/$installed_image_path"
+ 
+-if is_enabled CONFIG_OF_EARLY_FLATTREE; then
++if grep -q "^CONFIG_OF=y" $KCONFIG_CONFIG ; then
+ 	# Only some architectures with OF support have this target
+-	if [ -d "${srctree}/arch/$SRCARCH/boot/dts" ]; then
+-		$MAKE -f $srctree/Makefile INSTALL_DTBS_PATH="$tmpdir/usr/lib/$packagename" dtbs_install
++	if grep -q dtbs_install "${srctree}/arch/$SRCARCH/Makefile"; then
++		$MAKE KBUILD_SRC= INSTALL_DTBS_PATH="$tmpdir/usr/lib/$packagename" dtbs_install
+ 	fi
+ fi
+ 
+-if is_enabled CONFIG_MODULES; then
+-	INSTALL_MOD_PATH="$tmpdir" $MAKE -f $srctree/Makefile modules_install
++if grep -q '^CONFIG_MODULES=y' $KCONFIG_CONFIG ; then
++	INSTALL_MOD_PATH="$tmpdir" $MAKE KBUILD_SRC= modules_install
+ 	rm -f "$tmpdir/lib/modules/$version/build"
+ 	rm -f "$tmpdir/lib/modules/$version/source"
+ 	if [ "$ARCH" = "um" ] ; then
+@@ -123,15 +157,21 @@ if is_enabled CONFIG_MODULES; then
+ 		done
+ 
+ 		# resign stripped modules
+-		if is_enabled CONFIG_MODULE_SIG_ALL; then
+-			INSTALL_MOD_PATH="$tmpdir" $MAKE -f $srctree/Makefile modules_sign
++		MODULE_SIG_ALL="$(grep -s '^CONFIG_MODULE_SIG_ALL=y' $KCONFIG_CONFIG || true)"
++		if [ -n "$MODULE_SIG_ALL" ]; then
++			INSTALL_MOD_PATH="$tmpdir" $MAKE KBUILD_SRC= modules_sign
+ 		fi
+ 	fi
+ fi
+ 
++if grep -q '^CONFIG_OF=y' $KCONFIG_CONFIG ; then
++	#mkdir -p "$tmpdir/boot/dtb"
++	INSTALL_DTBS_PATH="$dtb_dir/boot/dtb-$version" $MAKE KBUILD_SRC= dtbs_install
++fi
++
+ if [ "$ARCH" != "um" ]; then
+-	$MAKE -f $srctree/Makefile headers_check
+-	$MAKE -f $srctree/Makefile headers_install INSTALL_HDR_PATH="$libc_headers_dir/usr"
++	$MAKE headers_check KBUILD_SRC=
++	$MAKE headers_install KBUILD_SRC= INSTALL_HDR_PATH="$libc_headers_dir/usr"
+ fi
+ 
+ # Install the maintainer scripts
+@@ -140,10 +180,15 @@ fi
+ # make-kpkg sets $INITRD to indicate whether an initramfs is wanted, and
+ # so do we; recent versions of dracut and initramfs-tools will obey this.
+ debhookdir=${KDEB_HOOKDIR:-/etc/kernel}
++if grep -q '^CONFIG_BLK_DEV_INITRD=y' $KCONFIG_CONFIG; then
++	want_initrd=Yes
++else
++	want_initrd=No
++fi
+ for script in postinst postrm preinst prerm ; do
+ 	mkdir -p "$tmpdir$debhookdir/$script.d"
+ 	cat <<EOF > "$tmpdir/DEBIAN/$script"
+-#!/bin/sh
++#!/bin/bash
+ 
+ set -e
+ 
+@@ -151,7 +196,7 @@ set -e
+ export DEB_MAINT_PARAMS="\$*"
+ 
+ # Tell initramfs builder whether it's wanted
+-export INITRD=$(if_enabled_echo CONFIG_BLK_DEV_INITRD Yes No)
++export INITRD=$want_initrd
+ 
+ test -d $debhookdir/$script.d && run-parts --arg="$version" --arg="/$installed_image_path" $debhookdir/$script.d
+ exit 0
+@@ -159,29 +204,84 @@ EOF
+ 	chmod 755 "$tmpdir/DEBIAN/$script"
+ done
+ 
++##
++## Create sym link to kernel image
++##
++sed -e "s/set -e//g" -i $tmpdir/DEBIAN/postinst
++sed -e "s/exit 0//g" -i $tmpdir/DEBIAN/postinst
++cat >> $tmpdir/DEBIAN/postinst <<EOT
++if [ "\$(grep nand /proc/partitions)" != "" ] && [ "\$(grep mmc /proc/partitions)" = "" ]; then
++	mkimage -A arm -O linux -T kernel -C none -a "0x40008000" -e "0x40008000" -n "Linux kernel" -d /$installed_image_path /boot/uImage  > /dev/null 2>&1
++	cp /boot/uImage /tmp/uImage
++	sync
++	mountpoint -q /boot || mount /boot
++	cp /tmp/uImage /boot/uImage
++	rm -f /$installed_image_path
++else
++	ln -sf $(basename $installed_image_path) /boot/$image_name || mv /$installed_image_path /boot/$image_name
++fi
++touch /boot/.next
++exit 0
++EOT
++
++##
++## FAT install workaround
++##
++sed -e "s/set -e//g" -i $tmpdir/DEBIAN/preinst
++sed -e "s/exit 0//g" -i $tmpdir/DEBIAN/preinst
++cat >> $tmpdir/DEBIAN/preinst <<EOT
++# exit if we are running chroot
++if [ "\$(stat -c %d:%i /)" != "\$(stat -c %d:%i /proc/1/root/.)" ]; then exit 0; fi
++
++check_and_unmount (){
++	boot_device=\$(mountpoint -d /boot)
++
++	for file in /dev/* ; do
++		CURRENT_DEVICE=\$(printf "%d:%d" \$(stat --printf="0x%t 0x%T" \$file))
++		if [[ "\$CURRENT_DEVICE" = "\$boot_device" ]]; then
++			boot_partition=\$file
++			break
++		fi
++	done
++
++	bootfstype=\$(blkid -s TYPE -o value \$boot_partition)
++	if [ "\$bootfstype" = "vfat" ]; then
++		umount /boot
++		rm -f /boot/System.map* /boot/config* /boot/vmlinuz* /boot/$image_name /boot/uImage
++	fi
++}
++mountpoint -q /boot && check_and_unmount
++EOT
++echo "exit 0" >> $tmpdir/DEBIAN/preinst
++
+ # Build kernel header package
+ (cd $srctree; find . -name Makefile\* -o -name Kconfig\* -o -name \*.pl) > "$objtree/debian/hdrsrcfiles"
+ (cd $srctree; find arch/*/include include scripts -type f -o -type l) >> "$objtree/debian/hdrsrcfiles"
++(cd $srctree; find security/*/include -type f) >> "$objtree/debian/hdrsrcfiles"
+ (cd $srctree; find arch/$SRCARCH -name module.lds -o -name Kbuild.platforms -o -name Platform) >> "$objtree/debian/hdrsrcfiles"
+ (cd $srctree; find $(find arch/$SRCARCH -name include -o -name scripts -type d) -type f) >> "$objtree/debian/hdrsrcfiles"
+-if is_enabled CONFIG_STACK_VALIDATION; then
++if grep -q '^CONFIG_STACK_VALIDATION=y' $KCONFIG_CONFIG ; then
+ 	(cd $objtree; find tools/objtool -type f -executable) >> "$objtree/debian/hdrobjfiles"
+ fi
+ (cd $objtree; find arch/$SRCARCH/include Module.symvers include scripts -type f) >> "$objtree/debian/hdrobjfiles"
+-if is_enabled CONFIG_GCC_PLUGINS; then
++if grep -q '^CONFIG_GCC_PLUGINS=y' $KCONFIG_CONFIG ; then
+ 	(cd $objtree; find scripts/gcc-plugins -name \*.so -o -name gcc-common.h) >> "$objtree/debian/hdrobjfiles"
+ fi
+ destdir=$kernel_headers_dir/usr/src/linux-headers-$version
+ mkdir -p "$destdir"
++(cd $destdir; patch -p1 < /tmp/headers-debian-byteshift.patch)
+ (cd $srctree; tar -c -f - -T -) < "$objtree/debian/hdrsrcfiles" | (cd $destdir; tar -xf -)
+ (cd $objtree; tar -c -f - -T -) < "$objtree/debian/hdrobjfiles" | (cd $destdir; tar -xf -)
+ (cd $objtree; cp $KCONFIG_CONFIG $destdir/.config) # copy .config manually to be where it's expected to be
+ ln -sf "/usr/src/linux-headers-$version" "$kernel_headers_dir/lib/modules/$version/build"
+ rm -f "$objtree/debian/hdrsrcfiles" "$objtree/debian/hdrobjfiles"
+ 
++(cd $destdir; make M=scripts clean)
++
+ if [ "$ARCH" != "um" ]; then
+ 	create_package "$kernel_headers_packagename" "$kernel_headers_dir"
+-	create_package "$libc_headers_packagename" "$libc_headers_dir"
++	# create_package "$libc_headers_packagename" "$libc_headers_dir"
++	create_package "$dtb_packagename" "$dtb_dir"
+ fi
+ 
+ create_package "$packagename" "$tmpdir"
+diff --git a/scripts/package/mkdebian b/scripts/package/mkdebian
+index 8351584cb..178ebf703 100755
+--- a/scripts/package/mkdebian
++++ b/scripts/package/mkdebian
+@@ -7,7 +7,7 @@
+ set -e
+ 
+ is_enabled() {
+-	grep -q "^$1=y" include/config/auto.conf
++	grep -q "^CONFIG_$1=y" $KCONFIG_CONFIG
+ }
+ 
+ if_enabled_echo() {
+@@ -31,23 +31,23 @@ set_debarch() {
+ 	x86_64)
+ 		debarch=amd64 ;;
+ 	sparc*)
+-		debarch=sparc$(if_enabled_echo CONFIG_64BIT 64) ;;
++		debarch=sparc$(if_enabled_echo 64BIT 64) ;;
+ 	s390*)
+ 		debarch=s390x ;;
+ 	ppc*)
+-		if is_enabled CONFIG_64BIT; then
+-			debarch=ppc64$(if_enabled_echo CONFIG_CPU_LITTLE_ENDIAN el)
++		if is_enabled 64BIT; then
++			debarch=ppc64$(if_enabled_echo CPU_LITTLE_ENDIAN el)
+ 		else
+-			debarch=powerpc$(if_enabled_echo CONFIG_SPE spe)
++			debarch=powerpc$(if_enabled_echo SPE spe)
+ 		fi
+ 		;;
+ 	parisc*)
+ 		debarch=hppa ;;
+ 	mips*)
+-		if is_enabled CONFIG_CPU_LITTLE_ENDIAN; then
+-			debarch=mips$(if_enabled_echo CONFIG_64BIT 64)$(if_enabled_echo CONFIG_CPU_MIPSR6 r6)el
+-		elif is_enabled CONFIG_CPU_MIPSR6; then
+-			debarch=mips$(if_enabled_echo CONFIG_64BIT 64)r6
++		if is_enabled CPU_LITTLE_ENDIAN; then
++			debarch=mips$(if_enabled_echo 64BIT 64)$(if_enabled_echo CPU_MIPSR6 r6)el
++		elif is_enabled CPU_MIPSR6; then
++			debarch=mips$(if_enabled_echo 64BIT 64)r6
+ 		else
+ 			debarch=mips
+ 		fi
+@@ -55,8 +55,8 @@ set_debarch() {
+ 	aarch64|arm64)
+ 		debarch=arm64 ;;
+ 	arm*)
+-		if is_enabled CONFIG_AEABI; then
+-			debarch=arm$(if_enabled_echo CONFIG_VFP hf el)
++		if is_enabled AEABI; then
++			debarch=arm$(if_enabled_echo VFP hf el)
+ 		else
+ 			debarch=arm
+ 		fi
+@@ -64,10 +64,10 @@ set_debarch() {
+ 	openrisc)
+ 		debarch=or1k ;;
+ 	sh)
+-		if is_enabled CONFIG_CPU_SH3; then
+-			debarch=sh3$(if_enabled_echo CONFIG_CPU_BIG_ENDIAN eb)
+-		elif is_enabled CONFIG_CPU_SH4; then
+-			debarch=sh4$(if_enabled_echo CONFIG_CPU_BIG_ENDIAN eb)
++		if is_enabled CPU_SH3; then
++			debarch=sh3$(if_enabled_echo CPU_BIG_ENDIAN eb)
++		elif is_enabled CPU_SH4; then
++			debarch=sh4$(if_enabled_echo CPU_BIG_ENDIAN eb)
+ 		fi
+ 		;;
+ 	esac
+@@ -96,8 +96,10 @@ fi
+ sourcename=$KDEB_SOURCENAME
+ packagename=linux-image-$version
+ kernel_headers_packagename=linux-headers-$version
++dtb_packagename=linux-dtb-$version
+ dbg_packagename=$packagename-dbg
+ debarch=
++image_name=
+ set_debarch
+ 
+ if [ "$ARCH" = "um" ] ; then
+@@ -132,9 +134,7 @@ else
+         echo >&2 "Install lsb-release or set \$KDEB_CHANGELOG_DIST explicitly"
+ fi
+ 
+-mkdir -p debian/source/
+-echo "1.0" > debian/source/format
+-
++mkdir -p debian/
+ echo $debarch > debian/arch
+ extra_build_depends=", $(if_enabled_echo CONFIG_UNWINDER_ORC libelf-dev)"
+ extra_build_depends="$extra_build_depends, $(if_enabled_echo CONFIG_SYSTEM_TRUSTED_KEYRING libssl-dev:native)"
+@@ -174,7 +174,7 @@ Source: $sourcename
+ Section: kernel
+ Priority: optional
+ Maintainer: $maintainer
+-Build-Depends: bc, kmod, cpio, bison, flex | flex:native $extra_build_depends
++Build-Depends: bc, kmod, cpio
+ Homepage: http://www.kernel.org/
+ 
+ Package: $packagename
+@@ -204,6 +204,11 @@ Architecture: $debarch
+ Description: Linux kernel debugging symbols for $version
+  This package will come in handy if you need to debug the kernel. It provides
+  all the necessary debug symbols for the kernel and its modules.
++
++Package: $dtb_packagename
++Architecture: $debarch
++Description: Linux DTB, version $version
++ This package contains device blobs from the Linux kernel, version $version
+ EOF
+ 
+ cat <<EOF > debian/rules
+@@ -213,11 +218,11 @@ srctree ?= .
+ 
+ build:
+ 	\$(MAKE) KERNELRELEASE=${version} ARCH=${ARCH} \
+-	KBUILD_BUILD_VERSION=${revision} -f \$(srctree)/Makefile
++	KBUILD_BUILD_VERSION=${revision} KBUILD_SRC=
+ 
+ binary-arch:
+ 	\$(MAKE) KERNELRELEASE=${version} ARCH=${ARCH} \
+-	KBUILD_BUILD_VERSION=${revision} -f \$(srctree)/Makefile intdeb-pkg
++	KBUILD_BUILD_VERSION=${revision} KBUILD_SRC= intdeb-pkg
+ 
+ clean:
+ 	rm -rf debian/*tmp debian/files
