@@ -38,8 +38,7 @@ case $BRANCH in
 		#KERNELSOURCE=$MAINLINE_KERNEL_SOURCE
 		KERNELSOURCE='http://github.com/amarula/linux-amarula'
 		#KERNELBRANCH='branch:linux-4.19.y'
-		KERNELBRANCH='branch:WIP-A64-DSI'
-		#KERNELBRANCH='branch:A64-DSI-v9.1'
+		KERNELBRANCH='branch:v9-a64-dsi'
 		KERNELDIR=$MAINLINE_KERNEL_DIR
 		KERNELPATCHDIR='sunxi-next'
 		KERNEL_USE_GCC='> 7.0'
