@@ -286,7 +286,7 @@ compile_kernel()
 	local version=$(grab_version "$kerneldir")
 
 	# build 3rd party drivers
-	compilation_prepare
+#	compilation_prepare
 
 	# create linux-source package - with already patched sources
 	local sources_pkg_dir=$SRC/.tmp/${CHOSEN_KSRC}_${REVISION}_all
