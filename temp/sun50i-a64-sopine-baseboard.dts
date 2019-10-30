@@ -160,14 +160,32 @@
 };
 
 &i2c0 {
-	touchscreen@5d {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_pins>;
+	status = "okay";
+	
+	gt911@5d {
 		compatible = "goodix,gt911";
 		reg = <0x5d>;
+		
+		pinctrl-names = "default";
+		pinctrl-0 = <&gt911_irq_pin>, <&gt911_reset_pin>;
 		interrupt-parent = <&pio>;
-		interrupts = <7 4 IRQ_TYPE_EDGE_FALLING>;	
-		irq-gpio = <&pio 7 4 GPIO_ACTIVE_HIGH>;
-		reset-gpio = <&pio 7 11 GPIO_ACTIVE_LOW>;
+		interrupts = <7 4 IRQ_TYPE_EDGE_RISING>;	
+		irq-gpio = <&pio 7 4>;
+		reset-gpio = <&pio 7 11>;
 	};	
+};
+
+&pio {
+	gt911_irq_pin: gt911_irq_pin {
+		pins = "PH4";
+		function = "irq";
+	};
+	gt911_reset_pin: gt911_reset_pin {
+		pins = "PH11";
+		function = "gpio_out";
+	};
 };
 
 &mdio {
