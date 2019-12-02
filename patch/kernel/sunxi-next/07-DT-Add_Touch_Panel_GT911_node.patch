@@ -1,12 +1,13 @@
 diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
-index 2fd4229d2..8e2ee4b26 100644
+index 2fd4229d2..3923471ec 100644
 --- a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
 +++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
-@@ -159,6 +159,35 @@
+@@ -159,6 +159,43 @@
  	};
  };
  
 +&i2c0 {
++	/*compatible = "allwinner,sun50i-a64";*/
 +	pinctrl-names = "default";
 +	pinctrl-0 = <&i2c0_pins>;
 +	status = "okay";
@@ -16,20 +17,27 @@ index 2fd4229d2..8e2ee4b26 100644
 +		reg = <0x5d>;
 +		
 +		pinctrl-names = "default";
-+		pinctrl-0 = <&ts_irq_pin>, <&ts_reset_pin>;
++		pinctrl-0 = <&gt911_irq_pin>, <&gt911_reset_pin>;
 +		interrupt-parent = <&pio>;
 +		interrupts = <7 4 IRQ_TYPE_EDGE_RISING>;	
-+		irq-gpio = <&pio 7 4>;
-+		reset-gpio = <&pio 7 11>;
++		irq-gpios = <&pio 7 4>;/* GPIO_ACTIVE_HIGH>;*/
++		reset-gpios = <&pio 7 11>;/* GPIO_ACTIVE_HIGH>;*/
++		/*touchscreen-inverted-x;*/
++		/*touchscreen-inverted-y;*/
 +	};	
 +};
 +
++
++&i2c0_pins {
++	bias-pull-up;
++};
++
 +&pio {
-+	ts_irq_pin: ts_irq_pin {
++	gt911_irq_pin: gt911_irq_pin {
 +		pins = "PH4";
 +		function = "irq";
 +	};
-+	ts_reset_pin: ts_reset_pin {
++	gt911_reset_pin: gt911_reset_pin {
 +		pins = "PH11";
 +		function = "gpio_out";
 +	};
@@ -38,3 +46,35 @@ index 2fd4229d2..8e2ee4b26 100644
  &mdio {
  	ext_rgmii_phy: ethernet-phy@1 {
  		compatible = "ethernet-phy-ieee802.3-c22";
+diff --git a/arch/arm64/boot/dts/allwinner/touch.txt b/arch/arm64/boot/dts/allwinner/touch.txt
+new file mode 100644
+index 000000000..7dbeead8f
+--- /dev/null
++++ b/arch/arm64/boot/dts/allwinner/touch.txt
+@@ -0,0 +1,26 @@
++&i2c0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c0_pins>;
++	status = "okay";
++	touchpanel: tp- {
++		compatible = "";
++		reg = <>;
++		pinctrl-names = "default";
++		pinctrl-0 = <???>
++		interrupt-parent = <&pio>;
++		interrupts = <???>;
++		touchscreen-size-x = <1024>;
++		touchscreen-size-y = <600>;
++	};
++};
++
++&i2c4 {
++	touchscreen@5d {
++		compatible = "goodix,gt911";
++		reg = <0x5d>;
++		interrupt-parent = <&gpio1>;
++		interrupts = <RK_PC4 IRQ_TYPE_EDGE_FALLING>;
++		irq-gpio = <&gpio1 RK_PC4 GPIO_ACTIVE_HIGH>;	/* GPIO1_C4_TP_INT */
++		reset-gpio = <&gpio1 RK_PB5 GPIO_ACTIVE_LOW>;	/* GPIO1_B5_TP_RST */
++	};
++};
