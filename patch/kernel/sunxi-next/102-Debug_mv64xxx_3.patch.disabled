@@ -1,0 +1,12 @@
+diff --git a/drivers/i2c/busses/i2c-mv64xxx.c b/drivers/i2c/busses/i2c-mv64xxx.c
+index 7332d2b79..c3e3e3cdd 100644
+--- a/drivers/i2c/busses/i2c-mv64xxx.c
++++ b/drivers/i2c/busses/i2c-mv64xxx.c
+@@ -539,6 +539,7 @@ mv64xxx_i2c_wait_for_completion(struct mv64xxx_i2c_data *drv_data)
+ 
+ 	time_left = wait_event_timeout(drv_data->waitq,
+ 		!drv_data->block, drv_data->adapter.timeout);
++	dev_err(&drv_data->adapter.dev,"mv64xxx: adapter.timeout = %i\n",drv_data->adapter.timeout);
+ 	dev_err(&drv_data->adapter.dev,"mv64xxx: flags = %i\n",flags);
+ 	dev_err(&drv_data->adapter.dev,"mv64xxx: time_left = %i\n",time_left);
+ 	spin_lock_irqsave(&drv_data->lock, flags);
