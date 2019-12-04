@@ -351,6 +351,11 @@ install_distribution_specific()
 
 		exit 0
 		EOF
+		if [[ ! -z $MACADDR ]]; then
+			sed -i '14i ifconfig eth0 down' ${SDCARD}/etc/rc.local
+			sed -i '15i ifconfig eth0 hw ether '$MACADDR ${SDCARD}/etc/rc.local
+			sed -i '16i ifconfig eth0 up' ${SDCARD}/etc/rc.local
+		fi
 		chmod +x "${SDCARD}"/etc/rc.local
 		;;
 	bionic)
