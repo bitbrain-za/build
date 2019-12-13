@@ -1,0 +1,13 @@
+diff --git a/drivers/pinctrl/sunxi/pinctrl-sunxi.c b/drivers/pinctrl/sunxi/pinctrl-sunxi.c
+index 0cbca30b7..8c999f719 100644
+--- a/drivers/pinctrl/sunxi/pinctrl-sunxi.c
++++ b/drivers/pinctrl/sunxi/pinctrl-sunxi.c
+@@ -1388,7 +1388,7 @@ int sunxi_pinctrl_init_with_variant(struct platform_device *pdev,
+ 	struct resource *res;
+ 	int i, ret, last_pin, pin_idx;
+ 	struct clk *clk;
+-
++	dev_err(&pdev->dev, "Entered sunxi_pinctrl_init_with_variant\n");
+ 	pctl = devm_kzalloc(&pdev->dev, sizeof(*pctl), GFP_KERNEL);
+ 	if (!pctl)
+ 		return -ENOMEM;
