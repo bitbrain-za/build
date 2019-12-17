@@ -1,0 +1,46 @@
+diff --git a/drivers/i2c/busses/i2c-mv64xxx.c b/drivers/i2c/busses/i2c-mv64xxx.c
+index 65a387c04..35d3a37ee 100644
+--- a/drivers/i2c/busses/i2c-mv64xxx.c
++++ b/drivers/i2c/busses/i2c-mv64xxx.c
+@@ -199,6 +199,17 @@ static int sun4i_i2c_get_scl(struct i2c_adapter *adap)
+         return val & SUN4I_I2C_LCR_SCL_STATE;
+ }
+ 
++static void sun4i_i2c_set_sda(struct i2c_adapter *adap, int val)
++{
++	struct mv64xxx_i2c_data *drv_data = i2c_get_adapdata(adap);
++			if (val)
++		writel(SUN4I_I2C_LCR_SDA_CTL | SUN4I_I2C_LCR_SDA_CTL_EN,
++						drv_data->reg_base + SUN4I_I2C_LCR_REG);
++			else
++		writel(SUN4I_I2C_LCR_SDA_CTL_EN, /* write a 0 out of SDA */
++						drv_data->reg_base + SUN4I_I2C_LCR_REG);
++}
++
+ static int sun4i_i2c_get_sda(struct i2c_adapter *adap)
+ {
+ 	struct mv64xxx_i2c_data *drv_data = i2c_get_adapdata(adap);
+@@ -251,6 +262,7 @@ static struct i2c_bus_recovery_info sun4i_i2c_scl_recovery_info = {
+         .recover_bus = i2c_generic_scl_recovery,
+         .set_scl = sun4i_i2c_set_scl,
+         .get_scl = sun4i_i2c_get_scl,
++				.set_sda = sun4i_i2c_set_sda,
+         .get_sda = sun4i_i2c_get_sda,
+         .prepare_recovery = sun4i_i2c_scl_prepare_recovery,
+         .unprepare_recovery = sun4i_i2c_scl_unprepare_recovery,
+diff --git a/drivers/i2c/i2c-core-base.c b/drivers/i2c/i2c-core-base.c
+index 9732a81bb..ca30942df 100644
+--- a/drivers/i2c/i2c-core-base.c
++++ b/drivers/i2c/i2c-core-base.c
+@@ -199,7 +199,11 @@ int i2c_generic_scl_recovery(struct i2c_adapter *adap)
+ 	bri->set_scl(adap, scl);
+ 	ndelay(RECOVERY_NDELAY / 2);
+ 	if (bri->set_sda)
++	{
++		dev_err(&adap->dev,
++			"Setting SDA\n");
+ 		bri->set_sda(adap, scl);
++	}
+ 	ndelay(RECOVERY_NDELAY / 2);
+ 
+ 	/*
