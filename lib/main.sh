@@ -30,8 +30,10 @@ DEST=$SRC/output
 [[ -n $COLUMNS ]] && stty cols $COLUMNS
 [[ -n $LINES ]] && stty rows $LINES
 
-TTY_X=$(($(stty size | awk '{print $2}')-6)) 			# determine terminal width
-TTY_Y=$(($(stty size | awk '{print $1}')-6)) 			# determine terminal height
+if [[ $BUILD_ALL != "yes" ]]; then
+	TTY_X=$(($(stty size | awk '{print $2}')-6)) 			# determine terminal width
+	TTY_Y=$(($(stty size | awk '{print $1}')-6)) 			# determine terminal height
+fi
 
 # We'll use this title on all menus
 backtitle="Armbian building script, http://www.armbian.com | Author: Igor Pecovnik"
@@ -291,7 +293,6 @@ distro_support['eoan']="csc"
 if [[ $KERNEL_ONLY != yes && -z $RELEASE ]]; then
 
 	options=()
-	[[ $EXPERT = yes ]] && options+=("jessie" "Debian 8 Jessie / unsupported")
 
 		distro_menu "stretch"
 		distro_menu "buster"
@@ -311,6 +312,9 @@ fi
 distro_menu "$RELEASE"
 unset options
 
+# don't show desktop option if we choose minimal build
+[[ $BUILD_MINIMAL == yes ]] && BUILD_DESKTOP=no
+
 if [[ $KERNEL_ONLY != yes && -z $BUILD_DESKTOP ]]; then
 
 	options=()
@@ -320,8 +324,25 @@ if [[ $KERNEL_ONLY != yes && -z $BUILD_DESKTOP ]]; then
 	--menu "Select the target image type" $TTY_Y $TTY_X $((TTY_Y - 8)) "${options[@]}")
 	unset options
 	[[ -z $BUILD_DESKTOP ]] && exit_with_error "No option selected"
+	[[ $BUILD_DESKTOP == yes ]] && BUILD_MINIMAL=no
 
 fi
+
+if [[ $KERNEL_ONLY != yes && $BUILD_DESKTOP == no && -z $BUILD_MINIMAL ]]; then
+
+	options=()
+	options+=("no" "Standard image with console interface")
+	options+=("yes" "Minimal image with console interface")
+	BUILD_MINIMAL=$(dialog --stdout --title "Choose image type" --backtitle "$backtitle" --no-tags \
+	--menu "Select the target image type" $TTY_Y $TTY_X $((TTY_Y - 8)) "${options[@]}")
+	unset options
+	[[ -z $BUILD_MINIMAL ]] && exit_with_error "No option selected"
+
+fi
+
+#prevent conflicting setup
+[[ $BUILD_DESKTOP == yes ]] && BUILD_MINIMAL=no
+[[ $BUILD_MINIMAL == yes ]] && EXTERNAL=no
 
 #shellcheck source=configuration.sh
 source "${SRC}"/lib/configuration.sh
@@ -391,8 +412,6 @@ if [[ $IGNORE_UPDATES != yes ]]; then
 	fetch_from_repo "https://github.com/armbian/testings" "testing-reports" "branch:master"
 	fetch_from_repo "https://gitlab.com/superna9999/amlogic-boot-fip" "amlogic-boot-fip" "branch:master"
 fi
-display_alert "Paused" "" "dbg"
-read
 
 compile_sunxi_tools
 install_rkbin_tools
@@ -402,7 +421,7 @@ for option in $(tr ',' ' ' <<< "$CLEAN_LEVEL"); do
 done
 
 # Compile u-boot if packed .deb does not exist
-if [[ ! -f ${DEST}/debs/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb ]]; then
+if [[ ! -f ${DEB_STORAGE}/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb ]]; then
 	if [[ -n $ATFSOURCE ]]; then
 		compile_atf
 	fi
@@ -410,40 +429,45 @@ if [[ ! -f ${DEST}/debs/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb ]]; then
 fi
 
 # Compile kernel if packed .deb does not exist
-if [[ ! -f ${DEST}/debs/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb ]]; then
+if [[ ! -f ${DEB_STORAGE}/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb ]]; then
 	KDEB_CHANGELOG_DIST=$RELEASE
 	compile_kernel
+fi
+
+# Pack armbian-config and armbian-firmware
+if [[ ! -f ${DEB_STORAGE}/armbian-config_${REVISION}_all.deb ]]; then
+	compile_armbian-config
+
+	FULL=""
+	REPLACE="-full"
+	[[ ! -f $DEST/debs/armbian-firmware_${REVISION}_all.deb ]] && compile_firmware
+	FULL="-full"
+	REPLACE=""
+	[[ ! -f $DEST/debs/armbian-firmware${FULL}_${REVISION}_all.deb ]] && compile_firmware
 fi
 
 overlayfs_wrapper "cleanup"
 
 # extract kernel version from .deb package
-display_alert "CHOSEN_KERNEL =" "${CHOSEN_KERNEL}" "dbg"
-display_alert "REVISION =" "${REVISION}" "dbg"
-display_alert "ARCH =" "${ARCH}" "dbg"
-display_alert "LINUXFAMILY =" "${LINUXFAMILY}" "sbg"
-VER=$(dpkg --info "${DEST}/debs/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
+VER=$(dpkg --info "${DEB_STORAGE}/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
 VER="${VER/-$LINUXFAMILY/}"
-display_alert "VER =" "${VER}" "dbg"
-display_alert "Paused" "" "dbg"
-read
 
-UBOOT_VER=$(dpkg --info "${DEST}/debs/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
+UBOOT_VER=$(dpkg --info "${DEB_STORAGE}/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
 
 # create board support package
-[[ -n $RELEASE && ! -f $DEST/debs/$RELEASE/${CHOSEN_ROOTFS}_${REVISION}_${ARCH}.deb ]] && create_board_package
+[[ -n $RELEASE && ! -f ${DEB_STORAGE}/$RELEASE/${CHOSEN_ROOTFS}_${REVISION}_${ARCH}.deb ]] && create_board_package
 
 # create desktop package
-[[ -n $RELEASE && ! -f $DEST/debs/$RELEASE/${CHOSEN_DESKTOP}_${REVISION}_all.deb ]] && create_desktop_package
+[[ -n $RELEASE && ! -f ${DEB_STORAGE}/$RELEASE/${CHOSEN_DESKTOP}_${REVISION}_all.deb ]] && create_desktop_package
 
 # build additional packages
 [[ $EXTERNAL_NEW == compile ]] && chroot_build_packages
 
 if [[ $KERNEL_ONLY != yes ]]; then
-	debootstrap_ng
+	[[ $BSP_BUILD != yes ]] && debootstrap_ng
 else
 	display_alert "Kernel build done" "@host" "info"
-	display_alert "Target directory" "$DEST/debs/" "info"
+	display_alert "Target directory" "${DEB_STORAGE}/" "info"
 	display_alert "File name" "${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb" "info"
 fi
 
@@ -459,6 +483,7 @@ display_alert "Runtime" "$runtime min" "info"
 [ `systemd-detect-virt` == 'docker' ] && BUILD_CONFIG='docker'
 display_alert "Repeat Build Options" "./compile.sh ${BUILD_CONFIG} BOARD=${BOARD} BRANCH=${BRANCH} \
 $([[ -n $RELEASE ]] && echo "RELEASE=${RELEASE} ")\
+$([[ -n $BUILD_MINIMAL ]] && echo "BUILD_MINIMAL=${BUILD_MINIMAL} ")\
 $([[ -n $BUILD_DESKTOP ]] && echo "BUILD_DESKTOP=${BUILD_DESKTOP} ")\
 $([[ -n $KERNEL_ONLY ]] && echo "KERNEL_ONLY=${KERNEL_ONLY} ")\
 $([[ -n $KERNEL_CONFIGURE ]] && echo "KERNEL_CONFIGURE=${KERNEL_CONFIGURE} ")\
