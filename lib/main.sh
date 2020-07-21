@@ -24,10 +24,8 @@ fi
 umask 002
 
 # destination
-<<<<<<< HEAD
 DEST="${SRC}"/output
 
-<<<<<<< HEAD
 if [[ $BUILD_ALL != "yes" ]]; then
 	# override stty size
 	[[ -n $COLUMNS ]] && stty cols $COLUMNS
@@ -35,22 +33,6 @@ if [[ $BUILD_ALL != "yes" ]]; then
 	TTY_X=$(($(stty size | awk '{print $2}')-6)) 			# determine terminal width
 	TTY_Y=$(($(stty size | awk '{print $1}')-6)) 			# determine terminal height
 fi
-=======
-TTY_X=$(($(stty size | awk '{print $2}')-6)) 			# determine terminal width
-TTY_Y=$(($(stty size | awk '{print $1}')-6)) 			# determine terminal height
->>>>>>> Merge from upstream
-=======
-DEST=$SRC/output
-
-# override stty size
-[[ -n $COLUMNS ]] && stty cols $COLUMNS
-[[ -n $LINES ]] && stty rows $LINES
-
-if [[ $BUILD_ALL != "yes" ]]; then
-	TTY_X=$(($(stty size | awk '{print $2}')-6)) 			# determine terminal width
-	TTY_Y=$(($(stty size | awk '{print $1}')-6)) 			# determine terminal height
-fi
->>>>>>> Fix merge upstream branch
 
 # We'll use this title on all menus
 backtitle="Armbian building script, http://www.armbian.com | Author: Igor Pecovnik"
@@ -429,8 +411,6 @@ fetch_from_repo "$KERNELSOURCE" "$KERNELDIR" "$KERNELBRANCH" "yes"
 if [[ -n $ATFSOURCE ]]; then
 	fetch_from_repo "$ATFSOURCE" "$ATFDIR" "$ATFBRANCH" "yes"
 fi
-<<<<<<< HEAD
-<<<<<<< HEAD
 fetch_from_repo "https://github.com/linux-sunxi/sunxi-tools" "sunxi-tools" "branch:master"
 fetch_from_repo "https://github.com/armbian/rkbin" "rkbin-tools" "branch:master"
 fetch_from_repo "https://github.com/MarvellEmbeddedProcessors/A3700-utils-marvell" "marvell-tools" "branch:A3700_utils-armada-18.12"
@@ -439,12 +419,6 @@ fetch_from_repo "https://github.com/MarvellEmbeddedProcessors/binaries-marvell" 
 fetch_from_repo "https://github.com/armbian/odroidc2-blobs" "odroidc2-blobs" "branch:master"
 fetch_from_repo "https://github.com/armbian/testings" "testing-reports" "branch:master"
 fetch_from_repo "https://gitlab.com/superna9999/amlogic-boot-fip" "amlogic-boot-fip" "branch:master"
-=======
-display_alert "Paused" "" "dbg"
-read
->>>>>>> Merge from upstream
-=======
->>>>>>> Fix merge upstream branch
 
 compile_sunxi_tools
 install_rkbin_tools
@@ -453,42 +427,26 @@ for option in $(tr ',' ' ' <<< "$CLEAN_LEVEL"); do
 	[[ $option != sources ]] && cleaning "$option"
 done
 
-<<<<<<< HEAD
 fi
 
 # Compile u-boot if packed .deb does not exist or use the one from repository
 if [[ ! -f "${DEB_STORAGE}"/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb ]]; then
 
 	if [[ -n "${ATFSOURCE}" && "${REPOSITORY_INSTALL}" != *u-boot* ]]; then
-=======
-# Compile u-boot if packed .deb does not exist
-if [[ ! -f ${DEB_STORAGE}/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb ]]; then
-	if [[ -n $ATFSOURCE ]]; then
->>>>>>> Merge from upstream
 		compile_atf
 	fi
 	[[ "${REPOSITORY_INSTALL}" != *u-boot* ]] && compile_uboot
 
 fi
 
-<<<<<<< HEAD
 # Compile kernel if packed .deb does not exist or use the one from repository
 if [[ ! -f ${DEB_STORAGE}/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb ]]; then
 
-=======
-# Compile kernel if packed .deb does not exist
-<<<<<<< HEAD
-if [[ ! -f ${DEST}/debs/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb ]]; then
->>>>>>> Merge from upstream
-=======
-if [[ ! -f ${DEB_STORAGE}/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb ]]; then
->>>>>>> Fix merge upstream branch
 	KDEB_CHANGELOG_DIST=$RELEASE
 	[[ "${REPOSITORY_INSTALL}" != *kernel* ]] && compile_kernel
 
 fi
 
-<<<<<<< HEAD
 # Compile armbian-config if packed .deb does not exist or use the one from repository
 if [[ ! -f ${DEB_STORAGE}/armbian-config_${REVISION}_all.deb ]]; then
 
@@ -496,7 +454,6 @@ if [[ ! -f ${DEB_STORAGE}/armbian-config_${REVISION}_all.deb ]]; then
 
 fi
 
-<<<<<<< HEAD
 # Compile armbian-firmware if packed .deb does not exist or use the one from repository
 if ! ls "${DEB_STORAGE}/armbian-firmware_${REVISION}_all.deb" 1> /dev/null 2>&1 || ! ls "${DEB_STORAGE}/armbian-firmware-full_${REVISION}_all.deb" 1> /dev/null 2>&1; then
 
@@ -514,33 +471,6 @@ if ! ls "${DEB_STORAGE}/armbian-firmware_${REVISION}_all.deb" 1> /dev/null 2>&1 
 fi
 
 overlayfs_wrapper "cleanup"
-=======
-=======
-# Pack armbian-config and armbian-firmware
-if [[ ! -f ${DEB_STORAGE}/armbian-config_${REVISION}_all.deb ]]; then
-	compile_armbian-config
-
-	FULL=""
-	REPLACE="-full"
-	[[ ! -f $DEST/debs/armbian-firmware_${REVISION}_all.deb ]] && compile_firmware
-	FULL="-full"
-	REPLACE=""
-	[[ ! -f $DEST/debs/armbian-firmware${FULL}_${REVISION}_all.deb ]] && compile_firmware
-fi
-
->>>>>>> Fix merge upstream branch
-overlayfs_wrapper "cleanup"
-
-# extract kernel version from .deb package
-VER=$(dpkg --info "${DEB_STORAGE}/${CHOSEN_KERNEL}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
-VER="${VER/-$LINUXFAMILY/}"
-
-<<<<<<< HEAD
-UBOOT_VER=$(dpkg --info "${DEST}/debs/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
->>>>>>> Merge from upstream
-=======
-UBOOT_VER=$(dpkg --info "${DEB_STORAGE}/${CHOSEN_UBOOT}_${REVISION}_${ARCH}.deb" | grep Descr | awk '{print $(NF)}')
->>>>>>> Fix merge upstream branch
 
 # create board support package
 [[ -n $RELEASE && ! -f ${DEB_STORAGE}/$RELEASE/${CHOSEN_ROOTFS}_${REVISION}_${ARCH}.deb ]] && create_board_package
