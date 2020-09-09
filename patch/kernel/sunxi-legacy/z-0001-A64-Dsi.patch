@@ -1,0 +1,113 @@
+From ce22fbf427c78e20b53a61d62eebe7f3eae891ae Mon Sep 17 00:00:00 2001
+From: Gavin Bauer <gavinb@impro.net>
+Date: Wed, 9 Sep 2020 09:03:50 +0200
+Subject: [PATCH] A64-Dsi
+
+Signed-off-by: Gavin Bauer <gavinb@impro.net>
+---
+ .../allwinner/sun50i-a64-sopine-baseboard.dts | 38 +++++++++++++++++++
+ .../boot/dts/allwinner/sun50i-a64-sopine.dtsi | 18 +++++++++
+ 2 files changed, 56 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
+index a844c694f..4e8a12c83 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine-baseboard.dts
+@@ -46,6 +46,7 @@
+ /dts-v1/;
+ 
+ #include "sun50i-a64-sopine.dtsi"
++#include <dt-bindings/pwm/pwm.h>
+ 
+ / {
+ 	model = "SoPine with baseboard";
+@@ -61,6 +62,14 @@
+ 		stdout-path = "serial0:115200n8";
+ 	};
+ 
++	backlight: backlight {
++		compatible = "pwm-backlight";
++		pwms = <&r_pwm 0 50000 PWM_POLARITY_INVERTED>;
++		brightness-levels = <1 2 4 8 16 32 64 128 512>;
++		default-brightness-level = <1>;
++		enable-gpios = <&pio 7 10 GPIO_ACTIVE_HIGH>; /* LCD-BL-EN: PH10 */
++	};
++
+ 	hdmi-connector {
+ 		compatible = "hdmi-connector";
+ 		type = "a";
+@@ -104,6 +113,24 @@
+ 	status = "okay";
+ };
+ 
++&dphy {
++	status = "okay";
++};
++
++&dsi {
++	vcc-dsi-supply = <&reg_dldo1>;		/* VCC3V3-DSI */
++	status = "okay";
++
++	panel@0 {
++		compatible = "feiyang,fy07024di26a30d";
++		reg = <0>;
++		avdd-supply = <&reg_dc1sw>;	/* VCC-LCD */
++		dvdd-supply = <&reg_dldo2>;	/* VCC-MIPI */
++		reset-gpios = <&pio 3 24 GPIO_ACTIVE_HIGH>; /* LCD-RST: PD24 */
++		backlight = <&backlight>;
++	};
++};
++
+ &ehci0 {
+ 	status = "okay";
+ };
+@@ -201,6 +228,17 @@
+ 	regulator-name = "vcc-wifi";
+ };
+ 
++&reg_ldo_io0 {
++	regulator-min-microvolt = <2800000>;
++	regulator-max-microvolt = <2800000>;
++	regulator-name = "vcc-ctp";
++	status = "okay";
++};
++
++&r_pwm {
++	status = "okay";
++};
++
+ &simplefb_hdmi {
+ 	vcc-hdmi-supply = <&reg_dldo1>;
+ };
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi
+index e64f330ca..100d2199a 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-sopine.dtsi
+@@ -148,6 +148,24 @@
+ 	regulator-name = "vdd-sys";
+ };
+ 
++&reg_dldo1 {
++	regulator-min-mircovolt = <3300000>;
++	regulator-max-mircovolt = <3300000>;
++	regulator-name = "vcc-hdmi-dsi";
++};
++
++&reg_dldo2 {
++	regulator-min-microvolt = <3300000>;
++	regulator-max-microvolt = <3300000>;
++	regulator-name = "vcc-wifi";
++};
++
++&reg_dldo4 {
++	regulator-min-microvolt = <1800000>;
++	regulator-max-microvolt = <3300000>;
++	regulator-name = "vcc-wifi-io";
++}; 
++
+ &reg_eldo1 {
+ 	regulator-always-on;
+ 	regulator-min-microvolt = <1800000>;
+-- 
+Created with Armbian build tools https://github.com/armbian/build
+
