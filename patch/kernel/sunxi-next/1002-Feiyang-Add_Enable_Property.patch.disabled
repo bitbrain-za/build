@@ -1,0 +1,45 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+index 0c14da8b0..e7dc988da 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+@@ -1,5 +1,4 @@
+-/*
+- * Copyright (c) 2017 Icenowy Zheng <icenowy@aosc.xyz>
++/* Copyright (c) 2017 Icenowy Zheng <icenowy@aosc.xyz>
+  *
+  * Based on sun50i-a64-pine64.dts, which is:
+  *   Copyright (c) 2016 ARM Ltd.
+diff --git a/drivers/gpu/drm/panel/panel-feiyang-fy07024di26a30d.c b/drivers/gpu/drm/panel/panel-feiyang-fy07024di26a30d.c
+index e2a6c13c8..27dae4c59 100644
+--- a/drivers/gpu/drm/panel/panel-feiyang-fy07024di26a30d.c
++++ b/drivers/gpu/drm/panel/panel-feiyang-fy07024di26a30d.c
+@@ -26,6 +26,7 @@ struct feiyang {
+ 	struct regulator	*dvdd;
+ 	struct regulator	*avdd;
+ 	struct gpio_desc	*reset;
++	struct gpio_desc	*enable;
+ };
+ 
+ static inline struct feiyang *panel_to_feiyang(struct drm_panel *panel)
+@@ -207,6 +208,8 @@ static int feiyang_dsi_probe(struct mipi_dsi_device *dsi)
+ 	if (!ctx)
+ 		return -ENOMEM;
+ 
++	if (!dsi)
++		return -1;
+ 	mipi_dsi_set_drvdata(dsi, ctx);
+ 	ctx->dsi = dsi;
+ 
+@@ -232,6 +235,12 @@ static int feiyang_dsi_probe(struct mipi_dsi_device *dsi)
+ 		return PTR_ERR(ctx->reset);
+ 	}
+ 
++	ctx->enable = devm_gpiod_get(&dsi->dev, "enable", GPIOD_OUT_LOW);
++	if (IS_ERR(ctx->enable)) {
++		DRM_DEV_ERROR(&dsi->dev, "Couldn't get our enable GPIO\n");
++		return PTR_ERR(ctx->enable);
++	}
++
+ 	ctx->backlight = devm_of_find_backlight(&dsi->dev);
+ 	if (IS_ERR(ctx->backlight))
+ 		return PTR_ERR(ctx->backlight);

@@ -1,0 +1,13 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+index fd5a2b740..665b35211 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+@@ -74,7 +74,7 @@
+ 		pwms = <&r_pwm 0 50000 PWM_POLARITY_INVERTED>;
+ 		brightness-levels = <1 2 4 8 16 32 64 128 512>;
+ 		default-brightness-level = <8>;
+-		enable-gpios = <&pio 5 6 GPIO_ACTIVE_HIGH>; /* LCD-BL-EN: PF6 */
++		enable-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>; /* LCD-BL-EN: PF6 */
+ 		power-supply = <&vdd_bl>;
+ 	};
+ 

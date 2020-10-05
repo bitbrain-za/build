@@ -1,0 +1,25 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+index a1f9b1b30..fd5a2b740 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+@@ -62,12 +62,20 @@
+ 		stdout-path = "serial0:115200n8";
+ 	};
+ 
++	vdd_bl: regulator@0 {
++		compatible = "regulator-fixed";
++		regulator-name = "bl-3v3";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++	};
++
+ 	backlight: backlight {
+ 		compatible = "pwm-backlight";
+ 		pwms = <&r_pwm 0 50000 PWM_POLARITY_INVERTED>;
+ 		brightness-levels = <1 2 4 8 16 32 64 128 512>;
+ 		default-brightness-level = <8>;
+ 		enable-gpios = <&pio 5 6 GPIO_ACTIVE_HIGH>; /* LCD-BL-EN: PF6 */
++		power-supply = <&vdd_bl>;
+ 	};
+ 
+ 	wiegand_green_led {

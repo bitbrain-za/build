@@ -1,0 +1,60 @@
+diff --git a/drivers/gpu/drm/panel/panel-feiyang-fy07024di26a30d.c b/drivers/gpu/drm/panel/panel-feiyang-fy07024di26a30d.c
+index dabf59e0f..e2a6c13c8 100644
+--- a/drivers/gpu/drm/panel/panel-feiyang-fy07024di26a30d.c
++++ b/drivers/gpu/drm/panel/panel-feiyang-fy07024di26a30d.c
+@@ -54,6 +54,7 @@ static int feiyang_prepare(struct drm_panel *panel)
+ 	unsigned int i;
+ 	int ret;
+ 
++	printk("mipi-dsi DEBUG - Entering prepare\n");
+ 	ret = regulator_enable(ctx->dvdd);
+ 	if (ret)
+ 		return ret;
+@@ -98,6 +99,7 @@ static int feiyang_enable(struct drm_panel *panel)
+ {
+ 	struct feiyang *ctx = panel_to_feiyang(panel);
+ 
++	printk("mipi_dsi DEBUG - Entering Enable\n");
+ 	/* T12 (video & logic signal rise + backlight rise) T12 >= 200ms */
+ 	msleep(200);
+ 
+@@ -111,6 +113,7 @@ static int feiyang_disable(struct drm_panel *panel)
+ {
+ 	struct feiyang *ctx = panel_to_feiyang(panel);
+ 
++	printk("mipi_dsi DEBUG - Entering Disable\n");
+ 	backlight_disable(ctx->backlight);
+ 	return mipi_dsi_dcs_set_display_off(ctx->dsi);
+ }
+@@ -120,6 +123,7 @@ static int feiyang_unprepare(struct drm_panel *panel)
+ 	struct feiyang *ctx = panel_to_feiyang(panel);
+ 	int ret;
+ 
++	printk("mipi_dsi DEBUG - Entering Unprepare\n");
+ 	ret = mipi_dsi_dcs_set_display_off(ctx->dsi);
+ 	if (ret < 0)
+ 		DRM_DEV_ERROR(panel->dev, "failed to set display off: %d\n",
+@@ -168,6 +172,7 @@ static int feiyang_get_modes(struct drm_panel *panel)
+ 	struct feiyang *ctx = panel_to_feiyang(panel);
+ 	struct drm_display_mode *mode;
+ 
++	printk("mipi_dsi DEBUG - Entering Get_Modes\n");
+ 	mode = drm_mode_duplicate(panel->drm, &feiyang_default_mode);
+ 	if (!mode) {
+ 		DRM_DEV_ERROR(&ctx->dsi->dev, "failed to add mode %ux%ux@%u\n",
+@@ -197,6 +202,7 @@ static int feiyang_dsi_probe(struct mipi_dsi_device *dsi)
+ 	struct feiyang *ctx;
+ 	int ret;
+ 
++	printk("mipi_dsi DEBUG - Entering dsi_probe\n");
+ 	ctx = devm_kzalloc(&dsi->dev, sizeof(*ctx), GFP_KERNEL);
+ 	if (!ctx)
+ 		return -ENOMEM;
+@@ -245,6 +251,7 @@ static int feiyang_dsi_remove(struct mipi_dsi_device *dsi)
+ {
+ 	struct feiyang *ctx = mipi_dsi_get_drvdata(dsi);
+ 
++	printk("mipi_dsi DEBUG - Entering dsi_remove\n");
+ 	mipi_dsi_detach(dsi);
+ 	drm_panel_remove(&ctx->panel);
+ 

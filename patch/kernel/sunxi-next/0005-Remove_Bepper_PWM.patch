@@ -1,0 +1,18 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+index 724ab41ba..e146d9660 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+@@ -247,13 +247,6 @@
+ 			default-state = "off";
+ 		};
+ 			};
+-
+-	beeper {
+-		compatible = "pwm-beeper";
+-		pinctrl-names = "default";
+-		pinctrl-0 = <&r_pwm_pin>;
+-		pwms = <&r_pwm 0 4000 0>;
+-	};
+ };
+ 
+ &ac_power_supply {

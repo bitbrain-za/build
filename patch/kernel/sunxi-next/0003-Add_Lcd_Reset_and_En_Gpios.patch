@@ -1,0 +1,14 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+index bb4dac063..75dde4820 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+@@ -293,7 +293,8 @@
+ 		reg = <0>;
+ 		avdd-supply = <&reg_dc1sw>;	/* VCC-LCD */
+ 		dvdd-supply = <&reg_dldo2>;	/* VCC-MIPI */
+-		/*reset-gpios = <&pio 3 24 GPIO_ACTIVE_HIGH>; /* LCD-RST: PD24 */
++		reset-gpios = <&pio 1 4 GPIO_ACTIVE_HIGH>; /* LCD-RST: PB4 */
++		enable-gpios = <&pio 5 4 GPIO_ACTIVE_HIGH>; /* LCD_EN: PF4 */
+ 		backlight = <&backlight>;
+ 	};
+ };

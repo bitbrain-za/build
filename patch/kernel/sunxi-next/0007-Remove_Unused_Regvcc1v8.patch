@@ -1,0 +1,18 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+index e7dc988da..a1f9b1b30 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+@@ -70,13 +70,6 @@
+ 		enable-gpios = <&pio 5 6 GPIO_ACTIVE_HIGH>; /* LCD-BL-EN: PF6 */
+ 	};
+ 
+-	reg_vcc1v8: vcc1v8 {
+-		compatible = "regulator-fixed";
+-		regulator-name = "vcc1v8";
+-		regulator-min-microvolt = <1800000>;
+-		regulator-max-microvolt = <1800000>;
+-	};
+-
+ 	wiegand_green_led {
+ 		compatible = "gpio-keys";
+ 		#address-cells = <1>;

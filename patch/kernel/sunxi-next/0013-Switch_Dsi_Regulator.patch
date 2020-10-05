@@ -1,0 +1,15 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+index b09331ee1..0dabb2f26 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+@@ -274,9 +274,8 @@
+ 	panel@0 {
+ 		compatible = "ilitek,ili9881c", "bananapi,lhr050h41";
+ 		reg = <0>;
+-		power-supply = <&reg_dc1sw>;	/* VCC-LCD */
++		power-supply = <&reg_dldo1>;	/* VCC-LCD */
+ 		reset-gpios = <&pio 1 4 GPIO_ACTIVE_LOW>; /* LCD-RST: PB4 */
+-		enable-gpios = <&pio 5 4 GPIO_ACTIVE_LOW>; /* LCD_EN: PF4 */
+ 		backlight = <&backlight>;
+ 	};
+ };

@@ -1,0 +1,15 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+index e7d1973d0..41e429b4b 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+@@ -72,8 +72,8 @@
+ 	backlight: backlight {
+ 		compatible = "pwm-backlight";
+ 		pwms = <&r_pwm 0 50000 PWM_POLARITY_INVERTED>;
+-		brightness-levels = <1 2 4 8 16 32 64 128 512>;
+-		default-brightness-level = <8>;
++		brightness-levels = <0 5 10 15 20 30 40 55 70 85 100>;
++		default-brightness-level = <85>;
+ 		enable-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>; /* LCD-BL-EN: PF6 */
+ 		power-supply = <&vdd_bl>;
+ 	};

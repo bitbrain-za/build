@@ -4,7 +4,7 @@ BOOTDELAY=1
 
 BOOTSOURCE=$MAINLINE_UBOOT_SOURCE
 BOOTDIR=$MAINLINE_UBOOT_DIR
-BOOTBRANCH='tag:v2019.04'
+BOOTBRANCH='branch:master'
 BOOTPATCHDIR='u-boot-sunxi'
 UBOOT_USE_GCC='> 7.0'
 UBOOT_TARGET_MAP=';;spl/sunxi-spl.bin u-boot.itb'
@@ -35,11 +35,11 @@ case $BRANCH in
 		ATF_USE_GCC='> 6.3'
 		ATF_TARGET_MAP="PLAT=$ATF_PLAT DEBUG=1 bl31;;build/$ATF_PLAT/debug/bl31.bin"
 
-		#KERNELSOURCE=$MAINLINE_KERNEL_SOURCE
-		KERNELSOURCE='http://github.com/amarula/linux-amarula'
+		KERNELSOURCE=$MAINLINE_KERNEL_SOURCE
+		#KERNELSOURCE='http://github.com/amarula/linux-amarula'
 		#KERNELSOURCE='https://github.com/icenowy/linux'
 		#KERNELBRANCH='branch:linux-4.19.y'
-		KERNELBRANCH='branch:v9-a64-dsi'
+		KERNELBRANCH='branch:master'
 		#KERNELBRANCH='branch:aosc-sunxi64-5.1-rc4-pinetab'
 		KERNELDIR=$MAINLINE_KERNEL_DIR
 		KERNELPATCHDIR='sunxi-next'

@@ -1,0 +1,17 @@
+diff --git a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+index 41e429b4b..421f9f3ef 100644
+--- a/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-a64-eureka.dts
+@@ -271,10 +271,9 @@
+ 	status = "okay";
+ 
+ 	panel@0 {
+-		compatible = "feiyang,fy07024di26a30d";
++		compatible = "ilitek,ili9881c", "bananapi,lhr050h41";
+ 		reg = <0>;
+-		avdd-supply = <&reg_dc1sw>;	/* VCC-LCD */
+-		dvdd-supply = <&reg_dldo2>;	/* VCC-MIPI */
++		power-supply = <&reg_dc1sw>;	/* VCC-LCD */
+ 		reset-gpios = <&pio 1 4 GPIO_ACTIVE_LOW>; /* LCD-RST: PB4 */
+ 		enable-gpios = <&pio 5 4 GPIO_ACTIVE_LOW>; /* LCD_EN: PF4 */
+ 		backlight = <&backlight>;
